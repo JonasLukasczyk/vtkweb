@@ -5,32 +5,73 @@ from trame.widgets import vuetify3 as v3
 
 
 PROPERTY_STYLE = """
-.vtkweb-select-box {
+.vtkweb-section-title {
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    opacity: 0.8;
+}
+
+.vtkweb-prop-list {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    gap: 4px;
 
     width: 100%;
     min-width: 0;
-    height: 28px;
+}
 
-    border: 1px solid rgba(128, 128, 128, 0.5);
+.vtkweb-prop-item {
+    width: 100%;
+    min-width: 0;
+}
+
+/* Common compact input */
+
+.vtkweb-input-box,
+.vtkweb-vector-box,
+.vtkweb-select-box,
+.vtkweb-list-row,
+.vtkweb-bool-row {
+    width: 100%;
+    min-width: 0;
+    min-height: 28px;
+
+    border: 1px solid rgba(128,128,128,0.5);
     border-radius: 4px;
 
-    background: rgba(128, 128, 128, 0.08);
+    background: rgba(128,128,128,0.08);
 
     box-sizing: border-box;
-    overflow: hidden;
 }
 
+.vtkweb-input-box:hover,
+.vtkweb-vector-box:hover,
 .vtkweb-select-box:hover {
-    border-color: rgba(128, 128, 128, 0.8);
+    border-color: rgba(128,128,128,0.8);
 }
 
-.vtkweb-select-box:focus-within {
+.vtkweb-input-box:focus-within,
+.vtkweb-vector-box:focus-within,
+.vtkweb-select-box:focus-within,
+.vtkweb-list-row:focus-within {
     border-color: #4f7df3;
-    background: rgba(79, 125, 243, 0.06);
+    background: rgba(79,125,243,0.06);
 }
 
+/* Scalar */
+
+.vtkweb-input-box {
+    display: flex;
+    align-items: center;
+
+    height: 28px;
+    overflow: hidden;
+
+    cursor: text;
+}
+
+.vtkweb-input-prefix,
 .vtkweb-select-prefix {
     flex: 0 0 auto;
 
@@ -44,21 +85,201 @@ PROPERTY_STYLE = """
     user-select: none;
 }
 
+.vtkweb-input-box input {
+    flex: 1 1 auto;
+
+    min-width: 0;
+    height: 26px;
+
+    padding: 0 8px;
+
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+
+    background: transparent;
+    color: inherit;
+
+    font: inherit;
+    font-size: 12px;
+
+    text-align: right;
+
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+/* Vector */
+
+.vtkweb-vector-box {
+    display: flex;
+    align-items: center;
+
+    height: 28px;
+    overflow: hidden;
+}
+
+.vtkweb-vector-fields {
+    flex: 1 1 auto;
+
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+
+    min-width: 0;
+    height: 100%;
+}
+
+.vtkweb-vector-fields input {
+    min-width: 0;
+    width: 100%;
+    height: 100%;
+
+    padding: 0 5px;
+
+    border: 0;
+    border-left:
+        1px solid rgba(128,128,128,0.25);
+
+    outline: 0;
+
+    background: transparent;
+    color: inherit;
+
+    font: inherit;
+    font-size: 12px;
+    text-align: right;
+
+    box-sizing: border-box;
+
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+/* Boolean */
+
+.vtkweb-bool-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    height: 28px;
+
+    padding: 0 8px;
+}
+
+/* List */
+
+.vtkweb-list-property {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    width: 100%;
+}
+
+.vtkweb-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    height: 26px;
+
+    padding-left: 8px;
+
+    font-size: 12px;
+    opacity: 0.82;
+}
+
+.vtkweb-list-add {
+    height: 24px;
+
+    padding: 0 8px;
+
+    border: 1px solid rgba(128,128,128,0.5);
+    border-radius: 4px;
+
+    background: rgba(128,128,128,0.08);
+    color: inherit;
+
+    cursor: pointer;
+}
+
+.vtkweb-list-row {
+    display: flex;
+    align-items: center;
+
+    height: 28px;
+
+    overflow: hidden;
+}
+
+.vtkweb-list-index {
+    padding: 0 7px;
+
+    font-size: 11px;
+    opacity: 0.45;
+
+    user-select: none;
+}
+
+.vtkweb-list-row input {
+    flex: 1 1 auto;
+
+    min-width: 0;
+    height: 26px;
+
+    padding: 0 8px;
+
+    border: 0;
+    outline: 0;
+
+    background: transparent;
+    color: inherit;
+
+    font: inherit;
+    font-size: 12px;
+    text-align: right;
+}
+
+.vtkweb-list-remove {
+    width: 28px;
+    align-self: stretch;
+
+    border: 0;
+    border-left:
+        1px solid rgba(128,128,128,0.25);
+
+    background: transparent;
+    color: inherit;
+
+    cursor: pointer;
+}
+
+/* Select */
+
+.vtkweb-select-box {
+    display: flex;
+    align-items: center;
+
+    height: 28px;
+
+    overflow: hidden;
+}
+
 .vtkweb-select-control {
     flex: 1 1 auto;
+
     min-width: 0;
     width: 0;
 }
 
-.vtkweb-select-control .v-input__control {
+.vtkweb-select-control .v-input__control,
+.vtkweb-select-control .v-field {
     min-height: 26px !important;
     height: 26px !important;
 }
 
 .vtkweb-select-control .v-field {
-    min-height: 26px !important;
-    height: 26px !important;
-
     padding: 0 !important;
 
     background: transparent !important;
@@ -78,254 +299,15 @@ PROPERTY_STYLE = """
     font-size: 12px;
 }
 
-.vtkweb-select-control .v-field__append-inner {
-    min-height: 26px !important;
-    padding-top: 0 !important;
-    align-items: center;
-}
-
-.vtkweb-section-title {
-    margin-bottom: 6px;
-    font-size: 12px;
-    font-weight: 600;
-    opacity: 0.8;
-}
-
-.vtkweb-prop-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    width: 100%;
-    min-width: 0;
-}
-
-.vtkweb-prop-item {
-    width: 100%;
-    min-width: 0;
-}
-
-/* ------------------------------------------------------------------------- */
-/* Scalar / string input                                                    */
-/* ------------------------------------------------------------------------- */
-
-.vtkweb-input-box {
-    display: flex;
-    align-items: center;
-
-    width: 100%;
-    min-width: 0;
-    height: 28px;
-
-    border: 1px solid rgba(128, 128, 128, 0.5);
-    border-radius: 4px;
-
-    background: rgba(128, 128, 128, 0.08);
-
-    box-sizing: border-box;
-    overflow: hidden;
-
-    cursor: text;
-}
-
-.vtkweb-input-box:hover {
-    border-color: rgba(128, 128, 128, 0.8);
-}
-
-.vtkweb-input-box:focus-within {
-    border-color: #4f7df3;
-    background: rgba(79, 125, 243, 0.06);
-}
-
-.vtkweb-input-prefix {
-    flex: 0 0 auto;
-
-    padding: 0 6px 0 8px;
-
-    font-size: 12px;
-    line-height: 26px;
-
-    opacity: 0.82;
-
-    white-space: nowrap;
-
-    cursor: text;
-    user-select: none;
-}
-
-.vtkweb-input-box input {
-    flex: 1 1 auto;
-    min-width: 0;
-    width: auto;
-    height: 26px;
-
-    margin: 0;
-    padding: 0 8px;
-
-    border: 0 !important;
-    border-radius: 0;
-    outline: 0 !important;
-    box-shadow: none !important;
-
-    background: transparent !important;
-    color: inherit;
-
-    font: inherit;
-    font-size: 12px;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-
-    box-sizing: border-box;
-}
-
-.vtkweb-input-box input:focus,
-.vtkweb-input-box input:focus-visible {
-    border: 0 !important;
-    outline: 0 !important;
-    box-shadow: none !important;
-}
-
-.vtkweb-input-box input[type="number"] {
-    appearance: textfield;
-    -moz-appearance: textfield;
-}
-
-.vtkweb-input-box input[type="number"]::-webkit-inner-spin-button,
-.vtkweb-input-box input[type="number"]::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-/* ------------------------------------------------------------------------- */
-/* Vector input                                                              */
-/* ------------------------------------------------------------------------- */
-
-.vtkweb-vector-box {
-    display: flex;
-    align-items: center;
-
-    width: 100%;
-    min-width: 0;
-    height: 28px;
-
-    border: 1px solid rgba(128, 128, 128, 0.5);
-    border-radius: 4px;
-
-    background: rgba(128, 128, 128, 0.08);
-
-    box-sizing: border-box;
-    overflow: hidden;
-}
-
-.vtkweb-vector-box:hover {
-    border-color: rgba(128, 128, 128, 0.8);
-}
-
-.vtkweb-vector-box:focus-within {
-    border-color: #4f7df3;
-    background: rgba(79, 125, 243, 0.06);
-}
-
-.vtkweb-vector-fields {
-    flex: 1 1 auto;
-
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-
-    min-width: 0;
-    height: 100%;
-}
-
-.vtkweb-vector-fields input {
-    min-width: 0;
-    width: 100%;
-    height: 100%;
-
-    margin: 0;
-    padding: 0 5px;
-
-    border: 0 !important;
-    border-left: 1px solid rgba(128, 128, 128, 0.25) !important;
-    border-radius: 0;
-    outline: 0 !important;
-    box-shadow: none !important;
-
-    background: transparent !important;
-    color: inherit;
-
-    font: inherit;
-    font-size: 12px;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-
-    box-sizing: border-box;
-
-    appearance: textfield;
-    -moz-appearance: textfield;
-}
-
-.vtkweb-vector-fields input:focus,
-.vtkweb-vector-fields input:focus-visible {
-    outline: 0 !important;
-    box-shadow: none !important;
-}
-
-.vtkweb-vector-fields input::-webkit-inner-spin-button,
-.vtkweb-vector-fields input::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-/* ------------------------------------------------------------------------- */
-/* Boolean                                                                   */
-/* ------------------------------------------------------------------------- */
-
-.vtkweb-bool-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-
-    width: 100%;
-    min-width: 0;
-    height: 28px;
-
-    padding: 0 8px;
-
-    border: 1px solid rgba(128, 128, 128, 0.5);
-    border-radius: 4px;
-
-    background: rgba(128, 128, 128, 0.08);
-
-    box-sizing: border-box;
-}
-
-.vtkweb-bool-row:hover {
-    border-color: rgba(128, 128, 128, 0.8);
-}
-
-.vtkweb-bool-row:focus-within {
-    border-color: #4f7df3;
-}
-
-.vtkweb-bool-label {
-    min-width: 0;
-
-    font-size: 12px;
-    opacity: 0.82;
-
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-
-    cursor: pointer;
-}
-
-/* ------------------------------------------------------------------------- */
-/* Scalar color range                                                        */
-/* ------------------------------------------------------------------------- */
+/* Color range */
 
 .vtkweb-range-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns:
+        minmax(0,1fr)
+        minmax(0,1fr)
+        auto;
+
     gap: 6px;
 
     width: 100%;
@@ -339,11 +321,13 @@ PROPERTY_STYLE = """
 
     padding: 0 7px;
 
-    border: 1px solid rgba(128, 128, 128, 0.5);
+    border:
+        1px solid rgba(128,128,128,0.5);
     border-radius: 4px;
     outline: none;
 
-    background: rgba(128, 128, 128, 0.08);
+    background:
+        rgba(128,128,128,0.08);
     color: inherit;
 
     font-size: 12px;
@@ -362,7 +346,11 @@ def build_properties_view(ctrl) -> None:
     with v3.VCol(
         cols=3,
         classes="pa-3",
-        style="height:100vh;overflow-y:auto;min-width:0;",
+        style=(
+            "height:100vh;"
+            "overflow-y:auto;"
+            "min-width:0;"
+        ),
     ):
         v3.VLabel("Properties")
 
@@ -375,15 +363,44 @@ def build_properties_view(ctrl) -> None:
                 classes="pa-0 mb-3",
             )
 
-            # -----------------------------------------------------------------
+            # -------------------------------------------------------------
             # Filter
-            # -----------------------------------------------------------------
+            # -------------------------------------------------------------
 
             html.Div(
                 "Filter",
                 classes="vtkweb-section-title",
             )
 
+            # Input arrays
+            with html.Div(
+                classes="vtkweb-prop-list mb-2",
+            ):
+                with html.Div(
+                    v_for="array in input_arrays",
+                    key="array.index",
+                    classes="vtkweb-select-box",
+                ):
+                    html.Span(
+                        "{{ array.label }}",
+                        classes="vtkweb-select-prefix",
+                    )
+
+                    v3.VSelect(
+                        items=("array.items",),
+                        model_value=("array.value",),
+                        clearable=True,
+                        density="compact",
+                        hide_details=True,
+                        variant="plain",
+                        classes="vtkweb-select-control",
+                        update_modelValue=(
+                            ctrl.set_input_array,
+                            "[array.index, $event]",
+                        ),
+                    )
+
+            # Elevation presets
             with v3.VRow(
                 v_if=(
                     "active_node_type === "
@@ -404,23 +421,25 @@ def build_properties_view(ctrl) -> None:
                             ),
                         )
 
+            # Generic properties
             with html.Div(
                 classes="vtkweb-prop-list",
             ):
                 with html.Div(
-                    v_for="property in filter_properties",
+                    v_for=(
+                        "property in "
+                        "filter_properties"
+                    ),
                     key="property.name",
                     classes="vtkweb-prop-item",
                 ):
 
-                    # Boolean
                     with html.Label(
                         v_if="property.kind === 'bool'",
                         classes="vtkweb-bool-row",
                     ):
                         html.Span(
-                            "{{ property.label }}",
-                            classes="vtkweb-bool-label",
+                            "{{ property.label }}"
                         )
 
                         html.Input(
@@ -431,13 +450,12 @@ def build_properties_view(ctrl) -> None:
                             change=(
                                 ctrl.set_filter_property,
                                 (
-                                    "[property.name, "
+                                    "[property.name,"
                                     "$event.target.checked]"
                                 ),
                             ),
                         )
 
-                    # Scalar / string
                     with html.Label(
                         v_if=(
                             "property.kind === 'int' || "
@@ -464,13 +482,12 @@ def build_properties_view(ctrl) -> None:
                             change=(
                                 ctrl.set_filter_property,
                                 (
-                                    "[property.name, "
+                                    "[property.name,"
                                     "$event.target.value]"
                                 ),
                             ),
                         )
 
-                    # Vector
                     with html.Div(
                         v_if="property.kind === 'vector'",
                         classes="vtkweb-vector-box",
@@ -485,7 +502,7 @@ def build_properties_view(ctrl) -> None:
                         ):
                             html.Input(
                                 v_for=(
-                                    "(component, index) "
+                                    "(component,index) "
                                     "in property.value"
                                 ),
                                 key="index",
@@ -495,16 +512,80 @@ def build_properties_view(ctrl) -> None:
                                 change=(
                                     ctrl.set_filter_vector_component,
                                     (
-                                        "[property.name, "
-                                        "index, "
+                                        "[property.name,"
+                                        "index,"
                                         "$event.target.value]"
                                     ),
                                 ),
                             )
 
-            # -----------------------------------------------------------------
+                    with html.Div(
+                        v_if=(
+                            "property.kind === "
+                            "'scalar_list'"
+                        ),
+                        classes="vtkweb-list-property",
+                    ):
+                        with html.Div(
+                            classes="vtkweb-list-header",
+                        ):
+                            html.Span(
+                                "{{ property.label }}"
+                            )
+
+                            html.Button(
+                                "+",
+                                type="button",
+                                classes="vtkweb-list-add",
+                                click=(
+                                    ctrl.add_filter_list_value,
+                                    "[property.name]",
+                                ),
+                            )
+
+                        with html.Div(
+                            v_for=(
+                                "(value,index) "
+                                "in property.value"
+                            ),
+                            key="index",
+                            classes="vtkweb-list-row",
+                        ):
+                            html.Span(
+                                "{{ index }}",
+                                classes="vtkweb-list-index",
+                            )
+
+                            html.Input(
+                                type="number",
+                                step="any",
+                                value=("value",),
+                                change=(
+                                    ctrl.set_filter_list_value,
+                                    (
+                                        "[property.name,"
+                                        "index,"
+                                        "$event.target.value]"
+                                    ),
+                                ),
+                            )
+
+                            html.Button(
+                                "×",
+                                type="button",
+                                classes="vtkweb-list-remove",
+                                click=(
+                                    ctrl.remove_filter_list_value,
+                                    (
+                                        "[property.name,"
+                                        "index]"
+                                    ),
+                                ),
+                            )
+
+            # -------------------------------------------------------------
             # Display
-            # -----------------------------------------------------------------
+            # -------------------------------------------------------------
 
             v3.VDivider(classes="my-4")
 
@@ -533,9 +614,10 @@ def build_properties_view(ctrl) -> None:
                         "[$event]",
                     ),
                 )
-            # -----------------------------------------------------------------
+
+            # -------------------------------------------------------------
             # Coloring
-            # -----------------------------------------------------------------
+            # -------------------------------------------------------------
 
             v3.VDivider(classes="my-4")
 

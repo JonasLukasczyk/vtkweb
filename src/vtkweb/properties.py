@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import vtk
 
@@ -13,6 +13,7 @@ class PropertyDescriptor:
     kind: str
     value: Any
     size: int | None = None
+    setter: Callable[[Any], None] | None = None
 
 
 IGNORED_PROPERTIES = {
@@ -31,6 +32,13 @@ def inspect_properties(
 ) -> list[PropertyDescriptor]:
     properties = []
 
+    contour_values = _inspect_contour_values(
+        algorithm
+    )
+
+    if contour_values is not None:
+        properties.append(contour_values)
+
     for getter_name in dir(algorithm):
         if not getter_name.startswith("Get"):
             continue
@@ -40,8 +48,25 @@ def inspect_properties(
         if not name or name in IGNORED_PROPERTIES:
             continue
 
-        getter = getattr(algorithm, getter_name, None)
-        setter = getattr(algorithm, f"Set{name}", None)
+        # Hidden because ContourValues represents this
+        # information more naturally.
+        if (
+            contour_values is not None
+            and name == "NumberOfContours"
+        ):
+            continue
+
+        getter = getattr(
+            algorithm,
+            getter_name,
+            None,
+        )
+
+        setter = getattr(
+            algorithm,
+            f"Set{name}",
+            None,
+        )
 
         if not callable(getter) or not callable(setter):
             continue
@@ -49,6 +74,8 @@ def inspect_properties(
         try:
             value = getter()
         except Exception:
+            # Indexed getters such as GetValue(i)
+            # land here and are handled separately.
             continue
 
         kind = _property_kind(
@@ -66,7 +93,11 @@ def inspect_properties(
                 label=_make_label(name),
                 kind=kind,
                 value=value,
-                size=len(value) if kind == "vector" else None,
+                size=(
+                    len(value)
+                    if kind == "vector"
+                    else None
+                ),
             )
         )
 
@@ -81,6 +112,10 @@ def set_property(
     descriptor: PropertyDescriptor,
     value,
 ) -> None:
+    if descriptor.setter is not None:
+        descriptor.setter(value)
+        return
+
     setter = getattr(
         algorithm,
         f"Set{descriptor.name}",
@@ -107,14 +142,75 @@ def set_property(
         )
 
 
+def _inspect_contour_values(
+    algorithm: vtk.vtkAlgorithm,
+) -> PropertyDescriptor | None:
+    methods = (
+        "GetNumberOfContours",
+        "SetNumberOfContours",
+        "GetValue",
+        "SetValue",
+    )
+
+    if not all(
+        callable(getattr(algorithm, name, None))
+        for name in methods
+    ):
+        return None
+
+    values = [
+        float(algorithm.GetValue(i))
+        for i in range(
+            algorithm.GetNumberOfContours()
+        )
+    ]
+
+    def set_values(new_values) -> None:
+        values = [
+            float(value)
+            for value in new_values
+        ]
+
+        algorithm.SetNumberOfContours(
+            len(values)
+        )
+
+        for i, value in enumerate(values):
+            algorithm.SetValue(
+                i,
+                value,
+            )
+
+    return PropertyDescriptor(
+        name="ContourValues",
+        label="Contour Values",
+        kind="scalar_list",
+        value=values,
+        size=len(values),
+        setter=set_values,
+    )
+
+
 def _property_kind(
     algorithm,
     name: str,
     value,
 ) -> str | None:
     if (
-        callable(getattr(algorithm, f"{name}On", None))
-        and callable(getattr(algorithm, f"{name}Off", None))
+        callable(
+            getattr(
+                algorithm,
+                f"{name}On",
+                None,
+            )
+        )
+        and callable(
+            getattr(
+                algorithm,
+                f"{name}Off",
+                None,
+            )
+        )
     ):
         return "bool"
 

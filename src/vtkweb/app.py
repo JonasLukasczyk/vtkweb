@@ -8,32 +8,87 @@ from vtkweb.rendering import RenderManager
 from vtkweb.ui import build_ui
 
 
-server = get_server(
-    client_type="vue3"
-)
+server = get_server(client_type="vue3")
 
 catalog = AlgorithmCatalog()
 
+print(
+    f"Discovered {len(catalog.algorithms)} algorithms"
+)
+
 pipeline = PipelineGraph()
 
-sphere = pipeline.add_node(
-    vtk.vtkSphereSource(),
-    name="Sphere",
+rt = pipeline.add_node(
+    vtk.vtkRTAnalyticSource(),
+    name="RT Analytic Source",
     visible=True,
 )
 
-elevation = pipeline.add_node(
-    vtk.vtkElevationFilter(),
-    name="Elevation",
+contour = pipeline.add_node(
+    vtk.vtkContourFilter(),
+    name="Contour",
+    visible=True,
 )
 
 pipeline.connect(
-    sphere.id,
-    elevation.id,
+    rt.id,
+    contour.id,
 )
 
-sphere.algorithm.SetThetaResolution(48)
-sphere.algorithm.SetPhiResolution(48)
+# # -------------------------------------------------------------------------
+# # Hard-coded contour setup for debugging
+# # -------------------------------------------------------------------------
+#
+# rt.algorithm.Update()
+#
+# rt_output = rt.algorithm.GetOutput()
+# rt_data = rt_output.GetPointData().GetArray("RTData")
+#
+# print(
+#     "RT source points:",
+#     rt_output.GetNumberOfPoints(),
+# )
+#
+# print(
+#     "RTData range:",
+#     rt_data.GetRange(),
+# )
+#
+# minimum, maximum = rt_data.GetRange()
+# iso_value = 0.5 * (minimum + maximum)
+#
+# contour.algorithm.SetInputArrayToProcess(
+#     0,
+#     0,
+#     0,
+#     vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS,
+#     "RTData",
+# )
+#
+# contour.algorithm.SetNumberOfContours(1)
+# contour.algorithm.SetValue(
+#     0,
+#     iso_value,
+# )
+#
+# print(
+#     "Contour value:",
+#     contour.algorithm.GetValue(0),
+# )
+#
+# contour.algorithm.Update()
+#
+# contour_output = contour.algorithm.GetOutput()
+#
+# print(
+#     "Contour output points:",
+#     contour_output.GetNumberOfPoints(),
+# )
+#
+# print(
+#     "Contour output cells:",
+#     contour_output.GetNumberOfCells(),
+# )
 
 rendering = RenderManager(pipeline)
 

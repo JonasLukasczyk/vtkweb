@@ -16,7 +16,10 @@ class Representation:
 
     array_name: str | None = None
     association: str = "point"
-    scalar_range: tuple[float, float] | None = None
+
+    scalar_range: (
+        tuple[float, float] | None
+    ) = None
 
 
 class RenderManager:
@@ -28,11 +31,17 @@ class RenderManager:
 
         self.renderer = vtk.vtkRenderer()
 
-        self.render_window = vtk.vtkRenderWindow()
+        self.render_window = (
+            vtk.vtkRenderWindow()
+        )
+
         self.render_window.AddRenderer(
             self.renderer
         )
-        self.render_window.SetOffScreenRendering(1)
+
+        self.render_window.SetOffScreenRendering(
+            1
+        )
 
         self.representations: dict[
             str,
@@ -40,7 +49,9 @@ class RenderManager:
         ] = {}
 
         for node in pipeline.nodes.values():
-            self.add_representation(node.id)
+            self.add_representation(
+                node.id
+            )
 
         self.renderer.ResetCamera()
 
@@ -48,17 +59,24 @@ class RenderManager:
         self,
         node_id: str,
     ) -> Representation:
-        node = self.pipeline.nodes[node_id]
+        node = self.pipeline.nodes[
+            node_id
+        ]
 
         mapper = vtk.vtkDataSetMapper()
+
         mapper.SetInputConnection(
             node.algorithm.GetOutputPort()
         )
+
         mapper.ScalarVisibilityOff()
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.SetVisibility(node.visible)
+
+        actor.SetVisibility(
+            node.visible
+        )
 
         self.renderer.AddActor(actor)
 
@@ -78,7 +96,9 @@ class RenderManager:
         node_id: str,
     ) -> None:
         representation = (
-            self.representations.pop(node_id)
+            self.representations.pop(
+                node_id
+            )
         )
 
         self.renderer.RemoveActor(
@@ -96,13 +116,17 @@ class RenderManager:
 
         self.representations[
             node_id
-        ].actor.SetVisibility(visible)
+        ].actor.SetVisibility(
+            visible
+        )
 
     def toggle_visibility(
         self,
         node_id: str,
     ) -> None:
-        node = self.pipeline.nodes[node_id]
+        node = self.pipeline.nodes[
+            node_id
+        ]
 
         self.set_visibility(
             node_id,
@@ -114,13 +138,17 @@ class RenderManager:
         node_id: str,
         mode: str,
     ) -> None:
-        representation = self.representations[
-            node_id
-        ]
+        representation = (
+            self.representations[node_id]
+        )
 
-        representation.representation_mode = mode
+        representation.representation_mode = (
+            mode
+        )
 
-        prop = representation.actor.GetProperty()
+        prop = (
+            representation.actor.GetProperty()
+        )
 
         if mode == "wireframe":
             prop.SetRepresentationToWireframe()
@@ -137,7 +165,9 @@ class RenderManager:
 
         algorithm.Update()
 
-        data = algorithm.GetOutputDataObject(0)
+        data = algorithm.GetOutputDataObject(
+            0
+        )
 
         result = {
             "point": [],
@@ -153,18 +183,26 @@ class RenderManager:
         for i in range(
             point_data.GetNumberOfArrays()
         ):
-            name = point_data.GetArrayName(i)
+            name = (
+                point_data.GetArrayName(i)
+            )
 
             if name:
-                result["point"].append(name)
+                result["point"].append(
+                    name
+                )
 
         for i in range(
             cell_data.GetNumberOfArrays()
         ):
-            name = cell_data.GetArrayName(i)
+            name = (
+                cell_data.GetArrayName(i)
+            )
 
             if name:
-                result["cell"].append(name)
+                result["cell"].append(
+                    name
+                )
 
         return result
 
@@ -174,14 +212,18 @@ class RenderManager:
         array_name: str | None,
         association: str = "point",
     ) -> None:
-        representation = self.representations[
-            node_id
-        ]
+        representation = (
+            self.representations[node_id]
+        )
 
         mapper = representation.mapper
 
-        representation.array_name = array_name
-        representation.association = association
+        representation.array_name = (
+            array_name
+        )
+        representation.association = (
+            association
+        )
 
         if array_name is None:
             mapper.ScalarVisibilityOff()
@@ -194,12 +236,16 @@ class RenderManager:
         else:
             mapper.SetScalarModeToUseCellFieldData()
 
-        mapper.SelectColorArray(array_name)
+        mapper.SelectColorArray(
+            array_name
+        )
 
-        scalar_range = self.get_array_range(
-            node_id,
-            array_name,
-            association,
+        scalar_range = (
+            self.get_array_range(
+                node_id,
+                array_name,
+                association,
+            )
         )
 
         if scalar_range is not None:
@@ -220,22 +266,32 @@ class RenderManager:
 
         algorithm.Update()
 
-        data = algorithm.GetOutputDataObject(0)
+        data = algorithm.GetOutputDataObject(
+            0
+        )
 
         if data is None:
             return None
 
         if association == "point":
-            attributes = data.GetPointData()
+            attributes = (
+                data.GetPointData()
+            )
         else:
-            attributes = data.GetCellData()
+            attributes = (
+                data.GetCellData()
+            )
 
-        array = attributes.GetArray(array_name)
+        array = attributes.GetArray(
+            array_name
+        )
 
         if array is None:
             return None
 
-        minimum, maximum = array.GetRange()
+        minimum, maximum = (
+            array.GetRange()
+        )
 
         return (
             float(minimum),
@@ -248,9 +304,9 @@ class RenderManager:
         minimum: float,
         maximum: float,
     ) -> None:
-        representation = self.representations[
-            node_id
-        ]
+        representation = (
+            self.representations[node_id]
+        )
 
         representation.scalar_range = (
             float(minimum),

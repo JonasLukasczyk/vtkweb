@@ -13,13 +13,19 @@ def build_render_view(
     with v3.VCol(
         cols=6,
         classes="pa-0",
-        style="height: 100vh;",
+        style="height:100vh;",
     ):
         view = vtk_widgets.VtkLocalView(
             rendering.render_window,
             ref="view",
-            style="height: 100%; width: 100%;",
+            style=(
+                "height:100%;"
+                "width:100%;"
+            ),
         )
 
         ctrl.view_update = view.update
-        ctrl.view_reset_camera = view.reset_camera
+
+        ctrl.view_reset_camera = (
+            view.reset_camera
+        )

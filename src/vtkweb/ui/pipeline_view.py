@@ -25,10 +25,15 @@ def build_pipeline_view(
 
         with v3.VCard(
             classes="mt-2",
-            style="height:calc(100vh - 60px);",
+            style=(
+                "height:calc(100vh - 60px);"
+            ),
         ):
             with flow.NodeEditor(
-                style="height:100%;width:100%;",
+                style=(
+                    "height:100%;"
+                    "width:100%;"
+                ),
             ) as node_editor:
                 flow.Background()
                 flow.Controls()
@@ -49,7 +54,10 @@ def build_pipeline_view(
                         ),
                         click=(
                             ctrl.node_click,
-                            "[node.id, $event.shiftKey]",
+                            (
+                                "[node.id, "
+                                "$event.shiftKey]"
+                            ),
                         ),
                     ):
                         flow.Handle(
@@ -66,12 +74,18 @@ def build_pipeline_view(
                             v3.VCardText(
                                 "{{ node.label }}",
                                 classes="pa-1",
-                                style="white-space:nowrap;",
+                                style=(
+                                    "white-space:"
+                                    "nowrap;"
+                                ),
                             )
 
                             html.Span(
                                 "👁",
-                                v_if="node_visibility[node.id]",
+                                v_if=(
+                                    "node_visibility"
+                                    "[node.id]"
+                                ),
                                 classes="ml-1",
                                 style=(
                                     "font-size:14px;"
@@ -85,10 +99,6 @@ def build_pipeline_view(
                             position="bottom",
                             style="bottom:-6px;",
                         )
-
-    # -------------------------------------------------------------------------
-    # Graph helpers
-    # -------------------------------------------------------------------------
 
     def node_data(
         node: PipelineNode,
@@ -117,13 +127,32 @@ def build_pipeline_view(
                 f"{edge.target_node_id}-"
                 f"{edge.target_port}"
             ),
-            "source": edge.source_node_id,
-            "target": edge.target_node_id,
+            "source": (
+                edge.source_node_id
+            ),
+            "target": (
+                edge.target_node_id
+            ),
         }
 
-    # -------------------------------------------------------------------------
-    # Dynamic graph mutation
-    # -------------------------------------------------------------------------
+    def remove_node(
+        node_id: str,
+    ) -> None:
+        node_editor.remove_node(
+            node_id
+        )
+
+
+    def remove_edge(
+        edge: PipelineEdge,
+    ) -> None:
+        node_editor.remove_edge(
+            edge.source_node_id,
+            edge.target_node_id,
+        )
+
+    ctrl.pipeline_remove_node = remove_node
+    ctrl.pipeline_remove_edge = remove_edge
 
     def add_node(
         node: PipelineNode,
@@ -135,9 +164,9 @@ def build_pipeline_view(
     def add_edge(
         edge: PipelineEdge,
     ) -> None:
-        # VueFlow has to measure the new custom node before it can correctly
-        # draw an edge to its handles.
         async def deferred_add():
+            # Give VueFlow time to measure
+            # the newly-added custom node.
             await asyncio.sleep(0.05)
 
             node_editor.add_edge(
@@ -152,10 +181,6 @@ def build_pipeline_view(
 
     ctrl.pipeline_add_node = add_node
     ctrl.pipeline_add_edge = add_edge
-
-    # -------------------------------------------------------------------------
-    # Initial graph
-    # -------------------------------------------------------------------------
 
     for node in pipeline.nodes.values():
         node_editor.add_node(

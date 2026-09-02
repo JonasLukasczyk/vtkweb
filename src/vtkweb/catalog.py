@@ -18,7 +18,9 @@ class AlgorithmCatalog:
     def __init__(self) -> None:
         self.algorithms = self._discover()
 
-    def _discover(self) -> list[AlgorithmDescriptor]:
+    def _discover(
+        self,
+    ) -> list[AlgorithmDescriptor]:
         result = []
 
         for name in dir(vtk):
@@ -28,7 +30,10 @@ class AlgorithmCatalog:
                 continue
 
             try:
-                if not issubclass(vtk_class, vtk.vtkAlgorithm):
+                if not issubclass(
+                    vtk_class,
+                    vtk.vtkAlgorithm,
+                ):
                     continue
             except TypeError:
                 continue
@@ -41,7 +46,7 @@ class AlgorithmCatalog:
             except Exception:
                 continue
 
-            # For now, exclude sinks/writers with no outputs.
+            # Ignore writers / sinks for now.
             if algorithm.GetNumberOfOutputPorts() == 0:
                 continue
 
@@ -81,7 +86,9 @@ class AlgorithmCatalog:
         return descriptor.vtk_class()
 
 
-def _make_label(class_name: str) -> str:
+def _make_label(
+    class_name: str,
+) -> str:
     name = class_name.removeprefix("vtk")
 
     result = []

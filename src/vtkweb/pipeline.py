@@ -11,10 +11,15 @@ class PipelineNode:
     algorithm: vtk.vtkAlgorithm
     name: str | None = None
     visible: bool = False
-    id: str = field(default_factory=lambda: uuid4().hex)
+    id: str = field(
+        default_factory=lambda: uuid4().hex
+    )
 
     def __post_init__(self) -> None:
-        self.name = self.name or self.algorithm.GetClassName()
+        self.name = (
+            self.name
+            or self.algorithm.GetClassName()
+        )
 
 
 @dataclass(frozen=True)
@@ -27,16 +32,27 @@ class PipelineEdge:
 
 class PipelineGraph:
     def __init__(self) -> None:
-        self.nodes: dict[str, PipelineNode] = {}
-        self.edges: list[PipelineEdge] = []
+        self.nodes: dict[
+            str,
+            PipelineNode,
+        ] = {}
+
+        self.edges: list[
+            PipelineEdge
+        ] = []
+
         self.active_node_id: str | None = None
 
     @property
-    def active_node(self) -> PipelineNode | None:
+    def active_node(
+        self,
+    ) -> PipelineNode | None:
         if self.active_node_id is None:
             return None
 
-        return self.nodes.get(self.active_node_id)
+        return self.nodes.get(
+            self.active_node_id
+        )
 
     def add_node(
         self,
@@ -58,7 +74,10 @@ class PipelineGraph:
 
         return node
 
-    def remove_node(self, node_id: str) -> None:
+    def remove_node(
+        self,
+        node_id: str,
+    ) -> None:
         del self.nodes[node_id]
 
         affected_targets = {
@@ -77,7 +96,9 @@ class PipelineGraph:
 
         for target_node_id in affected_targets:
             if target_node_id in self.nodes:
-                self._sync_inputs(target_node_id)
+                self._sync_inputs(
+                    target_node_id
+                )
 
         if self.active_node_id == node_id:
             self.active_node_id = next(
@@ -107,7 +128,10 @@ class PipelineGraph:
         )
 
         self.edges.append(edge)
-        self._sync_inputs(target_node_id)
+
+        self._sync_inputs(
+            target_node_id
+        )
 
         return edge
 
@@ -116,7 +140,10 @@ class PipelineGraph:
         edge: PipelineEdge,
     ) -> None:
         self.edges.remove(edge)
-        self._sync_inputs(edge.target_node_id)
+
+        self._sync_inputs(
+            edge.target_node_id
+        )
 
     def incoming_edges(
         self,
@@ -139,7 +166,9 @@ class PipelineGraph:
         for port in range(
             target.GetNumberOfInputPorts()
         ):
-            target.RemoveAllInputConnections(port)
+            target.RemoveAllInputConnections(
+                port
+            )
 
         for edge in self.incoming_edges(
             target_node_id
