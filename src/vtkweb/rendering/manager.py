@@ -139,12 +139,15 @@ class RenderManager:
             view_id
         )
 
-        for representation in (
+        # First remove the concrete backend objects.
+        for representation in tuple(
             self._representations.values()
         ):
-            representation.view_ids.discard(
-                view_id
-            )
+            if view_id in representation.view_ids:
+                self.unassign_representation(
+                    representation.id,
+                    view_id,
+                )
 
         self.backend.remove_view(
             view_id
@@ -276,18 +279,30 @@ class RenderManager:
         representation_id: str,
     ) -> None:
         representation = (
-            self._representations.pop(
+            self.get_representation(
                 representation_id
             )
         )
 
+        # Important:
+        # remove all concrete backend instances first.
+        #
+        # Using unassign_representation() here means there
+        # is exactly one code path for removing a
+        # representation from a view.
         for view_id in tuple(
             representation.view_ids
         ):
-            self.backend.remove_representation(
-                representation.id,
+            self.unassign_representation(
+                representation_id,
                 view_id,
             )
+
+        # Only destroy the abstract representation after
+        # every view assignment is gone.
+        del self._representations[
+            representation_id
+        ]
 
     def remove_node(
         self,
@@ -333,7 +348,10 @@ class RenderManager:
             )
         )
 
-        if view_id in representation.view_ids:
+        if (
+            view_id
+            in representation.view_ids
+        ):
             return
 
         view = self.get_view(
@@ -344,14 +362,16 @@ class RenderManager:
             representation.node_id
         ]
 
-        representation.view_ids.add(
-            view_id
-        )
-
+        # Create the concrete backend representation
+        # before recording the assignment.
         self.backend.add_representation(
             representation,
             view,
             node.algorithm,
+        )
+
+        representation.view_ids.add(
+            view_id
         )
 
     def unassign_representation(
@@ -365,14 +385,19 @@ class RenderManager:
             )
         )
 
-        if view_id not in representation.view_ids:
+        if (
+            view_id
+            not in representation.view_ids
+        ):
             return
 
+        # Remove the backend object first.
         self.backend.remove_representation(
             representation.id,
             view_id,
         )
 
+        # Then update our abstract model.
         representation.view_ids.remove(
             view_id
         )
@@ -406,7 +431,8 @@ class RenderManager:
         view_id: str,
     ) -> bool:
         return any(
-            view_id in representation.view_ids
+            view_id
+            in representation.view_ids
             for representation
             in self.get_representations(
                 node_id
@@ -448,7 +474,6 @@ class RenderManager:
                     representation.id,
                     view_id,
                 )
-
         else:
             for representation in representations:
                 self.assign_representation(
@@ -512,7 +537,6 @@ class RenderManager:
             representation.scalar_range = (
                 None
             )
-
         else:
             representation.scalar_range = (
                 self.get_array_range(
@@ -568,8 +592,10 @@ class RenderManager:
 
         algorithm.Update()
 
-        data = algorithm.GetOutputDataObject(
-            output_port
+        data = (
+            algorithm.GetOutputDataObject(
+                output_port
+            )
         )
 
         result = {
@@ -580,13 +606,15 @@ class RenderManager:
         if data is None:
             return result
 
-        point_data = data.GetPointData()
+        point_data = (
+            data.GetPointData()
+        )
 
         for i in range(
             point_data.GetNumberOfArrays()
         ):
-            name = point_data.GetArrayName(
-                i
+            name = (
+                point_data.GetArrayName(i)
             )
 
             if name:
@@ -594,13 +622,15 @@ class RenderManager:
                     "point"
                 ].append(name)
 
-        cell_data = data.GetCellData()
+        cell_data = (
+            data.GetCellData()
+        )
 
         for i in range(
             cell_data.GetNumberOfArrays()
         ):
-            name = cell_data.GetArrayName(
-                i
+            name = (
+                cell_data.GetArrayName(i)
             )
 
             if name:
@@ -628,8 +658,10 @@ class RenderManager:
 
         algorithm.Update()
 
-        data = algorithm.GetOutputDataObject(
-            output_port
+        data = (
+            algorithm.GetOutputDataObject(
+                output_port
+            )
         )
 
         if data is None:
@@ -707,11 +739,84 @@ class RenderManager:
             representation.node_id
         ]
 
-        for view_id in (
+        for view_id in tuple(
             representation.view_ids
         ):
             self.backend.update_representation(
                 representation,
-                self.get_view(view_id),
+                self.get_view(
+                    view_id
+                ),
                 node.algorithm,
             )
+
+    def output_visible_in_view(
+        self,
+        node_id: str,
+        output_port: int,
+        view_id: str,
+    ) -> bool:
+        return any(
+            view_id in representation.view_ids
+            for representation
+            in self.get_representations(
+                node_id,
+                output_port,
+            )
+        )
+
+
+    def toggle_output_in_view(
+        self,
+        node_id: str,
+        output_port: int,
+        view_id: str,
+    ) -> None:
+        representations = list(
+            self.get_representations(
+                node_id,
+                output_port,
+            )
+        )
+
+        # If the output has no representation yet,
+        # create the default surface representation.
+        if not representations:
+            representation = (
+                self.add_representation(
+                    node_id,
+                    output_port=output_port,
+                    kind="surface",
+                )
+            )
+
+            self.assign_representation(
+                representation.id,
+                view_id,
+            )
+
+            return
+
+        # Treat the output as visible if at least one of
+        # its representations belongs to this view.
+        visible = any(
+            view_id in representation.view_ids
+            for representation in representations
+        )
+
+        if visible:
+            for representation in representations:
+                if (
+                    view_id
+                    in representation.view_ids
+                ):
+                    self.unassign_representation(
+                        representation.id,
+                        view_id,
+                    )
+        else:
+            for representation in representations:
+                self.assign_representation(
+                    representation.id,
+                    view_id,
+                )

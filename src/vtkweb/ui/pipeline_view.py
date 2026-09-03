@@ -15,6 +15,9 @@ from vtkweb.pipeline import (
 )
 
 
+PORT_SLOT_COUNT = 16
+
+
 PIPELINE_VIEW_STYLE = """
 .vtkweb-flow-controls {
     top: 10px !important;
@@ -25,6 +28,50 @@ PIPELINE_VIEW_STYLE = """
 
 .vtkweb-flow-controls .vue-flow__controls-button {
     cursor: pointer;
+}
+
+.vtkweb-pipeline-node {
+    position: relative;
+
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+
+    overflow: visible !important;
+
+    min-width: 0;
+    width: fit-content;
+}
+
+.vue-flow__handle.vtkweb-pipeline-handle {
+    width: 16px !important;
+    height: 16px !important;
+
+    min-width: 16px !important;
+    min-height: 16px !important;
+
+    border: 2px solid white !important;
+    border-radius: 50% !important;
+
+    cursor: pointer !important;
+
+    z-index: 20;
+}
+
+.vue-flow__handle.vtkweb-input-handle {
+    background: #777 !important;
+}
+
+.vue-flow__handle.vtkweb-output-visible {
+    background: #4caf50 !important;
+}
+
+.vue-flow__handle.vtkweb-output-hidden {
+    background: #f44336 !important;
+}
+
+.vue-flow__handle.vtkweb-pipeline-handle:hover {
+    filter: brightness(1.25);
 }
 """
 
@@ -43,11 +90,15 @@ def build_pipeline_view(
         classes="pa-2",
         style="height:100vh;",
     ):
-        v3.VLabel("Pipeline")
+        v3.VLabel(
+            "Pipeline"
+        )
 
         with v3.VCard(
             classes="mt-2",
-            style="height:calc(100vh - 60px);",
+            style=(
+                "height:calc(100vh - 60px);"
+            ),
         ):
             with flow.NodeEditor(
                 style=(
@@ -57,12 +108,18 @@ def build_pipeline_view(
             ) as node_editor:
                 flow.Background()
 
+                # -------------------------------------------------------------
+                # Controls
+                # -------------------------------------------------------------
+
                 with flow.Controls(
                     classes="vtkweb-flow-controls",
                 ):
                     with flow.ControlsButton(
                         title="Compute layout",
-                        click=ctrl.compute_pipeline_layout,
+                        click=(
+                            ctrl.compute_pipeline_layout
+                        ),
                     ):
                         html.Div(
                             "↕",
@@ -78,70 +135,118 @@ def build_pipeline_view(
                             ),
                         )
 
+                # -------------------------------------------------------------
+                # Custom node
+                # -------------------------------------------------------------
+
                 with flow.CustomNode(
                     type="vtk-node",
                     var_name="node",
                 ):
                     with v3.VCard(
-                        classes="pa-1",
-                        style=(
-                            "display:inline-flex;"
-                            "flex-direction:column;"
-                            "align-items:center;"
-                            "overflow:visible;"
-                            "min-width:0;"
-                            "width:fit-content;"
+                        classes=(
+                            "pa-1 "
+                            "vtkweb-pipeline-node"
                         ),
                         click=(
-                            ctrl.node_click,
-                            (
-                                "[node.id,"
-                                "$event.shiftKey]"
-                            ),
+                            ctrl.set_active_node,
+                            "[node.id]",
                         ),
                     ):
-                        flow.Handle(
-                            type="target",
-                            position="top",
-                            style="top:0px;",
-                        )
+                        # -----------------------------------------------------
+                        # Input handles
+                        # -----------------------------------------------------
 
-                        with v3.VRow(
-                            no_gutters=True,
-                            align="center",
-                            classes="px-1",
+                        for port in range(
+                            PORT_SLOT_COUNT
                         ):
-                            v3.VCardText(
-                                "{{ node.label }}",
-                                classes="pa-1",
-                                style=(
-                                    "white-space:"
-                                    "nowrap;"
-                                ),
-                            )
-
-                            html.Span(
-                                "👁",
+                            flow.Handle(
+                                id=f"input-{port}",
+                                type="target",
+                                position="top",
                                 v_if=(
-                                    "node_visibility"
-                                    "[node.id]"
+                                    f"node.data.input_port_count > {port}"
                                 ),
-                                classes="ml-1",
+                                classes=(
+                                    "vtkweb-pipeline-handle "
+                                    "vtkweb-input-handle"
+                                ),
                                 style=(
-                                    "font-size:14px;"
-                                    "line-height:1;"
-                                    "user-select:none;"
+                                    "{ "
+                                    "'top': '0px', "
+                                    "'left': "
+                                    f"((({port} + 1) / "
+                                    "(node.data.input_port_count + 1)) "
+                                    "* 100) + '%' "
+                                    "}"
+                                ),
+                                click=(
+                                    ctrl.set_active_node,
+                                    "[node.id]",
                                 ),
                             )
 
-                        flow.Handle(
-                            type="source",
-                            position="bottom",
-                            style="bottom:0px;",
+                        # -----------------------------------------------------
+                        # Label
+                        # -----------------------------------------------------
+
+                        v3.VCardText(
+                            "{{ node.label }}",
+                            classes="pa-1",
+                            style=(
+                                "white-space:nowrap;"
+                            ),
                         )
+
+                        # -----------------------------------------------------
+                        # Output handles
+                        # -----------------------------------------------------
+
+                        for port in range(
+                            PORT_SLOT_COUNT
+                        ):
+                            flow.Handle(
+                                id=f"output-{port}",
+                                type="source",
+                                position="bottom",
+                                v_if=(
+                                    f"node.data.output_port_count > {port}"
+                                ),
+                                classes=(
+                                    "'vtkweb-pipeline-handle ' + "
+                                    "("
+                                    "output_port_visibility[node.id] "
+                                    "&& "
+                                    f"output_port_visibility[node.id][{port}] "
+                                    "? "
+                                    "'vtkweb-output-visible' "
+                                    ": "
+                                    "'vtkweb-output-hidden'"
+                                    ")"
+                                ),
+                                style=(
+                                    "{ "
+                                    "'bottom': '0px', "
+                                    "'left': "
+                                    f"((({port} + 1) / "
+                                    "(node.data.output_port_count + 1)) "
+                                    "* 100) + '%' "
+                                    "}"
+                                ),
+                                click=(
+                                    ctrl.output_port_click,
+                                    (
+                                        "["
+                                        "node.id,"
+                                        f"{port},"
+                                        "$event.shiftKey"
+                                        "]"
+                                    ),
+                                ),
+                            )
 
     # -------------------------------------------------------------------------
-    # Serialization
+    # Node serialization
     # -------------------------------------------------------------------------
 
     def node_data(
@@ -149,17 +254,70 @@ def build_pipeline_view(
     ) -> dict:
         index = list(
             pipeline.nodes
-        ).index(node.id)
+        ).index(
+            node.id
+        )
+
+        algorithm = (
+            node.algorithm
+        )
+
+        input_port_count = (
+            algorithm.GetNumberOfInputPorts()
+        )
+
+        output_port_count = (
+            algorithm.GetNumberOfOutputPorts()
+        )
+
+        if (
+            input_port_count
+            > PORT_SLOT_COUNT
+        ):
+            print(
+                f"Warning: {node.name} has "
+                f"{input_port_count} input ports, "
+                f"but pipeline_view only provides "
+                f"{PORT_SLOT_COUNT} handle slots."
+            )
+
+        if (
+            output_port_count
+            > PORT_SLOT_COUNT
+        ):
+            print(
+                f"Warning: {node.name} has "
+                f"{output_port_count} output ports, "
+                f"but pipeline_view only provides "
+                f"{PORT_SLOT_COUNT} handle slots."
+            )
 
         return {
             "id": node.id,
             "type": "vtk-node",
             "label": node.name,
+
+            "data": {
+                "input_port_count": (
+                    input_port_count
+                ),
+                "output_port_count": (
+                    output_port_count
+                ),
+            },
+
             "position": {
                 "x": 100,
-                "y": 80 + index * 140,
+                "y": (
+                    80
+                    + index * 140
+                ),
             },
         }
+
+    # -------------------------------------------------------------------------
+    # Edge serialization
+    # -------------------------------------------------------------------------
 
     def edge_data(
         edge: PipelineEdge,
@@ -171,8 +329,22 @@ def build_pipeline_view(
                 f"{edge.target_node_id}-"
                 f"{edge.target_port}"
             ),
-            "source": edge.source_node_id,
-            "target": edge.target_node_id,
+
+            "source": (
+                edge.source_node_id
+            ),
+
+            "target": (
+                edge.target_node_id
+            ),
+
+            "sourceHandle": (
+                f"output-{edge.source_port}"
+            ),
+
+            "targetHandle": (
+                f"input-{edge.target_port}"
+            ),
         }
 
     # -------------------------------------------------------------------------
@@ -185,16 +357,22 @@ def build_pipeline_view(
     ]:
         result = {}
 
-        for node in pipeline.nodes.values():
-            editor_node = node_editor.get_node(
-                node.id
+        for node in (
+            pipeline.nodes.values()
+        ):
+            editor_node = (
+                node_editor.get_node(
+                    node.id
+                )
             )
 
             if editor_node is None:
                 continue
 
-            position = editor_node.get(
-                "position"
+            position = (
+                editor_node.get(
+                    "position"
+                )
             )
 
             if position is None:
@@ -223,39 +401,53 @@ def build_pipeline_view(
             engine="dot"
         )
 
-        for node in pipeline.nodes.values():
+        for node in (
+            pipeline.nodes.values()
+        ):
             graph.node(
                 node.id,
                 label=node.name,
             )
 
-        for edge in pipeline.edges:
+        for edge in (
+            pipeline.edges
+        ):
             graph.edge(
                 edge.source_node_id,
                 edge.target_node_id,
             )
 
-        plain = graph.pipe(
-            format="plain"
-        ).decode(
-            "utf-8"
+        plain = (
+            graph.pipe(
+                format="plain"
+            )
+            .decode(
+                "utf-8"
+            )
         )
 
-        lines = plain.splitlines()
+        lines = (
+            plain.splitlines()
+        )
 
         graph_height = 0.0
 
         if lines:
-            fields = shlex.split(
-                lines[0]
+            fields = (
+                shlex.split(
+                    lines[0]
+                )
             )
 
             if (
                 fields
-                and fields[0] == "graph"
+                and fields[0]
+                == "graph"
             ):
-                graph_height = float(
-                    fields[3]
+                graph_height = (
+                    float(
+                        fields[3]
+                    )
                 )
 
         scale = 120.0
@@ -264,17 +456,22 @@ def build_pipeline_view(
         positions = {}
 
         for line in lines:
-            fields = shlex.split(
-                line
+            fields = (
+                shlex.split(
+                    line
+                )
             )
 
             if (
                 not fields
-                or fields[0] != "node"
+                or fields[0]
+                != "node"
             ):
                 continue
 
-            node_id = fields[1]
+            node_id = (
+                fields[1]
+            )
 
             x = float(
                 fields[2]
@@ -284,7 +481,9 @@ def build_pipeline_view(
                 fields[3]
             )
 
-            positions[node_id] = {
+            positions[
+                node_id
+            ] = {
                 "x": (
                     padding
                     + x * scale
@@ -292,7 +491,8 @@ def build_pipeline_view(
                 "y": (
                     padding
                     + (
-                        graph_height - y
+                        graph_height
+                        - y
                     )
                     * scale
                 ),
@@ -301,7 +501,7 @@ def build_pipeline_view(
         return positions
 
     # -------------------------------------------------------------------------
-    # Animation
+    # Layout animation
     # -------------------------------------------------------------------------
 
     async def animate_positions(
@@ -320,7 +520,8 @@ def build_pipeline_view(
         steps = max(
             1,
             round(
-                duration * fps
+                duration
+                * fps
             ),
         )
 
@@ -328,9 +529,12 @@ def build_pipeline_view(
             1,
             steps + 1,
         ):
-            t = step / steps
+            t = (
+                step
+                / steps
+            )
 
-            # Smoothstep easing.
+            # Smoothstep easing
             alpha = (
                 t
                 * t
@@ -340,7 +544,10 @@ def build_pipeline_view(
                 )
             )
 
-            for node_id, end in (
+            for (
+                node_id,
+                end,
+            ) in (
                 end_positions.items()
             ):
                 start = (
@@ -380,20 +587,18 @@ def build_pipeline_view(
                 1.0 / fps
             )
 
-        # Land exactly on the final positions.
-        for node_id, position in (
+        # Land exactly on the final
+        # Graphviz coordinates.
+        for (
+            node_id,
+            position,
+        ) in (
             end_positions.items()
         ):
             node_editor.update_node(
                 node_id,
                 position=position,
             )
-
-        await asyncio.sleep(
-            0.05
-        )
-
-        # node_editor.fit_view()
 
     def compute_pipeline_layout() -> None:
         start_positions = (
@@ -416,7 +621,7 @@ def build_pipeline_view(
     )
 
     # -------------------------------------------------------------------------
-    # View
+    # Fit
     # -------------------------------------------------------------------------
 
     def fit_view() -> None:
@@ -443,6 +648,12 @@ def build_pipeline_view(
         node_editor.remove_edge(
             edge.source_node_id,
             edge.target_node_id,
+            source_handle=(
+                f"output-{edge.source_port}"
+            ),
+            target_handle=(
+                f"input-{edge.target_port}"
+            ),
         )
 
     ctrl.pipeline_remove_node = (
@@ -461,21 +672,25 @@ def build_pipeline_view(
         node: PipelineNode,
     ) -> None:
         node_editor.add_node(
-            node_data(node)
+            node_data(
+                node
+            )
         )
 
     def add_edge(
         edge: PipelineEdge,
     ) -> None:
         async def deferred_add():
-            # Give Vue Flow time to measure
-            # the newly-added custom node.
+            # Give Vue Flow time to instantiate
+            # and measure the custom node handles.
             await asyncio.sleep(
                 0.05
             )
 
             node_editor.add_edge(
-                edge_data(edge)
+                edge_data(
+                    edge
+                )
             )
 
             node_editor.fit_view()
@@ -496,15 +711,23 @@ def build_pipeline_view(
     # Initial graph
     # -------------------------------------------------------------------------
 
-    for node in pipeline.nodes.values():
+    for node in (
+        pipeline.nodes.values()
+    ):
         node_editor.add_node(
-            node_data(node)
+            node_data(
+                node
+            )
         )
 
     def initialize_edges():
-        for edge in pipeline.edges:
+        for edge in (
+            pipeline.edges
+        ):
             node_editor.add_edge(
-                edge_data(edge)
+                edge_data(
+                    edge
+                )
             )
 
         node_editor.fit_view()

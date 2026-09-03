@@ -13,6 +13,7 @@ dependencies = [
     "trame>=3.13.2",
     "trame-flow>=2.2.2",
     "trame-vtk>=2.11.16",
+    "trame-vtklocal>=0.16,<1",
     "trame-vuetify>=3.2.5",
     "vtk>=9.7.0",
 ]

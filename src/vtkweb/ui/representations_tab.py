@@ -75,47 +75,60 @@ def initialize_representations_tab(
         )
 
         if (
-            active_port < 0
+            output_count == 0
+            or active_port < 0
             or active_port >= output_count
         ):
             active_port = 0
 
-        arrays = (
-            rendering.get_arrays(
-                node_id,
-                active_port,
+        if output_count:
+            arrays = (
+                rendering.get_arrays(
+                    node_id,
+                    active_port,
+                )
             )
-            if output_count
-            else {
+        else:
+            arrays = {
                 "point": [],
                 "cell": [],
             }
-        )
 
         color_items = [
             {
-                "title": f"{name} (Point)",
-                "value": f"point:{name}",
+                "title": (
+                    f"{name} (Point)"
+                ),
+                "value": (
+                    f"point:{name}"
+                ),
             }
-            for name in arrays["point"]
+            for name
+            in arrays["point"]
         ]
 
         color_items += [
             {
-                "title": f"{name} (Cell)",
-                "value": f"cell:{name}",
+                "title": (
+                    f"{name} (Cell)"
+                ),
+                "value": (
+                    f"cell:{name}"
+                ),
             }
-            for name in arrays["cell"]
+            for name
+            in arrays["cell"]
         ]
 
-        representations = (
-            rendering.get_representations(
-                node_id,
-                active_port,
+        if output_count:
+            representations = (
+                rendering.get_representations(
+                    node_id,
+                    active_port,
+                )
             )
-            if output_count
-            else ()
-        )
+        else:
+            representations = ()
 
         counts: dict[
             str,
@@ -129,7 +142,9 @@ def initialize_representations_tab(
         )
 
         for representation in representations:
-            counts[representation.kind] = (
+            counts[
+                representation.kind
+            ] = (
                 counts.get(
                     representation.kind,
                     0,
@@ -137,7 +152,10 @@ def initialize_representations_tab(
                 + 1
             )
 
-            if representation.array_name is None:
+            if (
+                representation.array_name
+                is None
+            ):
                 color_array = None
             else:
                 color_array = (
@@ -157,10 +175,18 @@ def initialize_representations_tab(
                         f"{representation.kind.title()} "
                         f"{counts[representation.kind]}"
                     ),
-                    "kind": representation.kind,
-                    "color_array": color_array,
-                    "range_min": scalar_range[0],
-                    "range_max": scalar_range[1],
+                    "kind": (
+                        representation.kind
+                    ),
+                    "color_array": (
+                        color_array
+                    ),
+                    "range_min": (
+                        scalar_range[0]
+                    ),
+                    "range_max": (
+                        scalar_range[1]
+                    ),
                     "in_active_view": (
                         active_view_id
                         in representation.view_ids
@@ -196,7 +222,10 @@ def initialize_representations_tab(
             int(output_port)
         )
 
-        if pipeline.active_node_id is not None:
+        if (
+            pipeline.active_node_id
+            is not None
+        ):
             update_representation_state(
                 pipeline.active_node_id
             )
@@ -257,28 +286,35 @@ def initialize_representations_tab(
         )
 
         ctrl.update_node_visibility_state()
+
+        # Force the render view to resynchronize
+        # after backend actor removal.
         ctrl.view_update()
 
     # -------------------------------------------------------------------------
-    # Active-view membership
+    # Active-view assignment
     # -------------------------------------------------------------------------
 
     def toggle_representation_in_active_view(
         representation_id: str,
     ) -> None:
-        rendering.toggle_representation_in_view(
-            representation_id,
-            rendering.active_view_id,
-        )
-
         representation = (
             rendering.get_representation(
                 representation_id
             )
         )
 
-        update_representation_state(
+        node_id = (
             representation.node_id
+        )
+
+        rendering.toggle_representation_in_view(
+            representation_id,
+            rendering.active_view_id,
+        )
+
+        update_representation_state(
+            node_id
         )
 
         ctrl.update_node_visibility_state()
@@ -336,7 +372,6 @@ def initialize_representations_tab(
                 representation_id,
                 None,
             )
-
         else:
             association, array_name = (
                 value.split(
@@ -370,7 +405,10 @@ def initialize_representations_tab(
             )
         )
 
-        if representation.scalar_range is None:
+        if (
+            representation.scalar_range
+            is None
+        ):
             return
 
         _, maximum = (
@@ -402,7 +440,10 @@ def initialize_representations_tab(
             )
         )
 
-        if representation.scalar_range is None:
+        if (
+            representation.scalar_range
+            is None
+        ):
             return
 
         minimum, _ = (
@@ -430,7 +471,10 @@ def initialize_representations_tab(
             )
         )
 
-        if representation.array_name is None:
+        if (
+            representation.array_name
+            is None
+        ):
             return
 
         scalar_range = (
@@ -536,7 +580,7 @@ def build_representations_tab(
         )
 
     # -------------------------------------------------------------------------
-    # Existing representations
+    # Representations
     # -------------------------------------------------------------------------
 
     with html.Div(
@@ -550,7 +594,10 @@ def build_representations_tab(
             key="representation.id",
             classes="vtkweb-representation-card",
         ):
+            # -----------------------------------------------------------------
             # Header
+            # -----------------------------------------------------------------
+
             with html.Div(
                 classes="vtkweb-representation-header",
             ):
@@ -559,23 +606,68 @@ def build_representations_tab(
                     classes="vtkweb-representation-title",
                 )
 
-                with v3.VBtn(
-                    icon=True,
-                    size="x-small",
-                    variant="text",
-                    title="Toggle representation in active render view",
+                # -------------------------------------------------------------
+                # Active view membership
+                # -------------------------------------------------------------
+
+                with html.Button(
+                    type="button",
+                    title=(
+                        "Toggle representation "
+                        "in active render view"
+                    ),
                     click=(
                         ctrl.toggle_representation_in_active_view,
                         "[representation.id]",
                     ),
+                    style=(
+                        "position:relative;"
+                        "display:flex;"
+                        "align-items:center;"
+                        "justify-content:center;"
+                        "width:28px;"
+                        "height:28px;"
+                        "padding:0;"
+                        "border:0;"
+                        "background:transparent;"
+                        "color:inherit;"
+                        "cursor:pointer;"
+                    ),
                 ):
-                    v3.VIcon(
-                        icon=(
-                            "representation.in_active_view "
-                            "? 'mdi-eye' "
-                            ": 'mdi-eye-off'"
+                    html.Span(
+                        "👁",
+                        style=(
+                            "font-size:15px;"
+                            "line-height:1;"
+                            "user-select:none;"
                         ),
                     )
+
+                    # Draw a slash ourselves instead
+                    # of relying on MDI.
+                    html.Span(
+                        "",
+                        v_if=(
+                            "!representation."
+                            "in_active_view"
+                        ),
+                        style=(
+                            "position:absolute;"
+                            "left:5px;"
+                            "top:13px;"
+                            "width:18px;"
+                            "height:2px;"
+                            "background:currentColor;"
+                            "transform:"
+                            "rotate(-45deg);"
+                            "transform-origin:center;"
+                            "pointer-events:none;"
+                        ),
+                    )
+
+                # -------------------------------------------------------------
+                # Remove
+                # -------------------------------------------------------------
 
                 html.Button(
                     "×",
@@ -588,7 +680,10 @@ def build_representations_tab(
                     ),
                 )
 
+            # -----------------------------------------------------------------
             # Type
+            # -----------------------------------------------------------------
+
             with html.Div(
                 classes="vtkweb-select-box",
             ):
@@ -617,7 +712,10 @@ def build_representations_tab(
                     ),
                 )
 
+            # -----------------------------------------------------------------
             # Coloring
+            # -----------------------------------------------------------------
+
             with html.Div(
                 v_if=(
                     "representation.kind "

@@ -41,25 +41,47 @@ def initialize_app_controller(
     )
 
     # -------------------------------------------------------------------------
-    # Pipeline-view visibility state
+    # Output-port visibility
     # -------------------------------------------------------------------------
 
-    def update_node_visibility_state() -> None:
+    def update_output_visibility_state() -> None:
         view_id = (
             rendering.active_view_id
         )
 
-        state.node_visibility = {
-            node.id: (
-                rendering.node_visible_in_view(
-                    node.id,
-                    view_id,
-                )
-            )
-            for node in pipeline.nodes.values()
-        }
+        result = {}
 
-    update_node_visibility_state()
+        for node in pipeline.nodes.values():
+            output_count = (
+                node.algorithm
+                .GetNumberOfOutputPorts()
+            )
+
+            result[node.id] = {
+                str(port): (
+                    rendering.output_visible_in_view(
+                        node.id,
+                        port,
+                        view_id,
+                    )
+                )
+                for port in range(
+                    output_count
+                )
+            }
+
+        state.output_port_visibility = (
+            result
+        )
+
+    update_output_visibility_state()
+
+    # Keep this alias temporarily so any existing code
+    # which asks to refresh pipeline visibility does not
+    # immediately break.
+    ctrl.update_node_visibility_state = (
+        update_output_visibility_state
+    )
 
     # -------------------------------------------------------------------------
     # Refresh
@@ -111,41 +133,39 @@ def initialize_app_controller(
         )
 
     # -------------------------------------------------------------------------
-    # Node visibility in active view
+    # Output-port interaction
     # -------------------------------------------------------------------------
 
-    def toggle_visibility(
+    def output_port_click(
         node_id: str,
+        output_port: int,
+        shift_key: bool = False,
     ) -> None:
-        rendering.toggle_node_in_view(
+        output_port = int(
+            output_port
+        )
+
+        # A port click always makes its node active.
+        set_active_node(
+            node_id
+        )
+
+        if not shift_key:
+            return
+
+        rendering.toggle_output_in_view(
             node_id,
+            output_port,
             rendering.active_view_id,
         )
 
-        update_node_visibility_state()
+        update_output_visibility_state()
 
-        if (
+        ctrl.update_representation_state(
             node_id
-            == pipeline.active_node_id
-        ):
-            ctrl.update_representation_state(
-                node_id
-            )
+        )
 
         ctrl.view_update()
-
-    def node_click(
-        node_id: str,
-        shift_key: bool = False,
-    ) -> None:
-        if shift_key:
-            toggle_visibility(
-                node_id
-            )
-        else:
-            set_active_node(
-                node_id
-            )
 
     # -------------------------------------------------------------------------
     # Create source / filter
@@ -157,7 +177,8 @@ def initialize_app_controller(
         descriptor = next(
             item
             for item in catalog.algorithms
-            if item.class_name == class_name
+            if item.class_name
+            == class_name
         )
 
         algorithm = catalog.create(
@@ -174,6 +195,7 @@ def initialize_app_controller(
             visible=True,
         )
 
+        # Default representation remains output 0.
         rendering.add_representation(
             node.id,
             output_port=0,
@@ -203,7 +225,7 @@ def initialize_app_controller(
                 edge
             )
 
-        update_node_visibility_state()
+        update_output_visibility_state()
 
         ctrl.close_filter_browser()
 
@@ -229,7 +251,9 @@ def initialize_app_controller(
         if node is None:
             return
 
-        node_id = node.id
+        node_id = (
+            node.id
+        )
 
         incident_edges = [
             edge
@@ -259,9 +283,12 @@ def initialize_app_controller(
             node_id
         )
 
-        update_node_visibility_state()
+        update_output_visibility_state()
 
-        if pipeline.active_node is not None:
+        if (
+            pipeline.active_node
+            is not None
+        ):
             set_active_node(
                 pipeline.active_node.id
             )
@@ -294,16 +321,12 @@ def initialize_app_controller(
         set_active_node
     )
 
-    ctrl.update_node_visibility_state = (
-        update_node_visibility_state
+    ctrl.output_port_click = (
+        output_port_click
     )
 
-    ctrl.toggle_visibility = (
-        toggle_visibility
-    )
-
-    ctrl.node_click = (
-        node_click
+    ctrl.update_output_visibility_state = (
+        update_output_visibility_state
     )
 
     ctrl.create_filter = (
