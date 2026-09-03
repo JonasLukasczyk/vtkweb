@@ -25,12 +25,8 @@ class ViewSettings:
 @dataclass
 class RenderView:
     name: str
-    settings: ViewSettings = field(
-        default_factory=ViewSettings
-    )
-    id: str = field(
-        default_factory=lambda: uuid4().hex
-    )
+    settings: ViewSettings = field(default_factory=ViewSettings)
+    id: str = field(default_factory=lambda: uuid4().hex)
 
 
 @dataclass
@@ -41,18 +37,17 @@ class Representation:
 
     array_name: str | None = None
     association: str = "point"
-    scalar_range: tuple[
-        float,
-        float,
-    ] | None = None
+    scalar_range: (
+        tuple[
+            float,
+            float,
+        ]
+        | None
+    ) = None
 
-    view_ids: set[str] = field(
-        default_factory=set
-    )
+    view_ids: set[str] = field(default_factory=set)
 
-    id: str = field(
-        default_factory=lambda: uuid4().hex
-    )
+    id: str = field(default_factory=lambda: uuid4().hex)
 
 
 class RenderingBackend(ABC):

@@ -91,9 +91,7 @@ def initialize_filter_browser(
     def open_filter_browser() -> None:
         with state:
             state.filter_browser_query = ""
-            state.filter_browser_items = (
-                state.filter_catalog_items
-            )
+            state.filter_browser_items = state.filter_catalog_items
             state.filter_browser_selected = 0
             state.filter_browser_open = True
 
@@ -111,10 +109,8 @@ def initialize_filter_browser(
             for item in state.filter_catalog_items
             if (
                 not needle
-                or needle
-                in item["title"].casefold()
-                or needle
-                in item["class_name"].casefold()
+                or needle in item["title"].casefold()
+                or needle in item["class_name"].casefold()
             )
         ]
 
@@ -126,9 +122,7 @@ def initialize_filter_browser(
     def set_filter_browser_selected(
         index: int,
     ) -> None:
-        state.filter_browser_selected = int(
-            index
-        )
+        state.filter_browser_selected = int(index)
 
     def filter_browser_keydown(
         key: str,
@@ -148,11 +142,7 @@ def initialize_filter_browser(
             )
 
         elif key == "Enter" and items:
-            ctrl.create_filter(
-                items[
-                    state.filter_browser_selected
-                ]["value"]
-            )
+            ctrl.create_filter(items[state.filter_browser_selected]["value"])
 
         elif key == "Escape":
             close_filter_browser()
@@ -161,31 +151,17 @@ def initialize_filter_browser(
     # Controller
     # -------------------------------------------------------------------------
 
-    ctrl.open_filter_browser = (
-        open_filter_browser
-    )
+    ctrl.open_filter_browser = open_filter_browser
 
-    ctrl.close_filter_browser = (
-        close_filter_browser
-    )
+    ctrl.close_filter_browser = close_filter_browser
 
-    ctrl.set_filter_browser_query = (
-        set_filter_browser_query
-    )
+    ctrl.set_filter_browser_query = set_filter_browser_query
 
-    ctrl.set_filter_browser_selected = (
-        set_filter_browser_selected
-    )
+    ctrl.set_filter_browser_selected = set_filter_browser_selected
 
-    ctrl.filter_browser_keydown = (
-        filter_browser_keydown
-    )
+    ctrl.filter_browser_keydown = filter_browser_keydown
 
-    server.trigger(
-        "open_filter_browser"
-    )(
-        open_filter_browser
-    )
+    server.trigger("open_filter_browser")(open_filter_browser)
 
 
 def build_filter_browser(
@@ -195,9 +171,7 @@ def build_filter_browser(
     with v3.VDialog(
         model_value=("filter_browser_open",),
         width=600,
-        update_modelValue=(
-            "filter_browser_open = $event",
-        ),
+        update_modelValue=("filter_browser_open = $event",),
     ):
         with v3.VCard(
             classes="pa-3",
@@ -223,10 +197,7 @@ def build_filter_browser(
                 classes="vtkweb-filter-list",
             ):
                 with html.Div(
-                    v_for=(
-                        "(item, index) in "
-                        "filter_browser_items"
-                    ),
+                    v_for=("(item, index) in filter_browser_items"),
                     key="item.value",
                     classes=(
                         "index === filter_browser_selected "
@@ -251,9 +222,6 @@ def build_filter_browser(
                     )
 
                     html.Div(
-                        (
-                            "{{ item.category }} · "
-                            "{{ item.class_name }}"
-                        ),
+                        ("{{ item.category }} · {{ item.class_name }}"),
                         classes="vtkweb-filter-class",
                     )

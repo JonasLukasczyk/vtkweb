@@ -32,9 +32,7 @@ def inspect_properties(
 ) -> list[PropertyDescriptor]:
     properties = []
 
-    contour_values = _inspect_contour_values(
-        algorithm
-    )
+    contour_values = _inspect_contour_values(algorithm)
 
     if contour_values is not None:
         properties.append(contour_values)
@@ -95,11 +93,7 @@ def inspect_properties(
                 label=_make_label(name),
                 kind=kind,
                 value=value,
-                size=(
-                    len(value)
-                    if kind == "vector"
-                    else None
-                ),
+                size=(len(value) if kind == "vector" else None),
             )
         )
 
@@ -136,12 +130,7 @@ def set_property(
         setter(str(value))
 
     elif descriptor.kind == "vector":
-        setter(
-            *[
-                float(component)
-                for component in value
-            ]
-        )
+        setter(*[float(component) for component in value])
 
 
 def _inspect_contour_values(
@@ -154,28 +143,17 @@ def _inspect_contour_values(
         "SetValue",
     )
 
-    if not all(
-        callable(getattr(algorithm, name, None))
-        for name in methods
-    ):
+    if not all(callable(getattr(algorithm, name, None)) for name in methods):
         return None
 
     values = [
-        float(algorithm.GetValue(i))
-        for i in range(
-            algorithm.GetNumberOfContours()
-        )
+        float(algorithm.GetValue(i)) for i in range(algorithm.GetNumberOfContours())
     ]
 
     def set_values(new_values) -> None:
-        values = [
-            float(value)
-            for value in new_values
-        ]
+        values = [float(value) for value in new_values]
 
-        algorithm.SetNumberOfContours(
-            len(values)
-        )
+        algorithm.SetNumberOfContours(len(values))
 
         for i, value in enumerate(values):
             algorithm.SetValue(
@@ -198,20 +176,17 @@ def _property_kind(
     name: str,
     value,
 ) -> str | None:
-    if (
-        callable(
-            getattr(
-                algorithm,
-                f"{name}On",
-                None,
-            )
+    if callable(
+        getattr(
+            algorithm,
+            f"{name}On",
+            None,
         )
-        and callable(
-            getattr(
-                algorithm,
-                f"{name}Off",
-                None,
-            )
+    ) and callable(
+        getattr(
+            algorithm,
+            f"{name}Off",
+            None,
         )
     ):
         return "bool"
@@ -231,10 +206,7 @@ def _property_kind(
     if (
         isinstance(value, tuple)
         and value
-        and all(
-            isinstance(component, (int, float))
-            for component in value
-        )
+        and all(isinstance(component, (int, float)) for component in value)
     ):
         return "vector"
 
@@ -245,11 +217,7 @@ def _make_label(name: str) -> str:
     result = []
 
     for i, char in enumerate(name):
-        if (
-            i > 0
-            and char.isupper()
-            and not name[i - 1].isupper()
-        ):
+        if i > 0 and char.isupper() and not name[i - 1].isupper():
             result.append(" ")
 
         result.append(char)

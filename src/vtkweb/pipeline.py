@@ -28,21 +28,15 @@ class PipelineNode:
 
     @property
     def algorithm(self) -> vtk.vtkAlgorithm:
-        return self._graph.algorithm(
-            self.id
-        )
+        return self._graph.algorithm(self.id)
 
     @property
     def name(self) -> str:
-        return self._graph.node_state(
-            self.id
-        )["name"]
+        return self._graph.node_state(self.id)["name"]
 
     @property
     def class_name(self) -> str:
-        return self._graph.node_state(
-            self.id
-        )["class_name"]
+        return self._graph.node_state(self.id)["class_name"]
 
 
 @dataclass(frozen=True)
@@ -66,12 +60,8 @@ class PipelineEdge:
         value: dict,
     ) -> "PipelineEdge":
         return cls(
-            source_node_id=value[
-                "source_node_id"
-            ],
-            target_node_id=value[
-                "target_node_id"
-            ],
+            source_node_id=value["source_node_id"],
+            target_node_id=value["target_node_id"],
             source_port=int(
                 value.get(
                     "source_port",
@@ -125,9 +115,7 @@ class PipelineGraph:
                 self,
                 node_id,
             )
-            for node_id in self.state.pipeline[
-                "nodes"
-            ]
+            for node_id in self.state.pipeline["nodes"]
         }
 
     @property
@@ -135,12 +123,7 @@ class PipelineGraph:
         self,
     ) -> list[PipelineEdge]:
         return [
-            PipelineEdge.from_state(
-                value
-            )
-            for value in self.state.pipeline[
-                "edges"
-            ]
+            PipelineEdge.from_state(value) for value in self.state.pipeline["edges"]
         ]
 
     @property
@@ -158,9 +141,7 @@ class PipelineGraph:
         if node_id is None:
             return None
 
-        if node_id not in self.state.pipeline[
-            "nodes"
-        ]:
+        if node_id not in self.state.pipeline["nodes"]:
             return None
 
         return PipelineNode(
@@ -172,17 +153,13 @@ class PipelineGraph:
         self,
         node_id: str,
     ) -> dict:
-        return self.state.pipeline[
-            "nodes"
-        ][node_id]
+        return self.state.pipeline["nodes"][node_id]
 
     def algorithm(
         self,
         node_id: str,
     ) -> vtk.vtkAlgorithm:
-        return self._algorithms[
-            node_id
-        ]
+        return self._algorithms[node_id]
 
     # -------------------------------------------------------------------------
     # Nodes
@@ -196,50 +173,29 @@ class PipelineGraph:
     ) -> PipelineNode:
         node_id = uuid4().hex
 
-        self._algorithms[
-            node_id
-        ] = algorithm
+        self._algorithms[node_id] = algorithm
 
         node = {
             "id": node_id,
-            "name": (
-                name
-                or algorithm.GetClassName()
-            ),
-            "class_name": (
-                algorithm.GetClassName()
-            ),
-            "input_port_count": (
-                algorithm.GetNumberOfInputPorts()
-            ),
-            "output_port_count": (
-                algorithm.GetNumberOfOutputPorts()
-            ),
+            "name": (name or algorithm.GetClassName()),
+            "class_name": (algorithm.GetClassName()),
+            "input_port_count": (algorithm.GetNumberOfInputPorts()),
+            "output_port_count": (algorithm.GetNumberOfOutputPorts()),
             "properties": {},
             "input_arrays": {},
         }
 
-        pipeline_state = dict(
-            self.state.pipeline
-        )
-        nodes = dict(
-            pipeline_state["nodes"]
-        )
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
         nodes[node_id] = node
         pipeline_state["nodes"] = nodes
 
-        self.state.pipeline = (
-            pipeline_state
-        )
+        self.state.pipeline = pipeline_state
 
-        self.sync_node_from_runtime(
-            node_id
-        )
+        self.sync_node_from_runtime(node_id)
 
         if self.active_node_id is None:
-            self.state.active_node_id = (
-                node_id
-            )
+            self.state.active_node_id = node_id
 
         return PipelineNode(
             self,
@@ -250,72 +206,42 @@ class PipelineGraph:
         self,
         node_id: str,
     ) -> None:
-        if node_id not in self.state.pipeline[
-            "nodes"
-        ]:
+        if node_id not in self.state.pipeline["nodes"]:
             return
 
         affected_targets = {
             edge.target_node_id
             for edge in self.edges
-            if (
-                edge.source_node_id
-                == node_id
-                or edge.target_node_id
-                == node_id
-            )
+            if (edge.source_node_id == node_id or edge.target_node_id == node_id)
         }
 
-        pipeline_state = dict(
-            self.state.pipeline
-        )
+        pipeline_state = dict(self.state.pipeline)
 
-        nodes = dict(
-            pipeline_state["nodes"]
-        )
+        nodes = dict(pipeline_state["nodes"])
         nodes.pop(
             node_id,
             None,
         )
 
-        pipeline_state["nodes"] = (
-            nodes
-        )
+        pipeline_state["nodes"] = nodes
 
         pipeline_state["edges"] = [
             edge
-            for edge in pipeline_state[
-                "edges"
-            ]
-            if (
-                edge["source_node_id"]
-                != node_id
-                and edge[
-                    "target_node_id"
-                ]
-                != node_id
-            )
+            for edge in pipeline_state["edges"]
+            if (edge["source_node_id"] != node_id and edge["target_node_id"] != node_id)
         ]
 
-        self.state.pipeline = (
-            pipeline_state
-        )
+        self.state.pipeline = pipeline_state
 
         self._algorithms.pop(
             node_id,
             None,
         )
 
-        for target_node_id in (
-            affected_targets
-        ):
+        for target_node_id in affected_targets:
             if target_node_id in nodes:
-                self._sync_inputs(
-                    target_node_id
-                )
-                self.sync_node_from_runtime(
-                    target_node_id
-                )
+                self._sync_inputs(target_node_id)
+                self.sync_node_from_runtime(target_node_id)
 
         if self.active_node_id == node_id:
             self.state.active_node_id = next(
@@ -327,20 +253,10 @@ class PipelineGraph:
         self,
         node_id: str | None,
     ) -> None:
-        if (
-            node_id is not None
-            and node_id
-            not in self.state.pipeline[
-                "nodes"
-            ]
-        ):
-            raise KeyError(
-                node_id
-            )
+        if node_id is not None and node_id not in self.state.pipeline["nodes"]:
+            raise KeyError(node_id)
 
-        self.state.active_node_id = (
-            node_id
-        )
+        self.state.active_node_id = node_id
 
     # -------------------------------------------------------------------------
     # Edges
@@ -355,38 +271,20 @@ class PipelineGraph:
         target_port: int = 0,
     ) -> PipelineEdge:
         edge = PipelineEdge(
-            source_node_id=(
-                source_node_id
-            ),
-            target_node_id=(
-                target_node_id
-            ),
+            source_node_id=(source_node_id),
+            target_node_id=(target_node_id),
             source_port=source_port,
             target_port=target_port,
         )
 
-        pipeline_state = dict(
-            self.state.pipeline
-        )
-        edges = list(
-            pipeline_state["edges"]
-        )
-        edges.append(
-            edge.to_state()
-        )
-        pipeline_state["edges"] = (
-            edges
-        )
-        self.state.pipeline = (
-            pipeline_state
-        )
+        pipeline_state = dict(self.state.pipeline)
+        edges = list(pipeline_state["edges"])
+        edges.append(edge.to_state())
+        pipeline_state["edges"] = edges
+        self.state.pipeline = pipeline_state
 
-        self._sync_inputs(
-            target_node_id
-        )
-        self.sync_node_from_runtime(
-            target_node_id
-        )
+        self._sync_inputs(target_node_id)
+        self.sync_node_from_runtime(target_node_id)
 
         return edge
 
@@ -396,39 +294,20 @@ class PipelineGraph:
     ) -> None:
         edge_state = edge.to_state()
 
-        pipeline_state = dict(
-            self.state.pipeline
-        )
-        edges = list(
-            pipeline_state["edges"]
-        )
-        edges.remove(
-            edge_state
-        )
-        pipeline_state["edges"] = (
-            edges
-        )
-        self.state.pipeline = (
-            pipeline_state
-        )
+        pipeline_state = dict(self.state.pipeline)
+        edges = list(pipeline_state["edges"])
+        edges.remove(edge_state)
+        pipeline_state["edges"] = edges
+        self.state.pipeline = pipeline_state
 
-        self._sync_inputs(
-            edge.target_node_id
-        )
-        self.sync_node_from_runtime(
-            edge.target_node_id
-        )
+        self._sync_inputs(edge.target_node_id)
+        self.sync_node_from_runtime(edge.target_node_id)
 
     def incoming_edges(
         self,
         node_id: str,
     ) -> list[PipelineEdge]:
-        return [
-            edge
-            for edge in self.edges
-            if edge.target_node_id
-            == node_id
-        ]
+        return [edge for edge in self.edges if edge.target_node_id == node_id]
 
     # -------------------------------------------------------------------------
     # Properties / input arrays
@@ -446,9 +325,7 @@ class PipelineGraph:
         algorithm directly.
         """
 
-        algorithm = self.algorithm(
-            node_id
-        )
+        algorithm = self.algorithm(node_id)
 
         properties = {
             descriptor.name: {
@@ -458,9 +335,7 @@ class PipelineGraph:
                 "value": descriptor.value,
                 "size": descriptor.size,
             }
-            for descriptor in inspect_properties(
-                algorithm
-            )
+            for descriptor in inspect_properties(algorithm)
         }
 
         input_arrays = {
@@ -468,26 +343,16 @@ class PipelineGraph:
                 "index": descriptor.index,
                 "label": descriptor.label,
                 "port": descriptor.port,
-                "connection": (
-                    descriptor.connection
-                ),
+                "connection": (descriptor.connection),
                 "value": descriptor.value,
                 "items": descriptor.items,
             }
-            for descriptor in inspect_input_arrays(
-                algorithm
-            )
+            for descriptor in inspect_input_arrays(algorithm)
         }
 
-        pipeline_state = dict(
-            self.state.pipeline
-        )
-        nodes = dict(
-            pipeline_state["nodes"]
-        )
-        node = dict(
-            nodes[node_id]
-        )
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
+        node = dict(nodes[node_id])
 
         node.update(
             {
@@ -495,15 +360,9 @@ class PipelineGraph:
                     "name",
                     algorithm.GetClassName(),
                 ),
-                "class_name": (
-                    algorithm.GetClassName()
-                ),
-                "input_port_count": (
-                    algorithm.GetNumberOfInputPorts()
-                ),
-                "output_port_count": (
-                    algorithm.GetNumberOfOutputPorts()
-                ),
+                "class_name": (algorithm.GetClassName()),
+                "input_port_count": (algorithm.GetNumberOfInputPorts()),
+                "output_port_count": (algorithm.GetNumberOfOutputPorts()),
                 "properties": properties,
                 "input_arrays": input_arrays,
             }
@@ -511,9 +370,7 @@ class PipelineGraph:
 
         nodes[node_id] = node
         pipeline_state["nodes"] = nodes
-        self.state.pipeline = (
-            pipeline_state
-        )
+        self.state.pipeline = pipeline_state
 
     def set_property(
         self,
@@ -521,15 +378,11 @@ class PipelineGraph:
         name: str,
         value,
     ) -> None:
-        algorithm = self.algorithm(
-            node_id
-        )
+        algorithm = self.algorithm(node_id)
 
         descriptor = next(
             descriptor
-            for descriptor in inspect_properties(
-                algorithm
-            )
+            for descriptor in inspect_properties(algorithm)
             if descriptor.name == name
         )
 
@@ -540,9 +393,7 @@ class PipelineGraph:
         )
 
         algorithm.Update()
-        self.sync_node_from_runtime(
-            node_id
-        )
+        self.sync_node_from_runtime(node_id)
 
     def set_vector_component(
         self,
@@ -551,17 +402,9 @@ class PipelineGraph:
         index: int,
         value,
     ) -> None:
-        property_state = (
-            self.node_state(node_id)[
-                "properties"
-            ][name]
-        )
-        values = list(
-            property_state["value"]
-        )
-        values[int(index)] = float(
-            value
-        )
+        property_state = self.node_state(node_id)["properties"][name]
+        values = list(property_state["value"])
+        values[int(index)] = float(value)
         self.set_property(
             node_id,
             name,
@@ -578,17 +421,9 @@ class PipelineGraph:
         if value in ("", None):
             return
 
-        property_state = (
-            self.node_state(node_id)[
-                "properties"
-            ][name]
-        )
-        values = list(
-            property_state["value"]
-        )
-        values[int(index)] = float(
-            value
-        )
+        property_state = self.node_state(node_id)["properties"][name]
+        values = list(property_state["value"])
+        values[int(index)] = float(value)
         self.set_property(
             node_id,
             name,
@@ -600,19 +435,9 @@ class PipelineGraph:
         node_id: str,
         name: str,
     ) -> None:
-        property_state = (
-            self.node_state(node_id)[
-                "properties"
-            ][name]
-        )
-        values = list(
-            property_state["value"]
-        )
-        values.append(
-            values[-1]
-            if values
-            else 0.0
-        )
+        property_state = self.node_state(node_id)["properties"][name]
+        values = list(property_state["value"])
+        values.append(values[-1] if values else 0.0)
         self.set_property(
             node_id,
             name,
@@ -625,20 +450,11 @@ class PipelineGraph:
         name: str,
         index: int,
     ) -> None:
-        property_state = (
-            self.node_state(node_id)[
-                "properties"
-            ][name]
-        )
-        values = list(
-            property_state["value"]
-        )
+        property_state = self.node_state(node_id)["properties"][name]
+        values = list(property_state["value"])
         index = int(index)
 
-        if (
-            index < 0
-            or index >= len(values)
-        ):
+        if index < 0 or index >= len(values):
             return
 
         del values[index]
@@ -657,15 +473,11 @@ class PipelineGraph:
         if not value:
             return
 
-        algorithm = self.algorithm(
-            node_id
-        )
+        algorithm = self.algorithm(node_id)
 
         descriptor = next(
             descriptor
-            for descriptor in inspect_input_arrays(
-                algorithm
-            )
+            for descriptor in inspect_input_arrays(algorithm)
             if descriptor.index == int(index)
         )
 
@@ -676,9 +488,7 @@ class PipelineGraph:
         )
 
         algorithm.Update()
-        self.sync_node_from_runtime(
-            node_id
-        )
+        self.sync_node_from_runtime(node_id)
 
     # -------------------------------------------------------------------------
     # Runtime VTK connectivity
@@ -688,29 +498,17 @@ class PipelineGraph:
         self,
         target_node_id: str,
     ) -> None:
-        target = self.algorithm(
-            target_node_id
-        )
+        target = self.algorithm(target_node_id)
 
-        for port in range(
-            target.GetNumberOfInputPorts()
-        ):
-            target.RemoveAllInputConnections(
-                port
-            )
+        for port in range(target.GetNumberOfInputPorts()):
+            target.RemoveAllInputConnections(port)
 
-        for edge in self.incoming_edges(
-            target_node_id
-        ):
-            source = self.algorithm(
-                edge.source_node_id
-            )
+        for edge in self.incoming_edges(target_node_id):
+            source = self.algorithm(edge.source_node_id)
 
             target.AddInputConnection(
                 edge.target_port,
-                source.GetOutputPort(
-                    edge.source_port
-                ),
+                source.GetOutputPort(edge.source_port),
             )
 
         target.Modified()

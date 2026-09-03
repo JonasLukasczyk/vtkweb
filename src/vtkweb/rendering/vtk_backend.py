@@ -30,9 +30,7 @@ class VTKRepresentationHandle:
     pipeline_filter: vtk.vtkAlgorithm | None = None
 
 
-class VTKRenderingBackend(
-    RenderingBackend
-):
+class VTKRenderingBackend(RenderingBackend):
     name = "vtk"
 
     def __init__(self) -> None:
@@ -57,13 +55,9 @@ class VTKRenderingBackend(
         renderer = vtk.vtkRenderer()
 
         render_window = vtk.vtkRenderWindow()
-        render_window.AddRenderer(
-            renderer
-        )
+        render_window.AddRenderer(renderer)
 
-        render_window.SetOffScreenRendering(
-            1
-        )
+        render_window.SetOffScreenRendering(1)
 
         # ---------------------------------------------------------------------
         # VtkLocalView keepalive workaround
@@ -76,9 +70,7 @@ class VTKRenderingBackend(
         # renderer never becomes empty.
         # ---------------------------------------------------------------------
 
-        keepalive_source = (
-            vtk.vtkSphereSource()
-        )
+        keepalive_source = vtk.vtkSphereSource()
 
         keepalive_source.SetCenter(
             0.0,
@@ -86,49 +78,29 @@ class VTKRenderingBackend(
             0.0,
         )
 
-        keepalive_source.SetRadius(
-            0.1
-        )
+        keepalive_source.SetRadius(0.1)
 
-        keepalive_source.SetThetaResolution(
-            8
-        )
+        keepalive_source.SetThetaResolution(8)
 
-        keepalive_source.SetPhiResolution(
-            8
-        )
+        keepalive_source.SetPhiResolution(8)
 
-        keepalive_mapper = (
-            vtk.vtkPolyDataMapper()
-        )
+        keepalive_mapper = vtk.vtkPolyDataMapper()
 
-        keepalive_mapper.SetInputConnection(
-            keepalive_source.GetOutputPort()
-        )
+        keepalive_mapper.SetInputConnection(keepalive_source.GetOutputPort())
 
         keepalive_actor = vtk.vtkActor()
 
-        keepalive_actor.SetMapper(
-            keepalive_mapper
-        )
+        keepalive_actor.SetMapper(keepalive_mapper)
 
         # Keep this visible for now so we can verify that the workaround
         # actually fixes the empty-scene issue.
-        keepalive_actor.GetProperty().SetOpacity(
-            0.0
-        )
+        keepalive_actor.GetProperty().SetOpacity(0.0)
 
-        keepalive_actor.SetPickable(
-            False
-        )
+        keepalive_actor.SetPickable(False)
 
-        renderer.AddActor(
-            keepalive_actor
-        )
+        renderer.AddActor(keepalive_actor)
 
-        self._views[
-            view.id
-        ] = VTKViewHandle(
+        self._views[view.id] = VTKViewHandle(
             renderer=renderer,
             render_window=render_window,
             keepalive_source=keepalive_source,
@@ -136,19 +108,13 @@ class VTKRenderingBackend(
             keepalive_actor=keepalive_actor,
         )
 
-        self.set_view_settings(
-            view
-        )
+        self.set_view_settings(view)
 
     def remove_view(
         self,
         view_id: str,
     ) -> None:
-        keys = [
-            key
-            for key in self._representations
-            if key[1] == view_id
-        ]
+        keys = [key for key in self._representations if key[1] == view_id]
 
         for representation_id, _ in keys:
             self.remove_representation(
@@ -165,21 +131,15 @@ class VTKRenderingBackend(
         self,
         view_id: str,
     ) -> vtk.vtkRenderWindow:
-        return self._views[
-            view_id
-        ].render_window
+        return self._views[view_id].render_window
 
     def set_view_settings(
         self,
         view: RenderView,
     ) -> None:
-        handle = self._views[
-            view.id
-        ]
+        handle = self._views[view.id]
 
-        handle.renderer.SetBackground(
-            *view.settings.background_color
-        )
+        handle.renderer.SetBackground(*view.settings.background_color)
 
         handle.renderer.Modified()
         handle.render_window.Modified()
@@ -188,9 +148,7 @@ class VTKRenderingBackend(
         self,
         view_id: str,
     ) -> None:
-        handle = self._views[
-            view_id
-        ]
+        handle = self._views[view_id]
 
         handle.renderer.ResetCamera()
 
@@ -220,17 +178,11 @@ class VTKRenderingBackend(
             source,
         )
 
-        self._representations[
-            key
-        ] = handle
+        self._representations[key] = handle
 
-        view_handle = self._views[
-            view.id
-        ]
+        view_handle = self._views[view.id]
 
-        view_handle.renderer.AddActor(
-            handle.actor
-        )
+        view_handle.renderer.AddActor(handle.actor)
 
         self._apply_representation(
             representation,
@@ -251,11 +203,7 @@ class VTKRenderingBackend(
             view.id,
         )
 
-        handle = (
-            self._representations.get(
-                key
-            )
-        )
+        handle = self._representations.get(key)
 
         if handle is None:
             self.add_representation(
@@ -265,10 +213,7 @@ class VTKRenderingBackend(
             )
             return
 
-        if (
-            handle.kind
-            != representation.kind
-        ):
+        if handle.kind != representation.kind:
             self.remove_representation(
                 representation.id,
                 view.id,
@@ -287,9 +232,7 @@ class VTKRenderingBackend(
             handle,
         )
 
-        view_handle = self._views[
-            view.id
-        ]
+        view_handle = self._views[view.id]
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -304,26 +247,20 @@ class VTKRenderingBackend(
             view_id,
         )
 
-        handle = (
-            self._representations.pop(
-                key,
-                None,
-            )
+        handle = self._representations.pop(
+            key,
+            None,
         )
 
         if handle is None:
             return
 
-        view = self._views.get(
-            view_id
-        )
+        view = self._views.get(view_id)
 
         if view is None:
             return
 
-        view.renderer.RemoveActor(
-            handle.actor
-        )
+        view.renderer.RemoveActor(handle.actor)
 
         # Keepalive actor remains, so this renderer never becomes empty.
         view.renderer.Modified()
@@ -342,38 +279,21 @@ class VTKRenderingBackend(
 
         pipeline_filter = None
 
-        source_port = source.GetOutputPort(
-            representation.output_port
-        )
+        source_port = source.GetOutputPort(representation.output_port)
 
-        if (
-            representation.kind
-            == "outline"
-        ):
-            pipeline_filter = (
-                vtk.vtkOutlineFilter()
-            )
+        if representation.kind == "outline":
+            pipeline_filter = vtk.vtkOutlineFilter()
 
-            pipeline_filter.SetInputConnection(
-                source_port
-            )
+            pipeline_filter.SetInputConnection(source_port)
 
-            mapper.SetInputConnection(
-                pipeline_filter.GetOutputPort(
-                    0
-                )
-            )
+            mapper.SetInputConnection(pipeline_filter.GetOutputPort(0))
 
         else:
-            mapper.SetInputConnection(
-                source_port
-            )
+            mapper.SetInputConnection(source_port)
 
         actor = vtk.vtkActor()
 
-        actor.SetMapper(
-            mapper
-        )
+        actor.SetMapper(mapper)
 
         return VTKRepresentationHandle(
             mapper=mapper,
@@ -393,24 +313,14 @@ class VTKRenderingBackend(
 
         # If a concrete backend representation exists for this view,
         # it is visible by definition.
-        actor.SetVisibility(
-            1
-        )
+        actor.SetVisibility(1)
 
-        if (
-            representation.kind
-            == "wireframe"
-        ):
+        if representation.kind == "wireframe":
             prop.SetRepresentationToWireframe()
         else:
             prop.SetRepresentationToSurface()
 
-        if (
-            representation.kind
-            == "outline"
-            or representation.array_name
-            is None
-        ):
+        if representation.kind == "outline" or representation.array_name is None:
             mapper.ScalarVisibilityOff()
 
             mapper.Modified()
@@ -420,27 +330,17 @@ class VTKRenderingBackend(
 
         mapper.ScalarVisibilityOn()
 
-        if (
-            representation.association
-            == "point"
-        ):
+        if representation.association == "point":
             mapper.SetScalarModeToUsePointFieldData()
         else:
             mapper.SetScalarModeToUseCellFieldData()
 
-        mapper.SelectColorArray(
-            representation.array_name
-        )
+        mapper.SelectColorArray(representation.array_name)
 
         mapper.UseLookupTableScalarRangeOff()
 
-        if (
-            representation.scalar_range
-            is not None
-        ):
-            mapper.SetScalarRange(
-                *representation.scalar_range
-            )
+        if representation.scalar_range is not None:
+            mapper.SetScalarRange(*representation.scalar_range)
 
         mapper.Modified()
         actor.Modified()

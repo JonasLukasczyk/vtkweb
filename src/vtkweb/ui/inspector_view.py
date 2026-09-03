@@ -25,9 +25,7 @@ def initialize_inspector(
     ) -> None:
         state.inspector_tab = value
 
-    ctrl.set_inspector_tab = (
-        set_inspector_tab
-    )
+    ctrl.set_inspector_tab = set_inspector_tab
 
 
 def build_inspector_view(
@@ -36,20 +34,13 @@ def build_inspector_view(
     with v3.VCol(
         cols=3,
         classes="pa-3",
-        style=(
-            "height:100vh;"
-            "overflow-y:auto;"
-            "min-width:0;"
-        ),
+        style=("height:100vh;overflow-y:auto;min-width:0;"),
     ):
         v3.VLabel("Inspector")
 
         with v3.VCard(
             classes="mt-2 pa-3",
-            style=(
-                "width:100%;"
-                "min-width:0;"
-            ),
+            style=("width:100%;min-width:0;"),
         ):
             v3.VCardTitle(
                 "{{ pipeline.nodes[active_node_id]?.name || '' }}",
@@ -85,31 +76,16 @@ def build_inspector_view(
             )
 
             with html.Div(
-                v_if=(
-                    "inspector_tab === "
-                    "'properties'"
-                ),
+                v_if=("inspector_tab === 'properties'"),
             ):
-                build_properties_tab(
-                    ctrl
-                )
+                build_properties_tab(ctrl)
 
             with html.Div(
-                v_if=(
-                    "inspector_tab === "
-                    "'representations'"
-                ),
+                v_if=("inspector_tab === 'representations'"),
             ):
-                build_representations_tab(
-                    ctrl
-                )
+                build_representations_tab(ctrl)
 
             with html.Div(
-                v_if=(
-                    "inspector_tab === "
-                    "'view'"
-                ),
+                v_if=("inspector_tab === 'view'"),
             ):
-                build_view_tab(
-                    ctrl
-                )
+                build_view_tab(ctrl)

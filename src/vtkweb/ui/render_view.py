@@ -25,11 +25,7 @@ def build_render_view(
 
     view = rendering.active_view
 
-    render_window = (
-        backend.get_render_window(
-            view.id
-        )
-    )
+    render_window = backend.get_render_window(view.id)
 
     with v3.VCol(
         cols=6,
@@ -39,20 +35,13 @@ def build_render_view(
         vtk_view = vtk_widgets.VtkLocalView(
             render_window,
             ref=f"render_view_{view.id}",
-            style=(
-                "height:100%;"
-                "width:100%;"
-            ),
+            style=("height:100%;width:100%;"),
             click=(
                 ctrl.set_active_render_view,
                 f"['{view.id}']",
             ),
         )
 
-    ctrl.view_update = (
-        vtk_view.update
-    )
+    ctrl.view_update = vtk_view.update
 
-    ctrl.view_reset_camera = (
-        vtk_view.reset_camera
-    )
+    ctrl.view_reset_camera = vtk_view.reset_camera

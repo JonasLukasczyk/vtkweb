@@ -102,17 +102,10 @@ def build_ui(
     # Initial inspector state
     # -------------------------------------------------------------------------
 
-    if (
-        pipeline.active_node_id
-        is not None
-    ):
-        ctrl.update_properties_state(
-            pipeline.active_node_id
-        )
+    if pipeline.active_node_id is not None:
+        ctrl.update_properties_state(pipeline.active_node_id)
 
-        ctrl.update_representation_state(
-            pipeline.active_node_id
-        )
+        ctrl.update_representation_state(pipeline.active_node_id)
 
     # -------------------------------------------------------------------------
     # UI
@@ -123,9 +116,7 @@ def build_ui(
         show_drawer=False,
         width=220,
     ) as layout:
-        layout.title.set_text(
-            "vtkweb"
-        )
+        layout.title.set_text("vtkweb")
 
         # ---------------------------------------------------------------------
         # Drawer
@@ -137,13 +128,9 @@ def build_ui(
                 nav=True,
             ):
                 v3.VListItem(
-                    title=(
-                        "Add Source / Filter"
-                    ),
+                    title=("Add Source / Filter"),
                     prepend_icon="mdi-plus",
-                    click=(
-                        ctrl.open_filter_browser
-                    ),
+                    click=(ctrl.open_filter_browser),
                 )
 
         # ---------------------------------------------------------------------
@@ -151,17 +138,11 @@ def build_ui(
         # ---------------------------------------------------------------------
 
         with layout.content:
-            client.Style(
-                INSPECTOR_STYLE
-            )
+            client.Style(INSPECTOR_STYLE)
 
-            client.Style(
-                FILTER_BROWSER_STYLE
-            )
+            client.Style(FILTER_BROWSER_STYLE)
 
-            client.Style(
-                PIPELINE_VIEW_STYLE
-            )
+            client.Style(PIPELINE_VIEW_STYLE)
 
             # -----------------------------------------------------------------
             # Global keyboard shortcuts

@@ -21,10 +21,7 @@ def test_create_pipeline():
     assert edge.source_node_id == sphere.id
     assert edge.target_node_id == elevation.id
 
-    assert (
-        elevation.algorithm.GetNumberOfInputConnections(0)
-        == 1
-    )
+    assert elevation.algorithm.GetNumberOfInputConnections(0) == 1
 
 
 def test_pipeline_executes():
@@ -51,17 +48,11 @@ def test_disconnect():
 
     edge = graph.connect(sphere.id, elevation.id)
 
-    assert (
-        elevation.algorithm.GetNumberOfInputConnections(0)
-        == 1
-    )
+    assert elevation.algorithm.GetNumberOfInputConnections(0) == 1
 
     graph.disconnect(edge)
 
-    assert (
-        elevation.algorithm.GetNumberOfInputConnections(0)
-        == 0
-    )
+    assert elevation.algorithm.GetNumberOfInputConnections(0) == 0
 
 
 def test_invalid_port_is_rejected():

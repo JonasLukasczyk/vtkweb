@@ -32,30 +32,20 @@ class RenderManager:
     ) -> None:
         self.state = state
         self.pipeline = pipeline
-        self.backend = (
-            backend
-            or VTKRenderingBackend()
-        )
+        self.backend = backend or VTKRenderingBackend()
 
         self.state.views = {}
         self.state.representations = {}
         self.state.active_view_id = None
 
-        view = self.add_view(
-            "View 1"
-        )
-        self.set_active_view(
-            view.id
-        )
+        view = self.add_view("View 1")
+        self.set_active_view(view.id)
 
         # Preserve the current application's behavior: nodes that already exist
         # when rendering is created receive one default surface representation
         # in the first view. Visibility itself is represented only by view_ids.
         for node in pipeline.nodes.values():
-            if (
-                node.algorithm.GetNumberOfOutputPorts()
-                > 0
-            ):
+            if node.algorithm.GetNumberOfOutputPorts() > 0:
                 self.add_representation(
                     node.id,
                     output_port=0,
@@ -63,9 +53,7 @@ class RenderManager:
                     view_ids={view.id},
                 )
 
-        self.reset_camera(
-            view.id
-        )
+        self.reset_camera(view.id)
 
     # -------------------------------------------------------------------------
     # Views
@@ -75,10 +63,7 @@ class RenderManager:
     def views(
         self,
     ) -> tuple[RenderView, ...]:
-        return tuple(
-            self.get_view(view_id)
-            for view_id in self.state.views
-        )
+        return tuple(self.get_view(view_id) for view_id in self.state.views)
 
     @property
     def active_view_id(
@@ -90,24 +75,18 @@ class RenderManager:
     def active_view(
         self,
     ) -> RenderView:
-        return self.get_view(
-            self.active_view_id
-        )
+        return self.get_view(self.active_view_id)
 
     def get_view(
         self,
         view_id: str,
     ) -> RenderView:
-        value = self.state.views[
-            view_id
-        ]
+        value = self.state.views[view_id]
         return RenderView(
             id=value["id"],
             name=value["name"],
             settings=ViewSettings(
-                background_color=_hex_to_rgb(
-                    value["background_color"]
-                )
+                background_color=_hex_to_rgb(value["background_color"])
             ),
         )
 
@@ -116,9 +95,7 @@ class RenderManager:
         name: str | None = None,
     ) -> RenderView:
         if name is None:
-            name = (
-                f"View {len(self.state.views) + 1}"
-            )
+            name = f"View {len(self.state.views) + 1}"
 
         view_id = uuid4().hex
         value = {
@@ -127,44 +104,30 @@ class RenderManager:
             "background_color": "#1a1a1a",
         }
 
-        views = dict(
-            self.state.views
-        )
+        views = dict(self.state.views)
         views[view_id] = value
         self.state.views = views
 
-        view = self.get_view(
-            view_id
-        )
-        self.backend.add_view(
-            view
-        )
+        view = self.get_view(view_id)
+        self.backend.add_view(view)
         return view
 
     def remove_view(
         self,
         view_id: str,
     ) -> None:
-        self.get_view(
-            view_id
-        )
+        self.get_view(view_id)
 
-        for representation in tuple(
-            self.representations
-        ):
+        for representation in tuple(self.representations):
             if view_id in representation.view_ids:
                 self.unassign_representation(
                     representation.id,
                     view_id,
                 )
 
-        self.backend.remove_view(
-            view_id
-        )
+        self.backend.remove_view(view_id)
 
-        views = dict(
-            self.state.views
-        )
+        views = dict(self.state.views)
         del views[view_id]
         self.state.views = views
 
@@ -178,12 +141,8 @@ class RenderManager:
         self,
         view_id: str,
     ) -> None:
-        self.get_view(
-            view_id
-        )
-        self.state.active_view_id = (
-            view_id
-        )
+        self.get_view(view_id)
+        self.state.active_view_id = view_id
 
     # -------------------------------------------------------------------------
     # Representations
@@ -194,44 +153,29 @@ class RenderManager:
         self,
     ) -> tuple[Representation, ...]:
         return tuple(
-            self.get_representation(
-                representation_id
-            )
-            for representation_id
-            in self.state.representations
+            self.get_representation(representation_id)
+            for representation_id in self.state.representations
         )
 
     def get_representation(
         self,
         representation_id: str,
     ) -> Representation:
-        value = self.state.representations[
-            representation_id
-        ]
+        value = self.state.representations[representation_id]
 
-        scalar_range = value.get(
-            "scalar_range"
-        )
+        scalar_range = value.get("scalar_range")
 
         return Representation(
             id=value["id"],
             node_id=value["node_id"],
-            output_port=int(
-                value["output_port"]
-            ),
+            output_port=int(value["output_port"]),
             kind=value["kind"],
-            array_name=value.get(
-                "array_name"
-            ),
+            array_name=value.get("array_name"),
             association=value.get(
                 "association",
                 "point",
             ),
-            scalar_range=(
-                tuple(scalar_range)
-                if scalar_range is not None
-                else None
-            ),
+            scalar_range=(tuple(scalar_range) if scalar_range is not None else None),
             view_ids=set(
                 value.get(
                     "view_ids",
@@ -247,16 +191,10 @@ class RenderManager:
     ) -> tuple[Representation, ...]:
         return tuple(
             representation
-            for representation
-            in self.representations
+            for representation in self.representations
             if (
-                representation.node_id
-                == node_id
-                and (
-                    output_port is None
-                    or representation.output_port
-                    == output_port
-                )
+                representation.node_id == node_id
+                and (output_port is None or representation.output_port == output_port)
             )
         )
 
@@ -269,22 +207,12 @@ class RenderManager:
         view_ids: Iterable[str] = (),
     ) -> Representation:
         if kind not in REPRESENTATION_KINDS:
-            raise ValueError(
-                f"Unknown representation kind: {kind}"
-            )
+            raise ValueError(f"Unknown representation kind: {kind}")
 
-        node = self.pipeline.nodes[
-            node_id
-        ]
-        output_count = (
-            node.algorithm
-            .GetNumberOfOutputPorts()
-        )
+        node = self.pipeline.nodes[node_id]
+        output_count = node.algorithm.GetNumberOfOutputPorts()
 
-        if (
-            output_port < 0
-            or output_port >= output_count
-        ):
+        if output_port < 0 or output_port >= output_count:
             raise ValueError(
                 f"{node.name} has "
                 f"{output_count} output port(s); "
@@ -295,9 +223,7 @@ class RenderManager:
         value = {
             "id": representation_id,
             "node_id": node_id,
-            "output_port": int(
-                output_port
-            ),
+            "output_port": int(output_port),
             "kind": kind,
             "array_name": None,
             "association": "point",
@@ -305,15 +231,9 @@ class RenderManager:
             "view_ids": [],
         }
 
-        representations = dict(
-            self.state.representations
-        )
-        representations[
-            representation_id
-        ] = value
-        self.state.representations = (
-            representations
-        )
+        representations = dict(self.state.representations)
+        representations[representation_id] = value
+        self.state.representations = representations
 
         for view_id in view_ids:
             self.assign_representation(
@@ -321,51 +241,33 @@ class RenderManager:
                 view_id,
             )
 
-        return self.get_representation(
-            representation_id
-        )
+        return self.get_representation(representation_id)
 
     def remove_representation(
         self,
         representation_id: str,
     ) -> None:
-        representation = (
-            self.get_representation(
-                representation_id
-            )
-        )
+        representation = self.get_representation(representation_id)
 
-        for view_id in tuple(
-            representation.view_ids
-        ):
+        for view_id in tuple(representation.view_ids):
             self.unassign_representation(
                 representation_id,
                 view_id,
             )
 
-        representations = dict(
-            self.state.representations
-        )
+        representations = dict(self.state.representations)
         representations.pop(
             representation_id,
             None,
         )
-        self.state.representations = (
-            representations
-        )
+        self.state.representations = representations
 
     def remove_node(
         self,
         node_id: str,
     ) -> None:
-        for representation in list(
-            self.get_representations(
-                node_id
-            )
-        ):
-            self.remove_representation(
-                representation.id
-            )
+        for representation in list(self.get_representations(node_id)):
+            self.remove_representation(representation.id)
 
     # -------------------------------------------------------------------------
     # View assignment / visibility
@@ -376,33 +278,20 @@ class RenderManager:
         representation_id: str,
         view_id: str,
     ) -> bool:
-        return (
-            view_id
-            in self.get_representation(
-                representation_id
-            ).view_ids
-        )
+        return view_id in self.get_representation(representation_id).view_ids
 
     def assign_representation(
         self,
         representation_id: str,
         view_id: str,
     ) -> None:
-        representation = (
-            self.get_representation(
-                representation_id
-            )
-        )
+        representation = self.get_representation(representation_id)
 
         if view_id in representation.view_ids:
             return
 
-        view = self.get_view(
-            view_id
-        )
-        node = self.pipeline.nodes[
-            representation.node_id
-        ]
+        view = self.get_view(view_id)
+        node = self.pipeline.nodes[representation.node_id]
 
         self.backend.add_representation(
             representation,
@@ -410,11 +299,7 @@ class RenderManager:
             node.algorithm,
         )
 
-        value = dict(
-            self.state.representations[
-                representation_id
-            ]
-        )
+        value = dict(self.state.representations[representation_id])
         value["view_ids"] = [
             *value.get(
                 "view_ids",
@@ -432,11 +317,7 @@ class RenderManager:
         representation_id: str,
         view_id: str,
     ) -> None:
-        representation = (
-            self.get_representation(
-                representation_id
-            )
-        )
+        representation = self.get_representation(representation_id)
 
         if view_id not in representation.view_ids:
             return
@@ -446,11 +327,7 @@ class RenderManager:
             view_id,
         )
 
-        value = dict(
-            self.state.representations[
-                representation_id
-            ]
-        )
+        value = dict(self.state.representations[representation_id])
         value["view_ids"] = [
             item
             for item in value.get(
@@ -491,8 +368,7 @@ class RenderManager:
     ) -> bool:
         return any(
             view_id in representation.view_ids
-            for representation
-            in self.get_representations(
+            for representation in self.get_representations(
                 node_id,
                 output_port,
             )
@@ -512,12 +388,10 @@ class RenderManager:
         )
 
         if not representations:
-            representation = (
-                self.add_representation(
-                    node_id,
-                    output_port=output_port,
-                    kind="surface",
-                )
+            representation = self.add_representation(
+                node_id,
+                output_port=output_port,
+                kind="surface",
             )
             self.assign_representation(
                 representation.id,
@@ -526,9 +400,7 @@ class RenderManager:
             return
 
         visible = any(
-            view_id in representation.view_ids
-            for representation
-            in representations
+            view_id in representation.view_ids for representation in representations
         )
 
         if visible:
@@ -555,23 +427,15 @@ class RenderManager:
         kind: str,
     ) -> None:
         if kind not in REPRESENTATION_KINDS:
-            raise ValueError(
-                f"Unknown representation kind: {kind}"
-            )
+            raise ValueError(f"Unknown representation kind: {kind}")
 
-        value = dict(
-            self.state.representations[
-                representation_id
-            ]
-        )
+        value = dict(self.state.representations[representation_id])
         value["kind"] = kind
         self._set_representation_state(
             representation_id,
             value,
         )
-        self._update_representation(
-            representation_id
-        )
+        self._update_representation(representation_id)
 
     def set_array(
         self,
@@ -579,11 +443,7 @@ class RenderManager:
         array_name: str | None,
         association: str = "point",
     ) -> None:
-        representation = (
-            self.get_representation(
-                representation_id
-            )
-        )
+        representation = self.get_representation(representation_id)
 
         scalar_range = None
         if array_name is not None:
@@ -594,19 +454,13 @@ class RenderManager:
                 association,
             )
 
-        value = dict(
-            self.state.representations[
-                representation_id
-            ]
-        )
+        value = dict(self.state.representations[representation_id])
         value.update(
             {
                 "array_name": array_name,
                 "association": association,
                 "scalar_range": (
-                    list(scalar_range)
-                    if scalar_range is not None
-                    else None
+                    list(scalar_range) if scalar_range is not None else None
                 ),
             }
         )
@@ -614,9 +468,7 @@ class RenderManager:
             representation_id,
             value,
         )
-        self._update_representation(
-            representation_id
-        )
+        self._update_representation(representation_id)
 
     def set_scalar_range(
         self,
@@ -624,11 +476,7 @@ class RenderManager:
         minimum: float,
         maximum: float,
     ) -> None:
-        value = dict(
-            self.state.representations[
-                representation_id
-            ]
-        )
+        value = dict(self.state.representations[representation_id])
         value["scalar_range"] = [
             float(minimum),
             float(maximum),
@@ -637,9 +485,7 @@ class RenderManager:
             representation_id,
             value,
         )
-        self._update_representation(
-            representation_id
-        )
+        self._update_representation(representation_id)
 
     # -------------------------------------------------------------------------
     # Output data
@@ -650,14 +496,10 @@ class RenderManager:
         node_id: str,
         output_port: int,
     ) -> dict[str, list[str]]:
-        algorithm = self.pipeline.algorithm(
-            node_id
-        )
+        algorithm = self.pipeline.algorithm(node_id)
         algorithm.Update()
 
-        data = algorithm.GetOutputDataObject(
-            output_port
-        )
+        data = algorithm.GetOutputDataObject(output_port)
         result = {
             "point": [],
             "cell": [],
@@ -667,28 +509,16 @@ class RenderManager:
             return result
 
         point_data = data.GetPointData()
-        for i in range(
-            point_data.GetNumberOfArrays()
-        ):
-            name = point_data.GetArrayName(
-                i
-            )
+        for i in range(point_data.GetNumberOfArrays()):
+            name = point_data.GetArrayName(i)
             if name:
-                result["point"].append(
-                    name
-                )
+                result["point"].append(name)
 
         cell_data = data.GetCellData()
-        for i in range(
-            cell_data.GetNumberOfArrays()
-        ):
-            name = cell_data.GetArrayName(
-                i
-            )
+        for i in range(cell_data.GetNumberOfArrays()):
+            name = cell_data.GetArrayName(i)
             if name:
-                result["cell"].append(
-                    name
-                )
+                result["cell"].append(name)
 
         return result
 
@@ -699,25 +529,17 @@ class RenderManager:
         array_name: str,
         association: str = "point",
     ) -> tuple[float, float] | None:
-        algorithm = self.pipeline.algorithm(
-            node_id
-        )
+        algorithm = self.pipeline.algorithm(node_id)
         algorithm.Update()
 
-        data = algorithm.GetOutputDataObject(
-            output_port
-        )
+        data = algorithm.GetOutputDataObject(output_port)
         if data is None:
             return None
 
         attributes = (
-            data.GetPointData()
-            if association == "point"
-            else data.GetCellData()
+            data.GetPointData() if association == "point" else data.GetCellData()
         )
-        array = attributes.GetArray(
-            array_name
-        )
+        array = attributes.GetArray(array_name)
         if array is None:
             return None
 
@@ -736,24 +558,14 @@ class RenderManager:
         view_id: str,
         color: tuple[float, float, float],
     ) -> None:
-        value = dict(
-            self.state.views[
-                view_id
-            ]
-        )
-        value["background_color"] = (
-            _rgb_to_hex(color)
-        )
+        value = dict(self.state.views[view_id])
+        value["background_color"] = _rgb_to_hex(color)
 
-        views = dict(
-            self.state.views
-        )
+        views = dict(self.state.views)
         views[view_id] = value
         self.state.views = views
 
-        self.backend.set_view_settings(
-            self.get_view(view_id)
-        )
+        self.backend.set_view_settings(self.get_view(view_id))
 
     def reset_camera(
         self,
@@ -762,9 +574,7 @@ class RenderManager:
         if view_id is None:
             view_id = self.active_view_id
 
-        self.backend.reset_camera(
-            view_id
-        )
+        self.backend.reset_camera(view_id)
 
     # -------------------------------------------------------------------------
     # Internal
@@ -775,32 +585,18 @@ class RenderManager:
         representation_id: str,
         value: dict,
     ) -> None:
-        representations = dict(
-            self.state.representations
-        )
-        representations[
-            representation_id
-        ] = value
-        self.state.representations = (
-            representations
-        )
+        representations = dict(self.state.representations)
+        representations[representation_id] = value
+        self.state.representations = representations
 
     def _update_representation(
         self,
         representation_id: str,
     ) -> None:
-        representation = (
-            self.get_representation(
-                representation_id
-            )
-        )
-        node = self.pipeline.nodes[
-            representation.node_id
-        ]
+        representation = self.get_representation(representation_id)
+        node = self.pipeline.nodes[representation.node_id]
 
-        for view_id in tuple(
-            representation.view_ids
-        ):
+        for view_id in tuple(representation.view_ids):
             self.backend.update_representation(
                 representation,
                 self.get_view(view_id),
@@ -811,18 +607,8 @@ class RenderManager:
 def _rgb_to_hex(
     color: tuple[float, float, float],
 ) -> str:
-    values = [
-        round(
-            max(0.0, min(1.0, component))
-            * 255
-        )
-        for component in color
-    ]
-    return (
-        f"#{values[0]:02x}"
-        f"{values[1]:02x}"
-        f"{values[2]:02x}"
-    )
+    values = [round(max(0.0, min(1.0, component)) * 255) for component in color]
+    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
 
 
 def _hex_to_rgb(

@@ -12,9 +12,7 @@ server = get_server(client_type="vue3")
 
 catalog = AlgorithmCatalog()
 
-print(
-    f"Discovered {len(catalog.algorithms)} algorithms"
-)
+print(f"Discovered {len(catalog.algorithms)} algorithms")
 
 pipeline = PipelineGraph(server.state)
 

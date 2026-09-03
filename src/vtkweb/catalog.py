@@ -51,9 +51,7 @@ class AlgorithmCatalog:
                 continue
 
             category = (
-                "Sources"
-                if algorithm.GetNumberOfInputPorts() == 0
-                else "Filters"
+                "Sources" if algorithm.GetNumberOfInputPorts() == 0 else "Filters"
             )
 
             result.append(
@@ -78,9 +76,7 @@ class AlgorithmCatalog:
         class_name: str,
     ) -> vtk.vtkAlgorithm:
         descriptor = next(
-            item
-            for item in self.algorithms
-            if item.class_name == class_name
+            item for item in self.algorithms if item.class_name == class_name
         )
 
         return descriptor.vtk_class()
@@ -94,11 +90,7 @@ def _make_label(
     result = []
 
     for i, char in enumerate(name):
-        if (
-            i
-            and char.isupper()
-            and not name[i - 1].isupper()
-        ):
+        if i and char.isupper() and not name[i - 1].isupper():
             result.append(" ")
 
         result.append(char)
