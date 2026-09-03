@@ -5,15 +5,7 @@ import vtk
 from trame.widgets import html
 from trame.widgets import vuetify3 as v3
 
-from vtkweb.input_arrays import (
-    inspect_input_arrays,
-    set_input_array,
-)
 from vtkweb.pipeline import PipelineGraph
-from vtkweb.properties import (
-    inspect_properties,
-    set_property,
-)
 
 
 def initialize_properties_tab(
@@ -21,234 +13,129 @@ def initialize_properties_tab(
     ctrl,
     pipeline: PipelineGraph,
 ) -> None:
-    state.filter_properties = []
-    state.input_arrays = []
+    # Properties and input-array descriptors are part of state.pipeline. This
+    # module only owns the UI actions which mutate them through PipelineGraph.
 
-    # -------------------------------------------------------------------------
-    # State synchronization
-    # -------------------------------------------------------------------------
+    def active_node_id() -> str | None:
+        return pipeline.active_node_id
 
     def update_properties_state(
         node_id: str | None,
     ) -> None:
-        if node_id is None:
-            with state:
-                state.filter_properties = []
-                state.input_arrays = []
-            return
-
-        algorithm = (
-            pipeline.nodes[node_id].algorithm
-        )
-
-        properties = inspect_properties(
-            algorithm
-        )
-
-        input_arrays = inspect_input_arrays(
-            algorithm
-        )
-
-        with state:
-            state.filter_properties = [
-                {
-                    "name": prop.name,
-                    "label": prop.label,
-                    "kind": prop.kind,
-                    "value": prop.value,
-                    "size": prop.size,
-                }
-                for prop in properties
-            ]
-
-            state.input_arrays = [
-                {
-                    "index": item.index,
-                    "label": item.label,
-                    "value": item.value,
-                    "items": item.items,
-                }
-                for item in input_arrays
-            ]
-
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
-
-    def get_descriptor(
-        name: str,
-    ):
-        return next(
-            prop
-            for prop in inspect_properties(
-                pipeline.active_node.algorithm
+        # Compatibility hook for existing callers. There is no second property
+        # list to synchronize anymore. Explicit callers may use this to pull
+        # direct/raw VTK mutations back into state.
+        if node_id is not None:
+            pipeline.sync_node_from_runtime(
+                node_id
             )
-            if prop.name == name
-        )
-
-    def apply_property(
-        descriptor,
-        value,
-    ) -> None:
-        algorithm = (
-            pipeline.active_node.algorithm
-        )
-
-        set_property(
-            algorithm,
-            descriptor,
-            value,
-        )
-
-        algorithm.Update()
-
-        ctrl.refresh_node(
-            pipeline.active_node_id
-        )
-
-    # -------------------------------------------------------------------------
-    # Input arrays
-    # -------------------------------------------------------------------------
 
     def set_active_input_array(
         index: int,
         value,
     ) -> None:
-        if not value:
+        node_id = active_node_id()
+        if node_id is None:
             return
 
-        algorithm = (
-            pipeline.active_node.algorithm
-        )
-
-        descriptor = next(
-            item
-            for item in inspect_input_arrays(
-                algorithm
-            )
-            if item.index == int(index)
-        )
-
-        set_input_array(
-            algorithm,
-            descriptor,
+        pipeline.set_input_array(
+            node_id,
+            int(index),
             value,
         )
-
-        algorithm.Update()
-
-        ctrl.refresh_node(
-            pipeline.active_node_id
-        )
-
-    # -------------------------------------------------------------------------
-    # Generic properties
-    # -------------------------------------------------------------------------
+        ctrl.view_update()
 
     def set_filter_property(
         name: str,
         value,
     ) -> None:
-        apply_property(
-            get_descriptor(name),
+        node_id = active_node_id()
+        if node_id is None:
+            return
+
+        pipeline.set_property(
+            node_id,
+            name,
             value,
         )
+        ctrl.update_representation_state(
+            node_id
+        )
+        ctrl.view_update()
 
     def set_filter_vector_component(
         name: str,
         index: int,
         value,
     ) -> None:
-        descriptor = get_descriptor(
-            name
-        )
+        node_id = active_node_id()
+        if node_id is None:
+            return
 
-        values = list(
-            descriptor.value
+        pipeline.set_vector_component(
+            node_id,
+            name,
+            int(index),
+            value,
         )
-
-        values[int(index)] = float(
-            value
+        ctrl.update_representation_state(
+            node_id
         )
-
-        apply_property(
-            descriptor,
-            values,
-        )
+        ctrl.view_update()
 
     def set_filter_list_value(
         name: str,
         index: int,
         value,
     ) -> None:
-        if value in ("", None):
+        node_id = active_node_id()
+        if node_id is None:
             return
 
-        descriptor = get_descriptor(
-            name
+        pipeline.set_list_value(
+            node_id,
+            name,
+            int(index),
+            value,
         )
-
-        values = list(
-            descriptor.value
+        ctrl.update_representation_state(
+            node_id
         )
-
-        values[int(index)] = float(
-            value
-        )
-
-        apply_property(
-            descriptor,
-            values,
-        )
+        ctrl.view_update()
 
     def add_filter_list_value(
         name: str,
     ) -> None:
-        descriptor = get_descriptor(
-            name
-        )
+        node_id = active_node_id()
+        if node_id is None:
+            return
 
-        values = list(
-            descriptor.value
+        pipeline.add_list_value(
+            node_id,
+            name,
         )
-
-        values.append(
-            values[-1]
-            if values
-            else 0.0
+        ctrl.update_representation_state(
+            node_id
         )
-
-        apply_property(
-            descriptor,
-            values,
-        )
+        ctrl.view_update()
 
     def remove_filter_list_value(
         name: str,
         index: int,
     ) -> None:
-        descriptor = get_descriptor(
-            name
-        )
-
-        values = list(
-            descriptor.value
-        )
-
-        index = int(index)
-
-        if (
-            index < 0
-            or index >= len(values)
-        ):
+        node_id = active_node_id()
+        if node_id is None:
             return
 
-        del values[index]
-
-        apply_property(
-            descriptor,
-            values,
+        pipeline.remove_list_value(
+            node_id,
+            name,
+            int(index),
         )
+        ctrl.update_representation_state(
+            node_id
+        )
+        ctrl.view_update()
 
     # -------------------------------------------------------------------------
     # Elevation helper
@@ -257,16 +144,18 @@ def initialize_properties_tab(
     def set_elevation_axis(
         axis: str,
     ) -> None:
-        algorithm = (
-            pipeline.active_node.algorithm
-        )
+        node = pipeline.active_node
 
-        if not isinstance(
-            algorithm,
-            vtk.vtkElevationFilter,
+        if (
+            node is None
+            or not isinstance(
+                node.algorithm,
+                vtk.vtkElevationFilter,
+            )
         ):
             return
 
+        algorithm = node.algorithm
         input_data = (
             algorithm.GetInputDataObject(
                 0,
@@ -291,54 +180,30 @@ def initialize_properties_tab(
         cz = (zmin + zmax) / 2
 
         if axis == "x":
-            low = (
-                xmin,
-                cy,
-                cz,
-            )
-            high = (
-                xmax,
-                cy,
-                cz,
-            )
-
+            low = (xmin, cy, cz)
+            high = (xmax, cy, cz)
         elif axis == "y":
-            low = (
-                cx,
-                ymin,
-                cz,
-            )
-            high = (
-                cx,
-                ymax,
-                cz,
-            )
-
+            low = (cx, ymin, cz)
+            high = (cx, ymax, cz)
         else:
-            low = (
-                cx,
-                cy,
-                zmin,
-            )
-            high = (
-                cx,
-                cy,
-                zmax,
-            )
+            low = (cx, cy, zmin)
+            high = (cx, cy, zmax)
 
         algorithm.SetLowPoint(
             *low
         )
-
         algorithm.SetHighPoint(
             *high
         )
-
         algorithm.Update()
 
-        ctrl.refresh_node(
-            pipeline.active_node_id
+        pipeline.sync_node_from_runtime(
+            node.id
         )
+        ctrl.update_representation_state(
+            node.id
+        )
+        ctrl.view_update()
 
     # -------------------------------------------------------------------------
     # Controller
@@ -347,31 +212,24 @@ def initialize_properties_tab(
     ctrl.update_properties_state = (
         update_properties_state
     )
-
     ctrl.set_input_array = (
         set_active_input_array
     )
-
     ctrl.set_filter_property = (
         set_filter_property
     )
-
     ctrl.set_filter_vector_component = (
         set_filter_vector_component
     )
-
     ctrl.set_filter_list_value = (
         set_filter_list_value
     )
-
     ctrl.add_filter_list_value = (
         add_filter_list_value
     )
-
     ctrl.remove_filter_list_value = (
         remove_filter_list_value
     )
-
     ctrl.set_elevation_axis = (
         set_elevation_axis
     )
@@ -393,7 +251,11 @@ def build_properties_tab(
         classes="vtkweb-prop-list mb-2",
     ):
         with html.Div(
-            v_for="array in input_arrays",
+            v_for=(
+                "array in Object.values("
+                "pipeline.nodes[active_node_id]?."
+                "input_arrays || {})"
+            ),
             key="array.index",
             classes="vtkweb-select-box",
         ):
@@ -422,8 +284,8 @@ def build_properties_tab(
 
     with v3.VRow(
         v_if=(
-            "active_node_type === "
-            "'vtkElevationFilter'"
+            "pipeline.nodes[active_node_id]?."
+            "class_name === 'vtkElevationFilter'"
         ),
         dense=True,
         classes="mb-3",
@@ -452,11 +314,14 @@ def build_properties_tab(
         classes="vtkweb-prop-list",
     ):
         with html.Div(
-            v_for="property in filter_properties",
+            v_for=(
+                "property in Object.values("
+                "pipeline.nodes[active_node_id]?."
+                "properties || {})"
+            ),
             key="property.name",
             classes="vtkweb-prop-item",
         ):
-            # Boolean
             with html.Label(
                 v_if="property.kind === 'bool'",
                 classes="vtkweb-bool-row",
@@ -465,7 +330,6 @@ def build_properties_tab(
                     "{{ property.label }}",
                     classes="vtkweb-control-label",
                 )
-
                 html.Input(
                     type="checkbox",
                     checked=(
@@ -480,7 +344,6 @@ def build_properties_tab(
                     ),
                 )
 
-            # Scalar / string
             with html.Label(
                 v_if=(
                     "property.kind === 'int' || "
@@ -493,7 +356,6 @@ def build_properties_tab(
                     "{{ property.label }}",
                     classes="vtkweb-control-label",
                 )
-
                 html.Input(
                     type=(
                         "property.kind === 'str' "
@@ -513,7 +375,6 @@ def build_properties_tab(
                     ),
                 )
 
-            # Vector
             with html.Div(
                 v_if="property.kind === 'vector'",
                 classes="vtkweb-vector-box",
@@ -522,7 +383,6 @@ def build_properties_tab(
                     "{{ property.label }}",
                     classes="vtkweb-control-label",
                 )
-
                 with html.Div(
                     classes="vtkweb-vector-fields",
                 ):
@@ -545,7 +405,6 @@ def build_properties_tab(
                         ),
                     )
 
-            # Scalar list
             with html.Div(
                 v_if=(
                     "property.kind === "
@@ -557,7 +416,6 @@ def build_properties_tab(
                     "{{ property.label }}",
                     classes="vtkweb-control-label",
                 )
-
                 with html.Div(
                     classes="vtkweb-list-inline-values",
                 ):
@@ -595,7 +453,6 @@ def build_properties_tab(
                         ),
                     ),
                 )
-
                 html.Button(
                     "+",
                     type="button",

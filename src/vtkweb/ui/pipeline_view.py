@@ -215,13 +215,14 @@ def build_pipeline_view(
                                 classes=(
                                     "'vtkweb-pipeline-handle ' + "
                                     "("
-                                    "output_port_visibility[node.id] "
-                                    "&& "
-                                    f"output_port_visibility[node.id][{port}] "
-                                    "? "
-                                    "'vtkweb-output-visible' "
-                                    ": "
-                                    "'vtkweb-output-hidden'"
+                                    "Object.values(representations).some("
+                                    "rep => "
+                                    "rep.node_id === node.id && "
+                                    f"rep.output_port === {port} && "
+                                    "rep.view_ids.includes(active_view_id)"
+                                    ") "
+                                    "? 'vtkweb-output-visible' "
+                                    ": 'vtkweb-output-hidden'"
                                     ")"
                                 ),
                                 style=(

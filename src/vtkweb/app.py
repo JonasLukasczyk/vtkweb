@@ -16,18 +16,16 @@ print(
     f"Discovered {len(catalog.algorithms)} algorithms"
 )
 
-pipeline = PipelineGraph()
+pipeline = PipelineGraph(server.state)
 
 rt = pipeline.add_node(
     vtk.vtkRTAnalyticSource(),
     name="RT Analytic Source",
-    visible=True,
 )
 
 contour = pipeline.add_node(
     vtk.vtkContourFilter(),
     name="Contour",
-    visible=True,
 )
 
 pipeline.connect(
@@ -90,7 +88,10 @@ pipeline.connect(
 #     contour_output.GetNumberOfCells(),
 # )
 
-rendering = RenderManager(pipeline)
+rendering = RenderManager(
+    server.state,
+    pipeline,
+)
 
 build_ui(
     server,

@@ -15,90 +15,29 @@ def initialize_app_controller(
     ctrl = server.controller
 
     # -------------------------------------------------------------------------
-    # Active node
-    # -------------------------------------------------------------------------
-
-    active_node = (
-        pipeline.active_node
-    )
-
-    state.active_node_id = (
-        active_node.id
-        if active_node is not None
-        else None
-    )
-
-    state.active_node_name = (
-        active_node.name
-        if active_node is not None
-        else ""
-    )
-
-    state.active_node_type = (
-        active_node.algorithm.GetClassName()
-        if active_node is not None
-        else ""
-    )
-
-    # -------------------------------------------------------------------------
-    # Output-port visibility
-    # -------------------------------------------------------------------------
-
-    def update_output_visibility_state() -> None:
-        view_id = (
-            rendering.active_view_id
-        )
-
-        result = {}
-
-        for node in pipeline.nodes.values():
-            output_count = (
-                node.algorithm
-                .GetNumberOfOutputPorts()
-            )
-
-            result[node.id] = {
-                str(port): (
-                    rendering.output_visible_in_view(
-                        node.id,
-                        port,
-                        view_id,
-                    )
-                )
-                for port in range(
-                    output_count
-                )
-            }
-
-        state.output_port_visibility = (
-            result
-        )
-
-    update_output_visibility_state()
-
-    # Keep this alias temporarily so any existing code
-    # which asks to refresh pipeline visibility does not
-    # immediately break.
-    ctrl.update_node_visibility_state = (
-        update_output_visibility_state
-    )
-
-    # -------------------------------------------------------------------------
-    # Refresh
+    # Refresh / synchronization
     # -------------------------------------------------------------------------
 
     def refresh_node(
         node_id: str,
     ) -> None:
-        ctrl.update_properties_state(
-            node_id
-        )
-
+        # Core node/representation/view data already lives in trame state. The
+        # only inspector refresh still needed here is output-array metadata,
+        # which depends on executing/inspecting VTK output data.
         ctrl.update_representation_state(
             node_id
         )
-
         ctrl.view_update()
+
+    def sync_node_from_runtime(
+        node_id: str,
+    ) -> None:
+        pipeline.sync_node_from_runtime(
+            node_id
+        )
+        refresh_node(
+            node_id
+        )
 
     # -------------------------------------------------------------------------
     # Active node
@@ -111,25 +50,12 @@ def initialize_app_controller(
             node_id
         )
 
-        node = (
-            pipeline.active_node
-        )
-
-        with state:
-            state.active_node_id = (
-                node.id
-            )
-
-            state.active_node_name = (
-                node.name
-            )
-
-            state.active_node_type = (
-                node.algorithm.GetClassName()
-            )
-
-        refresh_node(
-            node.id
+        # Output-port selection is inspector-local state. Reset it when the
+        # active algorithm changes so it can never point past the new node's
+        # available outputs.
+        state.active_representation_output_port = 0
+        ctrl.update_representation_state(
+            node_id
         )
 
     # -------------------------------------------------------------------------
@@ -145,7 +71,6 @@ def initialize_app_controller(
             output_port
         )
 
-        # A port click always makes its node active.
         set_active_node(
             node_id
         )
@@ -159,12 +84,9 @@ def initialize_app_controller(
             rendering.active_view_id,
         )
 
-        update_output_visibility_state()
-
         ctrl.update_representation_state(
             node_id
         )
-
         ctrl.view_update()
 
     # -------------------------------------------------------------------------
@@ -192,17 +114,6 @@ def initialize_app_controller(
         node = pipeline.add_node(
             algorithm,
             name=descriptor.label,
-            visible=True,
-        )
-
-        # Default representation remains output 0.
-        rendering.add_representation(
-            node.id,
-            output_port=0,
-            kind="surface",
-            view_ids={
-                rendering.active_view_id
-            },
         )
 
         ctrl.pipeline_add_node(
@@ -220,23 +131,35 @@ def initialize_app_controller(
                 source_port=0,
                 target_port=0,
             )
-
             ctrl.pipeline_add_edge(
                 edge
             )
 
-        update_output_visibility_state()
+        if (
+            algorithm.GetNumberOfOutputPorts()
+            > 0
+        ):
+            rendering.add_representation(
+                node.id,
+                output_port=0,
+                kind="surface",
+                view_ids={
+                    rendering.active_view_id
+                },
+            )
 
         ctrl.close_filter_browser()
 
         algorithm.Update()
+        pipeline.sync_node_from_runtime(
+            node.id
+        )
 
         set_active_node(
             node.id
         )
 
         rendering.reset_camera()
-
         ctrl.view_update()
 
     # -------------------------------------------------------------------------
@@ -244,16 +167,12 @@ def initialize_app_controller(
     # -------------------------------------------------------------------------
 
     def delete_active_node() -> None:
-        node = (
-            pipeline.active_node
-        )
+        node = pipeline.active_node
 
         if node is None:
             return
 
-        node_id = (
-            node.id
-        )
+        node_id = node.id
 
         incident_edges = [
             edge
@@ -274,65 +193,38 @@ def initialize_app_controller(
         rendering.remove_node(
             node_id
         )
-
         pipeline.remove_node(
             node_id
         )
-
         ctrl.pipeline_remove_node(
             node_id
         )
 
-        update_output_visibility_state()
-
-        if (
-            pipeline.active_node
-            is not None
-        ):
+        if pipeline.active_node is not None:
             set_active_node(
                 pipeline.active_node.id
             )
-
         else:
-            with state:
-                state.active_node_id = None
-                state.active_node_name = ""
-                state.active_node_type = ""
-
-            ctrl.update_properties_state(
-                None
-            )
-
+            state.active_representation_output_port = 0
             ctrl.update_representation_state(
                 None
             )
 
-            ctrl.view_update()
+        ctrl.view_update()
 
     # -------------------------------------------------------------------------
     # Controller
     # -------------------------------------------------------------------------
 
-    ctrl.refresh_node = (
-        refresh_node
+    ctrl.refresh_node = refresh_node
+    ctrl.sync_node_from_runtime = (
+        sync_node_from_runtime
     )
-
-    ctrl.set_active_node = (
-        set_active_node
-    )
-
+    ctrl.set_active_node = set_active_node
     ctrl.output_port_click = (
         output_port_click
     )
-
-    ctrl.update_output_visibility_state = (
-        update_output_visibility_state
-    )
-
-    ctrl.create_filter = (
-        create_filter
-    )
-
+    ctrl.create_filter = create_filter
     ctrl.delete_active_node = (
         delete_active_node
     )

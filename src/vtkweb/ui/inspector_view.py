@@ -52,7 +52,7 @@ def build_inspector_view(
             ),
         ):
             v3.VCardTitle(
-                "{{ active_node_name }}",
+                "{{ pipeline.nodes[active_node_id]?.name || '' }}",
                 classes="pa-0 mb-2",
             )
 

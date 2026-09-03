@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from uuid import uuid4
 
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering.base import (
@@ -8,6 +9,7 @@ from vtkweb.rendering.base import (
     RenderView,
     RenderingBackend,
     Representation,
+    ViewSettings,
 )
 from vtkweb.rendering.vtk_backend import (
     VTKRenderingBackend,
@@ -15,57 +17,51 @@ from vtkweb.rendering.vtk_backend import (
 
 
 class RenderManager:
+    """Rendering service backed by serializable trame state.
+
+    ``state.views`` and ``state.representations`` are the authoritative
+    application model. Backend objects such as vtkActor and vtkRenderWindow are
+    runtime-only materializations of that state.
+    """
+
     def __init__(
         self,
+        state,
         pipeline: PipelineGraph,
         backend: RenderingBackend | None = None,
     ) -> None:
+        self.state = state
         self.pipeline = pipeline
-
         self.backend = (
             backend
             or VTKRenderingBackend()
         )
 
-        self._views: dict[
-            str,
-            RenderView,
-        ] = {}
-
-        self._representations: dict[
-            str,
-            Representation,
-        ] = {}
-
-        # ---------------------------------------------------------------------
-        # Initial view
-        # ---------------------------------------------------------------------
+        self.state.views = {}
+        self.state.representations = {}
+        self.state.active_view_id = None
 
         view = self.add_view(
             "View 1"
         )
-
-        self._active_view_id = (
+        self.set_active_view(
             view.id
         )
 
-        # ---------------------------------------------------------------------
-        # Initial representations
-        # ---------------------------------------------------------------------
-
+        # Preserve the current application's behavior: nodes that already exist
+        # when rendering is created receive one default surface representation
+        # in the first view. Visibility itself is represented only by view_ids.
         for node in pipeline.nodes.values():
-            view_ids = (
-                {view.id}
-                if node.visible
-                else set()
-            )
-
-            self.add_representation(
-                node.id,
-                output_port=0,
-                kind="surface",
-                view_ids=view_ids,
-            )
+            if (
+                node.algorithm.GetNumberOfOutputPorts()
+                > 0
+            ):
+                self.add_representation(
+                    node.id,
+                    output_port=0,
+                    kind="surface",
+                    view_ids={view.id},
+                )
 
         self.reset_camera(
             view.id
@@ -78,35 +74,42 @@ class RenderManager:
     @property
     def views(
         self,
-    ) -> tuple[
-        RenderView,
-        ...,
-    ]:
+    ) -> tuple[RenderView, ...]:
         return tuple(
-            self._views.values()
+            self.get_view(view_id)
+            for view_id in self.state.views
         )
 
     @property
     def active_view_id(
         self,
     ) -> str:
-        return self._active_view_id
+        return self.state.active_view_id
 
     @property
     def active_view(
         self,
     ) -> RenderView:
         return self.get_view(
-            self._active_view_id
+            self.active_view_id
         )
 
     def get_view(
         self,
         view_id: str,
     ) -> RenderView:
-        return self._views[
+        value = self.state.views[
             view_id
         ]
+        return RenderView(
+            id=value["id"],
+            name=value["name"],
+            settings=ViewSettings(
+                background_color=_hex_to_rgb(
+                    value["background_color"]
+                )
+            ),
+        )
 
     def add_view(
         self,
@@ -114,21 +117,28 @@ class RenderManager:
     ) -> RenderView:
         if name is None:
             name = (
-                f"View {len(self._views) + 1}"
+                f"View {len(self.state.views) + 1}"
             )
 
-        view = RenderView(
-            name=name
+        view_id = uuid4().hex
+        value = {
+            "id": view_id,
+            "name": name,
+            "background_color": "#1a1a1a",
+        }
+
+        views = dict(
+            self.state.views
         )
+        views[view_id] = value
+        self.state.views = views
 
-        self._views[
-            view.id
-        ] = view
-
+        view = self.get_view(
+            view_id
+        )
         self.backend.add_view(
             view
         )
-
         return view
 
     def remove_view(
@@ -139,9 +149,8 @@ class RenderManager:
             view_id
         )
 
-        # First remove the concrete backend objects.
         for representation in tuple(
-            self._representations.values()
+            self.representations
         ):
             if view_id in representation.view_ids:
                 self.unassign_representation(
@@ -153,17 +162,16 @@ class RenderManager:
             view_id
         )
 
-        del self._views[
-            view_id
-        ]
+        views = dict(
+            self.state.views
+        )
+        del views[view_id]
+        self.state.views = views
 
-        if (
-            self._active_view_id
-            == view_id
-        ):
-            self._active_view_id = next(
-                iter(self._views),
-                "",
+        if self.active_view_id == view_id:
+            self.state.active_view_id = next(
+                iter(views),
+                None,
             )
 
     def set_active_view(
@@ -173,8 +181,7 @@ class RenderManager:
         self.get_view(
             view_id
         )
-
-        self._active_view_id = (
+        self.state.active_view_id = (
             view_id
         )
 
@@ -185,34 +192,63 @@ class RenderManager:
     @property
     def representations(
         self,
-    ) -> tuple[
-        Representation,
-        ...,
-    ]:
+    ) -> tuple[Representation, ...]:
         return tuple(
-            self._representations.values()
+            self.get_representation(
+                representation_id
+            )
+            for representation_id
+            in self.state.representations
         )
 
     def get_representation(
         self,
         representation_id: str,
     ) -> Representation:
-        return self._representations[
+        value = self.state.representations[
             representation_id
         ]
+
+        scalar_range = value.get(
+            "scalar_range"
+        )
+
+        return Representation(
+            id=value["id"],
+            node_id=value["node_id"],
+            output_port=int(
+                value["output_port"]
+            ),
+            kind=value["kind"],
+            array_name=value.get(
+                "array_name"
+            ),
+            association=value.get(
+                "association",
+                "point",
+            ),
+            scalar_range=(
+                tuple(scalar_range)
+                if scalar_range is not None
+                else None
+            ),
+            view_ids=set(
+                value.get(
+                    "view_ids",
+                    [],
+                )
+            ),
+        )
 
     def get_representations(
         self,
         node_id: str,
         output_port: int | None = None,
-    ) -> tuple[
-        Representation,
-        ...,
-    ]:
+    ) -> tuple[Representation, ...]:
         return tuple(
             representation
             for representation
-            in self._representations.values()
+            in self.representations
             if (
                 representation.node_id
                 == node_id
@@ -240,7 +276,6 @@ class RenderManager:
         node = self.pipeline.nodes[
             node_id
         ]
-
         output_count = (
             node.algorithm
             .GetNumberOfOutputPorts()
@@ -256,23 +291,39 @@ class RenderManager:
                 f"port {output_port} is invalid"
             )
 
-        representation = Representation(
-            node_id=node_id,
-            output_port=output_port,
-            kind=kind,
-        )
+        representation_id = uuid4().hex
+        value = {
+            "id": representation_id,
+            "node_id": node_id,
+            "output_port": int(
+                output_port
+            ),
+            "kind": kind,
+            "array_name": None,
+            "association": "point",
+            "scalar_range": None,
+            "view_ids": [],
+        }
 
-        self._representations[
-            representation.id
-        ] = representation
+        representations = dict(
+            self.state.representations
+        )
+        representations[
+            representation_id
+        ] = value
+        self.state.representations = (
+            representations
+        )
 
         for view_id in view_ids:
             self.assign_representation(
-                representation.id,
+                representation_id,
                 view_id,
             )
 
-        return representation
+        return self.get_representation(
+            representation_id
+        )
 
     def remove_representation(
         self,
@@ -284,12 +335,6 @@ class RenderManager:
             )
         )
 
-        # Important:
-        # remove all concrete backend instances first.
-        #
-        # Using unassign_representation() here means there
-        # is exactly one code path for removing a
-        # representation from a view.
         for view_id in tuple(
             representation.view_ids
         ):
@@ -298,11 +343,16 @@ class RenderManager:
                 view_id,
             )
 
-        # Only destroy the abstract representation after
-        # every view assignment is gone.
-        del self._representations[
-            representation_id
-        ]
+        representations = dict(
+            self.state.representations
+        )
+        representations.pop(
+            representation_id,
+            None,
+        )
+        self.state.representations = (
+            representations
+        )
 
     def remove_node(
         self,
@@ -318,7 +368,7 @@ class RenderManager:
             )
 
     # -------------------------------------------------------------------------
-    # View assignment
+    # View assignment / visibility
     # -------------------------------------------------------------------------
 
     def representation_in_view(
@@ -326,15 +376,11 @@ class RenderManager:
         representation_id: str,
         view_id: str,
     ) -> bool:
-        representation = (
-            self.get_representation(
-                representation_id
-            )
-        )
-
         return (
             view_id
-            in representation.view_ids
+            in self.get_representation(
+                representation_id
+            ).view_ids
         )
 
     def assign_representation(
@@ -348,30 +394,37 @@ class RenderManager:
             )
         )
 
-        if (
-            view_id
-            in representation.view_ids
-        ):
+        if view_id in representation.view_ids:
             return
 
         view = self.get_view(
             view_id
         )
-
         node = self.pipeline.nodes[
             representation.node_id
         ]
 
-        # Create the concrete backend representation
-        # before recording the assignment.
         self.backend.add_representation(
             representation,
             view,
             node.algorithm,
         )
 
-        representation.view_ids.add(
-            view_id
+        value = dict(
+            self.state.representations[
+                representation_id
+            ]
+        )
+        value["view_ids"] = [
+            *value.get(
+                "view_ids",
+                [],
+            ),
+            view_id,
+        ]
+        self._set_representation_state(
+            representation_id,
+            value,
         )
 
     def unassign_representation(
@@ -385,21 +438,30 @@ class RenderManager:
             )
         )
 
-        if (
-            view_id
-            not in representation.view_ids
-        ):
+        if view_id not in representation.view_ids:
             return
 
-        # Remove the backend object first.
         self.backend.remove_representation(
             representation.id,
             view_id,
         )
 
-        # Then update our abstract model.
-        representation.view_ids.remove(
-            view_id
+        value = dict(
+            self.state.representations[
+                representation_id
+            ]
+        )
+        value["view_ids"] = [
+            item
+            for item in value.get(
+                "view_ids",
+                [],
+            )
+            if item != view_id
+        ]
+        self._set_representation_state(
+            representation_id,
+            value,
         )
 
     def toggle_representation_in_view(
@@ -421,32 +483,31 @@ class RenderManager:
                 view_id,
             )
 
-    # -------------------------------------------------------------------------
-    # Node visibility relative to a view
-    # -------------------------------------------------------------------------
-
-    def node_visible_in_view(
+    def output_visible_in_view(
         self,
         node_id: str,
+        output_port: int,
         view_id: str,
     ) -> bool:
         return any(
-            view_id
-            in representation.view_ids
+            view_id in representation.view_ids
             for representation
             in self.get_representations(
-                node_id
+                node_id,
+                output_port,
             )
         )
 
-    def toggle_node_in_view(
+    def toggle_output_in_view(
         self,
         node_id: str,
+        output_port: int,
         view_id: str,
     ) -> None:
         representations = list(
             self.get_representations(
-                node_id
+                node_id,
+                output_port,
             )
         )
 
@@ -454,26 +515,29 @@ class RenderManager:
             representation = (
                 self.add_representation(
                     node_id,
-                    output_port=0,
+                    output_port=output_port,
+                    kind="surface",
                 )
             )
-
             self.assign_representation(
                 representation.id,
                 view_id,
             )
-
             return
 
-        if self.node_visible_in_view(
-            node_id,
-            view_id,
-        ):
+        visible = any(
+            view_id in representation.view_ids
+            for representation
+            in representations
+        )
+
+        if visible:
             for representation in representations:
-                self.unassign_representation(
-                    representation.id,
-                    view_id,
-                )
+                if view_id in representation.view_ids:
+                    self.unassign_representation(
+                        representation.id,
+                        view_id,
+                    )
         else:
             for representation in representations:
                 self.assign_representation(
@@ -495,23 +559,19 @@ class RenderManager:
                 f"Unknown representation kind: {kind}"
             )
 
-        representation = (
-            self.get_representation(
+        value = dict(
+            self.state.representations[
                 representation_id
-            )
+            ]
         )
-
-        representation.kind = (
-            kind
+        value["kind"] = kind
+        self._set_representation_state(
+            representation_id,
+            value,
         )
-
         self._update_representation(
-            representation
+            representation_id
         )
-
-    # -------------------------------------------------------------------------
-    # Coloring
-    # -------------------------------------------------------------------------
 
     def set_array(
         self,
@@ -525,30 +585,37 @@ class RenderManager:
             )
         )
 
-        representation.array_name = (
-            array_name
-        )
-
-        representation.association = (
-            association
-        )
-
-        if array_name is None:
-            representation.scalar_range = (
-                None
-            )
-        else:
-            representation.scalar_range = (
-                self.get_array_range(
-                    representation.node_id,
-                    representation.output_port,
-                    array_name,
-                    association,
-                )
+        scalar_range = None
+        if array_name is not None:
+            scalar_range = self.get_array_range(
+                representation.node_id,
+                representation.output_port,
+                array_name,
+                association,
             )
 
+        value = dict(
+            self.state.representations[
+                representation_id
+            ]
+        )
+        value.update(
+            {
+                "array_name": array_name,
+                "association": association,
+                "scalar_range": (
+                    list(scalar_range)
+                    if scalar_range is not None
+                    else None
+                ),
+            }
+        )
+        self._set_representation_state(
+            representation_id,
+            value,
+        )
         self._update_representation(
-            representation
+            representation_id
         )
 
     def set_scalar_range(
@@ -557,19 +624,21 @@ class RenderManager:
         minimum: float,
         maximum: float,
     ) -> None:
-        representation = (
-            self.get_representation(
+        value = dict(
+            self.state.representations[
                 representation_id
-            )
+            ]
         )
-
-        representation.scalar_range = (
+        value["scalar_range"] = [
             float(minimum),
             float(maximum),
+        ]
+        self._set_representation_state(
+            representation_id,
+            value,
         )
-
         self._update_representation(
-            representation
+            representation_id
         )
 
     # -------------------------------------------------------------------------
@@ -580,24 +649,15 @@ class RenderManager:
         self,
         node_id: str,
         output_port: int,
-    ) -> dict[
-        str,
-        list[str],
-    ]:
-        algorithm = (
-            self.pipeline.nodes[
-                node_id
-            ].algorithm
+    ) -> dict[str, list[str]]:
+        algorithm = self.pipeline.algorithm(
+            node_id
         )
-
         algorithm.Update()
 
-        data = (
-            algorithm.GetOutputDataObject(
-                output_port
-            )
+        data = algorithm.GetOutputDataObject(
+            output_port
         )
-
         result = {
             "point": [],
             "cell": [],
@@ -606,37 +666,29 @@ class RenderManager:
         if data is None:
             return result
 
-        point_data = (
-            data.GetPointData()
-        )
-
+        point_data = data.GetPointData()
         for i in range(
             point_data.GetNumberOfArrays()
         ):
-            name = (
-                point_data.GetArrayName(i)
+            name = point_data.GetArrayName(
+                i
             )
-
             if name:
-                result[
-                    "point"
-                ].append(name)
+                result["point"].append(
+                    name
+                )
 
-        cell_data = (
-            data.GetCellData()
-        )
-
+        cell_data = data.GetCellData()
         for i in range(
             cell_data.GetNumberOfArrays()
         ):
-            name = (
-                cell_data.GetArrayName(i)
+            name = cell_data.GetArrayName(
+                i
             )
-
             if name:
-                result[
-                    "cell"
-                ].append(name)
+                result["cell"].append(
+                    name
+                )
 
         return result
 
@@ -646,24 +698,15 @@ class RenderManager:
         output_port: int,
         array_name: str,
         association: str = "point",
-    ) -> tuple[
-        float,
-        float,
-    ] | None:
-        algorithm = (
-            self.pipeline.nodes[
-                node_id
-            ].algorithm
+    ) -> tuple[float, float] | None:
+        algorithm = self.pipeline.algorithm(
+            node_id
         )
-
         algorithm.Update()
 
-        data = (
-            algorithm.GetOutputDataObject(
-                output_port
-            )
+        data = algorithm.GetOutputDataObject(
+            output_port
         )
-
         if data is None:
             return None
 
@@ -672,18 +715,13 @@ class RenderManager:
             if association == "point"
             else data.GetCellData()
         )
-
         array = attributes.GetArray(
             array_name
         )
-
         if array is None:
             return None
 
-        minimum, maximum = (
-            array.GetRange()
-        )
-
+        minimum, maximum = array.GetRange()
         return (
             float(minimum),
             float(maximum),
@@ -696,22 +734,25 @@ class RenderManager:
     def set_background_color(
         self,
         view_id: str,
-        color: tuple[
-            float,
-            float,
-            float,
-        ],
+        color: tuple[float, float, float],
     ) -> None:
-        view = self.get_view(
-            view_id
+        value = dict(
+            self.state.views[
+                view_id
+            ]
+        )
+        value["background_color"] = (
+            _rgb_to_hex(color)
         )
 
-        view.settings.background_color = (
-            color
+        views = dict(
+            self.state.views
         )
+        views[view_id] = value
+        self.state.views = views
 
         self.backend.set_view_settings(
-            view
+            self.get_view(view_id)
         )
 
     def reset_camera(
@@ -719,9 +760,7 @@ class RenderManager:
         view_id: str | None = None,
     ) -> None:
         if view_id is None:
-            view_id = (
-                self.active_view_id
-            )
+            view_id = self.active_view_id
 
         self.backend.reset_camera(
             view_id
@@ -731,10 +770,30 @@ class RenderManager:
     # Internal
     # -------------------------------------------------------------------------
 
+    def _set_representation_state(
+        self,
+        representation_id: str,
+        value: dict,
+    ) -> None:
+        representations = dict(
+            self.state.representations
+        )
+        representations[
+            representation_id
+        ] = value
+        self.state.representations = (
+            representations
+        )
+
     def _update_representation(
         self,
-        representation: Representation,
+        representation_id: str,
     ) -> None:
+        representation = (
+            self.get_representation(
+                representation_id
+            )
+        )
         node = self.pipeline.nodes[
             representation.node_id
         ]
@@ -744,79 +803,34 @@ class RenderManager:
         ):
             self.backend.update_representation(
                 representation,
-                self.get_view(
-                    view_id
-                ),
+                self.get_view(view_id),
                 node.algorithm,
             )
 
-    def output_visible_in_view(
-        self,
-        node_id: str,
-        output_port: int,
-        view_id: str,
-    ) -> bool:
-        return any(
-            view_id in representation.view_ids
-            for representation
-            in self.get_representations(
-                node_id,
-                output_port,
-            )
+
+def _rgb_to_hex(
+    color: tuple[float, float, float],
+) -> str:
+    values = [
+        round(
+            max(0.0, min(1.0, component))
+            * 255
         )
+        for component in color
+    ]
+    return (
+        f"#{values[0]:02x}"
+        f"{values[1]:02x}"
+        f"{values[2]:02x}"
+    )
 
 
-    def toggle_output_in_view(
-        self,
-        node_id: str,
-        output_port: int,
-        view_id: str,
-    ) -> None:
-        representations = list(
-            self.get_representations(
-                node_id,
-                output_port,
-            )
-        )
-
-        # If the output has no representation yet,
-        # create the default surface representation.
-        if not representations:
-            representation = (
-                self.add_representation(
-                    node_id,
-                    output_port=output_port,
-                    kind="surface",
-                )
-            )
-
-            self.assign_representation(
-                representation.id,
-                view_id,
-            )
-
-            return
-
-        # Treat the output as visible if at least one of
-        # its representations belongs to this view.
-        visible = any(
-            view_id in representation.view_ids
-            for representation in representations
-        )
-
-        if visible:
-            for representation in representations:
-                if (
-                    view_id
-                    in representation.view_ids
-                ):
-                    self.unassign_representation(
-                        representation.id,
-                        view_id,
-                    )
-        else:
-            for representation in representations:
-                self.assign_representation(
-                    representation.id,
-                    view_id,
-                )
+def _hex_to_rgb(
+    value: str,
+) -> tuple[float, float, float]:
+    value = value.lstrip("#")
+    return (
+        int(value[0:2], 16) / 255.0,
+        int(value[2:4], 16) / 255.0,
+        int(value[4:6], 16) / 255.0,
+    )
