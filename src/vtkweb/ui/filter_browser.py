@@ -171,7 +171,7 @@ def build_filter_browser(
     with v3.VDialog(
         model_value=("filter_browser_open",),
         width=600,
-        update_modelValue=("filter_browser_open = $event",),
+        update_modelValue="filter_browser_open = $event",
     ):
         with v3.VCard(
             classes="pa-3",
@@ -200,12 +200,14 @@ def build_filter_browser(
                     v_for=("(item, index) in filter_browser_items"),
                     key="item.value",
                     classes=(
-                        "index === filter_browser_selected "
-                        "? "
-                        "'vtkweb-filter-item "
-                        "vtkweb-filter-item-selected' "
-                        ": "
-                        "'vtkweb-filter-item'"
+                        (
+                            "index === filter_browser_selected "
+                            "? "
+                            "'vtkweb-filter-item "
+                            "vtkweb-filter-item-selected' "
+                            ": "
+                            "'vtkweb-filter-item'"
+                        ),
                     ),
                     mouseenter=(
                         ctrl.set_filter_browser_selected,

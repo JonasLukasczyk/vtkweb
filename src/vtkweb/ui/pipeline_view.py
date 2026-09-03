@@ -15,9 +15,6 @@ from vtkweb.pipeline import (
 )
 
 
-PORT_SLOT_COUNT = 16
-
-
 PIPELINE_VIEW_STYLE = """
 .vtkweb-flow-controls {
     top: 10px !important;
@@ -145,27 +142,30 @@ def build_pipeline_view(
                         # Input handles
                         # -----------------------------------------------------
 
-                        for port in range(PORT_SLOT_COUNT):
-                            flow.Handle(
-                                id=f"input-{port}",
-                                type="target",
-                                position="top",
-                                v_if=(f"node.data.input_port_count > {port}"),
-                                classes=("vtkweb-pipeline-handle vtkweb-input-handle"),
-                                style=(
-                                    "{ "
-                                    "'top': '0px', "
-                                    "'left': "
-                                    f"((({port} + 1) / "
-                                    "(node.data.input_port_count + 1)) "
-                                    "* 100) + '%' "
-                                    "}"
-                                ),
-                                click=(
-                                    ctrl.set_active_node,
-                                    "[node.id]",
-                                ),
-                            )
+                        flow.Handle(
+                            id=("`input-${port - 1}`",),
+                            key=("`input-${port - 1}`",),
+                            type="target",
+                            position="top",
+                            v_for="port in node.data.input_port_count",
+                            classes=(
+                                "vtkweb-pipeline-handle "
+                                "vtkweb-input-handle"
+                            ),
+                            style=(
+                                "{ "
+                                "'top': '0px', "
+                                "'left': "
+                                "((port / "
+                                "(node.data.input_port_count + 1)) "
+                                "* 100) + '%' "
+                                "}"
+                            ),
+                            click=(
+                                ctrl.set_active_node,
+                                "[node.id]",
+                            ),
+                        )
 
                         # -----------------------------------------------------
                         # Label
@@ -181,39 +181,39 @@ def build_pipeline_view(
                         # Output handles
                         # -----------------------------------------------------
 
-                        for port in range(PORT_SLOT_COUNT):
-                            flow.Handle(
-                                id=f"output-{port}",
-                                type="source",
-                                position="bottom",
-                                v_if=(f"node.data.output_port_count > {port}"),
-                                classes=(
-                                    "'vtkweb-pipeline-handle ' + "
-                                    "("
-                                    "Object.values(representations).some("
-                                    "rep => "
-                                    "rep.node_id === node.id && "
-                                    f"rep.output_port === {port} && "
-                                    "rep.view_ids.includes(active_view_id)"
-                                    ") "
-                                    "? 'vtkweb-output-visible' "
-                                    ": 'vtkweb-output-hidden'"
-                                    ")"
-                                ),
-                                style=(
-                                    "{ "
-                                    "'bottom': '0px', "
-                                    "'left': "
-                                    f"((({port} + 1) / "
-                                    "(node.data.output_port_count + 1)) "
-                                    "* 100) + '%' "
-                                    "}"
-                                ),
-                                click=(
-                                    ctrl.output_port_click,
-                                    (f"[node.id,{port},$event.shiftKey]"),
-                                ),
-                            )
+                        flow.Handle(
+                            id=("`output-${port - 1}`",),
+                            key=("`output-${port - 1}`",),
+                            type="source",
+                            position="bottom",
+                            v_for="port in node.data.output_port_count",
+                            classes=((
+                                "'vtkweb-pipeline-handle ' + "
+                                "("
+                                "Object.values(representations).some("
+                                "rep => "
+                                "rep.node_id === node.id && "
+                                "rep.output_port === port - 1 && "
+                                "rep.view_ids.includes(active_view_id)"
+                                ") "
+                                "? 'vtkweb-output-visible' "
+                                ": 'vtkweb-output-hidden'"
+                                ")"
+                            ),),
+                            style=(
+                                "{ "
+                                "'bottom': '0px', "
+                                "'left': "
+                                "((port / "
+                                "(node.data.output_port_count + 1)) "
+                                "* 100) + '%' "
+                                "}"
+                            ),
+                            click=(
+                                ctrl.output_port_click,
+                                "[node.id, port - 1, $event.shiftKey]",
+                            ),
+                        )
 
     # -------------------------------------------------------------------------
     # Node serialization
@@ -230,29 +230,13 @@ def build_pipeline_view(
 
         output_port_count = algorithm.GetNumberOfOutputPorts()
 
-        if input_port_count > PORT_SLOT_COUNT:
-            print(
-                f"Warning: {node.name} has "
-                f"{input_port_count} input ports, "
-                f"but pipeline_view only provides "
-                f"{PORT_SLOT_COUNT} handle slots."
-            )
-
-        if output_port_count > PORT_SLOT_COUNT:
-            print(
-                f"Warning: {node.name} has "
-                f"{output_port_count} output ports, "
-                f"but pipeline_view only provides "
-                f"{PORT_SLOT_COUNT} handle slots."
-            )
-
         return {
             "id": node.id,
             "type": "vtk-node",
             "label": node.name,
             "data": {
-                "input_port_count": (input_port_count),
-                "output_port_count": (output_port_count),
+                "input_port_count": input_port_count,
+                "output_port_count": output_port_count,
             },
             "position": {
                 "x": 100,
@@ -407,8 +391,14 @@ def build_pipeline_view(
                     continue
 
                 position = {
-                    "x": (start["x"] + (end["x"] - start["x"]) * alpha),
-                    "y": (start["y"] + (end["y"] - start["y"]) * alpha),
+                    "x": (
+                        start["x"]
+                        + (end["x"] - start["x"]) * alpha
+                    ),
+                    "y": (
+                        start["y"]
+                        + (end["y"] - start["y"]) * alpha
+                    ),
                 }
 
                 node_editor.update_node(
