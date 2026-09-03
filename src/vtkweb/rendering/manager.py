@@ -41,18 +41,6 @@ class RenderManager:
         view = self.add_view("View 1")
         self.set_active_view(view.id)
 
-        # Preserve the current application's behavior: nodes that already exist
-        # when rendering is created receive one default surface representation
-        # in the first view. Visibility itself is represented only by view_ids.
-        for node in pipeline.nodes.values():
-            if node.algorithm.GetNumberOfOutputPorts() > 0:
-                self.add_representation(
-                    node.id,
-                    output_port=0,
-                    kind="surface",
-                    view_ids={view.id},
-                )
-
         self.reset_camera(view.id)
 
     # -------------------------------------------------------------------------

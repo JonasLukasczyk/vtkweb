@@ -27,6 +27,17 @@ def build_render_view(
 
     render_window = backend.get_render_window(view.id)
 
+    def on_keydown(
+        code: str,
+    ) -> None:
+        if code != "Space":
+            return
+
+        ctrl.view_reset_camera()
+        ctrl.view_update()
+
+    ctrl.render_view_keydown = on_keydown
+
     with v3.VCol(
         cols=6,
         classes="pa-0",
@@ -35,10 +46,19 @@ def build_render_view(
         vtk_view = vtk_widgets.VtkLocalView(
             render_window,
             ref=f"render_view_{view.id}",
-            style=("height:100%;width:100%;"),
+            tabindex=0,
+            style=(
+                "height:100%;"
+                "width:100%;"
+                "outline:none;"
+            ),
             click=(
                 ctrl.set_active_render_view,
                 f"['{view.id}']",
+            ),
+            keydown=(
+                ctrl.render_view_keydown,
+                "[$event.code]",
             ),
         )
 

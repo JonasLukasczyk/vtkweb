@@ -215,7 +215,7 @@ def build_properties_tab(
                 "pipeline.nodes[active_node_id]?."
                 "input_arrays || {})"
             ),
-            key="array.index",
+            key=("array.index",),
             classes="vtkweb-select-box",
         ):
             html.Span(
@@ -275,7 +275,7 @@ def build_properties_tab(
                 "pipeline.nodes[active_node_id]?."
                 "properties || {})"
             ),
-            key="property.name",
+            key=("property.name",),
             classes="vtkweb-prop-item",
         ):
             with html.Label(
@@ -308,8 +308,8 @@ def build_properties_tab(
                     classes="vtkweb-control-label",
                 )
                 html.Input(
-                    type=("property.kind === 'str' ? 'text' : 'number'"),
-                    step=("property.kind === 'int' ? 1 : 'any'"),
+                    type=("property.kind === 'str' ? 'text' : 'number'",),
+                    step=("property.kind === 'int' ? 1 : 'any'",),
                     value=("property.value",),
                     change=(
                         ctrl.set_filter_property,
@@ -330,7 +330,7 @@ def build_properties_tab(
                 ):
                     html.Input(
                         v_for=("(component,index) in property.value"),
-                        key="index",
+                        key=("index",),
                         type="number",
                         step="any",
                         value=("component",),
@@ -353,7 +353,7 @@ def build_properties_tab(
                 ):
                     html.Input(
                         v_for=("(value,index) in property.value"),
-                        key="index",
+                        key=("index",),
                         type="number",
                         step="any",
                         value=("value",),
@@ -367,7 +367,7 @@ def build_properties_tab(
                     "−",
                     type="button",
                     classes="vtkweb-list-inline-button",
-                    disabled=("property.value.length === 0"),
+                    disabled=("property.value.length === 0",),
                     click=(
                         ctrl.remove_filter_list_value,
                         ("[property.name,property.value.length - 1]"),

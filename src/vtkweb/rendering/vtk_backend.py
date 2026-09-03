@@ -86,19 +86,29 @@ class VTKRenderingBackend(RenderingBackend):
 
         keepalive_mapper = vtk.vtkPolyDataMapper()
 
-        keepalive_mapper.SetInputConnection(keepalive_source.GetOutputPort())
+        keepalive_mapper.SetInputConnection(
+            keepalive_source.GetOutputPort()
+        )
 
         keepalive_actor = vtk.vtkActor()
 
-        keepalive_actor.SetMapper(keepalive_mapper)
+        keepalive_actor.SetMapper(
+            keepalive_mapper
+        )
 
         # Keep this visible for now so we can verify that the workaround
         # actually fixes the empty-scene issue.
-        keepalive_actor.GetProperty().SetOpacity(0.0)
+        keepalive_actor.GetProperty().SetOpacity(
+            1.0
+        )
 
-        keepalive_actor.SetPickable(False)
+        keepalive_actor.SetPickable(
+            False
+        )
 
-        renderer.AddActor(keepalive_actor)
+        renderer.AddActor(
+            keepalive_actor
+        )
 
         self._views[view.id] = VTKViewHandle(
             renderer=renderer,
@@ -108,13 +118,19 @@ class VTKRenderingBackend(RenderingBackend):
             keepalive_actor=keepalive_actor,
         )
 
-        self.set_view_settings(view)
+        self.set_view_settings(
+            view
+        )
 
     def remove_view(
         self,
         view_id: str,
     ) -> None:
-        keys = [key for key in self._representations if key[1] == view_id]
+        keys = [
+            key
+            for key in self._representations
+            if key[1] == view_id
+        ]
 
         for representation_id, _ in keys:
             self.remove_representation(
@@ -131,15 +147,21 @@ class VTKRenderingBackend(RenderingBackend):
         self,
         view_id: str,
     ) -> vtk.vtkRenderWindow:
-        return self._views[view_id].render_window
+        return self._views[
+            view_id
+        ].render_window
 
     def set_view_settings(
         self,
         view: RenderView,
     ) -> None:
-        handle = self._views[view.id]
+        handle = self._views[
+            view.id
+        ]
 
-        handle.renderer.SetBackground(*view.settings.background_color)
+        handle.renderer.SetBackground(
+            *view.settings.background_color
+        )
 
         handle.renderer.Modified()
         handle.render_window.Modified()
@@ -148,9 +170,12 @@ class VTKRenderingBackend(RenderingBackend):
         self,
         view_id: str,
     ) -> None:
-        handle = self._views[view_id]
+        handle = self._views[
+            view_id
+        ]
 
         handle.renderer.ResetCamera()
+        handle.renderer.ResetCameraClippingRange()
 
         handle.renderer.Modified()
         handle.render_window.Modified()
@@ -178,16 +203,26 @@ class VTKRenderingBackend(RenderingBackend):
             source,
         )
 
-        self._representations[key] = handle
+        self._representations[
+            key
+        ] = handle
 
-        view_handle = self._views[view.id]
-
-        view_handle.renderer.AddActor(handle.actor)
+        view_handle = self._views[
+            view.id
+        ]
 
         self._apply_representation(
             representation,
             handle,
         )
+
+        if self._source_has_geometry(
+            source,
+            representation.output_port,
+        ):
+            view_handle.renderer.AddActor(
+                handle.actor
+            )
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -203,7 +238,9 @@ class VTKRenderingBackend(RenderingBackend):
             view.id,
         )
 
-        handle = self._representations.get(key)
+        handle = self._representations.get(
+            key
+        )
 
         if handle is None:
             self.add_representation(
@@ -232,7 +269,30 @@ class VTKRenderingBackend(RenderingBackend):
             handle,
         )
 
-        view_handle = self._views[view.id]
+        view_handle = self._views[
+            view.id
+        ]
+
+        has_geometry = self._source_has_geometry(
+            source,
+            representation.output_port,
+        )
+
+        has_actor = bool(
+            view_handle.renderer.HasViewProp(
+                handle.actor
+            )
+        )
+
+        if has_geometry and not has_actor:
+            view_handle.renderer.AddActor(
+                handle.actor
+            )
+
+        elif not has_geometry and has_actor:
+            view_handle.renderer.RemoveActor(
+                handle.actor
+            )
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -255,12 +315,19 @@ class VTKRenderingBackend(RenderingBackend):
         if handle is None:
             return
 
-        view = self._views.get(view_id)
+        view = self._views.get(
+            view_id
+        )
 
         if view is None:
             return
 
-        view.renderer.RemoveActor(handle.actor)
+        if view.renderer.HasViewProp(
+            handle.actor
+        ):
+            view.renderer.RemoveActor(
+                handle.actor
+            )
 
         # Keepalive actor remains, so this renderer never becomes empty.
         view.renderer.Modified()
@@ -269,6 +336,33 @@ class VTKRenderingBackend(RenderingBackend):
     # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
+
+    def _source_has_geometry(
+        self,
+        source: vtk.vtkAlgorithm,
+        output_port: int,
+    ) -> bool:
+        source.Update()
+
+        output = source.GetOutputDataObject(
+            output_port
+        )
+
+        if output is None:
+            return False
+
+        if isinstance(
+            output,
+            vtk.vtkDataSet,
+        ):
+            return (
+                output.GetNumberOfPoints() > 0
+                and output.GetNumberOfCells() > 0
+            )
+
+        # For non-vtkDataSet outputs, fall back to assuming that an existing
+        # data object is renderable.
+        return True
 
     def _create_handle(
         self,
@@ -279,21 +373,31 @@ class VTKRenderingBackend(RenderingBackend):
 
         pipeline_filter = None
 
-        source_port = source.GetOutputPort(representation.output_port)
+        source_port = source.GetOutputPort(
+            representation.output_port
+        )
 
         if representation.kind == "outline":
             pipeline_filter = vtk.vtkOutlineFilter()
 
-            pipeline_filter.SetInputConnection(source_port)
+            pipeline_filter.SetInputConnection(
+                source_port
+            )
 
-            mapper.SetInputConnection(pipeline_filter.GetOutputPort(0))
+            mapper.SetInputConnection(
+                pipeline_filter.GetOutputPort(0)
+            )
 
         else:
-            mapper.SetInputConnection(source_port)
+            mapper.SetInputConnection(
+                source_port
+            )
 
         actor = vtk.vtkActor()
 
-        actor.SetMapper(mapper)
+        actor.SetMapper(
+            mapper
+        )
 
         return VTKRepresentationHandle(
             mapper=mapper,
@@ -313,14 +417,19 @@ class VTKRenderingBackend(RenderingBackend):
 
         # If a concrete backend representation exists for this view,
         # it is visible by definition.
-        actor.SetVisibility(1)
+        actor.SetVisibility(
+            1
+        )
 
         if representation.kind == "wireframe":
             prop.SetRepresentationToWireframe()
         else:
             prop.SetRepresentationToSurface()
 
-        if representation.kind == "outline" or representation.array_name is None:
+        if (
+            representation.kind == "outline"
+            or representation.array_name is None
+        ):
             mapper.ScalarVisibilityOff()
 
             mapper.Modified()
@@ -335,12 +444,16 @@ class VTKRenderingBackend(RenderingBackend):
         else:
             mapper.SetScalarModeToUseCellFieldData()
 
-        mapper.SelectColorArray(representation.array_name)
+        mapper.SelectColorArray(
+            representation.array_name
+        )
 
         mapper.UseLookupTableScalarRangeOff()
 
         if representation.scalar_range is not None:
-            mapper.SetScalarRange(*representation.scalar_range)
+            mapper.SetScalarRange(
+                *representation.scalar_range
+            )
 
         mapper.Modified()
         actor.Modified()

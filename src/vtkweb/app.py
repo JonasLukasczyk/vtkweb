@@ -16,21 +16,6 @@ print(f"Discovered {len(catalog.algorithms)} algorithms")
 
 pipeline = PipelineGraph(server.state)
 
-rt = pipeline.add_node(
-    vtk.vtkRTAnalyticSource(),
-    name="RT Analytic Source",
-)
-
-contour = pipeline.add_node(
-    vtk.vtkContourFilter(),
-    name="Contour",
-)
-
-pipeline.connect(
-    rt.id,
-    contour.id,
-)
-
 # # -------------------------------------------------------------------------
 # # Hard-coded contour setup for debugging
 # # -------------------------------------------------------------------------

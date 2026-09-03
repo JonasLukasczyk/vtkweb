@@ -29,6 +29,7 @@ PIPELINE_VIEW_STYLE = """
 
 .vtkweb-pipeline-node {
     position: relative;
+    background: #434343;
 
     display: inline-flex;
     align-items: center;
@@ -38,6 +39,10 @@ PIPELINE_VIEW_STYLE = """
 
     min-width: 0;
     width: fit-content;
+}
+
+.vtkweb-pipeline-node-active {
+    background: #125288 !important;
 }
 
 .vue-flow__handle.vtkweb-pipeline-handle {
@@ -87,41 +92,15 @@ def build_pipeline_view(
         classes="pa-2",
         style="height:100vh;",
     ):
-        v3.VLabel("Pipeline")
-
         with v3.VCard(
             classes="mt-2",
             style=("height:calc(100vh - 60px);"),
         ):
             with flow.NodeEditor(
                 style=("height:100%;width:100%;"),
+                node_origin=("[0.5, 0.5]",),
             ) as node_editor:
                 flow.Background()
-
-                # -------------------------------------------------------------
-                # Controls
-                # -------------------------------------------------------------
-
-                with flow.Controls(
-                    classes="vtkweb-flow-controls",
-                ):
-                    with flow.ControlsButton(
-                        title="Compute layout",
-                        click=(ctrl.compute_pipeline_layout),
-                    ):
-                        html.Div(
-                            "↕",
-                            style=(
-                                "display:flex;"
-                                "align-items:center;"
-                                "justify-content:center;"
-                                "width:100%;"
-                                "height:100%;"
-                                "font-size:14px;"
-                                "cursor:pointer;"
-                                "background:#fff;"
-                            ),
-                        )
 
                 # -------------------------------------------------------------
                 # Custom node
@@ -132,7 +111,16 @@ def build_pipeline_view(
                     var_name="node",
                 ):
                     with v3.VCard(
-                        classes=("pa-1 vtkweb-pipeline-node"),
+                        classes=(
+                            (
+                                "'pa-1 vtkweb-pipeline-node ' + "
+                                "("
+                                "node.id === active_node_id "
+                                "? 'vtkweb-pipeline-node-active' "
+                                ": ''"
+                                ")"
+                            ),
+                        ),
                         click=(
                             ctrl.set_active_node,
                             "[node.id]",
@@ -148,10 +136,7 @@ def build_pipeline_view(
                             type="target",
                             position="top",
                             v_for="port in node.data.input_port_count",
-                            classes=(
-                                "vtkweb-pipeline-handle "
-                                "vtkweb-input-handle"
-                            ),
+                            classes=("vtkweb-pipeline-handle vtkweb-input-handle"),
                             style=(
                                 "{ "
                                 "'top': '0px', "
@@ -159,7 +144,7 @@ def build_pipeline_view(
                                 "((port / "
                                 "(node.data.input_port_count + 1)) "
                                 "* 100) + '%' "
-                                "}"
+                                "}",
                             ),
                             click=(
                                 ctrl.set_active_node,
@@ -174,7 +159,7 @@ def build_pipeline_view(
                         v3.VCardText(
                             "{{ node.label }}",
                             classes="pa-1",
-                            style=("white-space:nowrap;"),
+                            style=("white-space:nowrap;font-family:monospace;"),
                         )
 
                         # -----------------------------------------------------
@@ -187,19 +172,21 @@ def build_pipeline_view(
                             type="source",
                             position="bottom",
                             v_for="port in node.data.output_port_count",
-                            classes=((
-                                "'vtkweb-pipeline-handle ' + "
-                                "("
-                                "Object.values(representations).some("
-                                "rep => "
-                                "rep.node_id === node.id && "
-                                "rep.output_port === port - 1 && "
-                                "rep.view_ids.includes(active_view_id)"
-                                ") "
-                                "? 'vtkweb-output-visible' "
-                                ": 'vtkweb-output-hidden'"
-                                ")"
-                            ),),
+                            classes=(
+                                (
+                                    "'vtkweb-pipeline-handle ' + "
+                                    "("
+                                    "Object.values(representations).some("
+                                    "rep => "
+                                    "rep.node_id === node.id && "
+                                    "rep.output_port === port - 1 && "
+                                    "rep.view_ids.includes(active_view_id)"
+                                    ") "
+                                    "? 'vtkweb-output-visible' "
+                                    ": 'vtkweb-output-hidden'"
+                                    ")"
+                                ),
+                            ),
                             style=(
                                 "{ "
                                 "'bottom': '0px', "
@@ -207,7 +194,7 @@ def build_pipeline_view(
                                 "((port / "
                                 "(node.data.output_port_count + 1)) "
                                 "* 100) + '%' "
-                                "}"
+                                "}",
                             ),
                             click=(
                                 ctrl.output_port_click,
@@ -296,16 +283,64 @@ def build_pipeline_view(
     # Graphviz layout
     # -------------------------------------------------------------------------
 
+    layout_task: asyncio.Task | None = None
+
+    def schedule_pipeline_layout() -> None:
+        nonlocal layout_task
+
+        if layout_task is not None:
+            layout_task.cancel()
+
+        async def deferred_layout():
+            # Let Vue Flow process the node add/remove first.
+            await asyncio.sleep(0.05)
+
+            start_positions = current_positions()
+            end_positions = compute_layout_positions()
+
+            await animate_positions(
+                start_positions,
+                end_positions,
+            )
+
+        layout_task = asyncio.create_task(deferred_layout())
+
     def compute_layout_positions() -> dict[
         str,
         dict[str, float],
     ]:
         graph = graphviz.Digraph(engine="dot")
 
+        scale = 40.0
+        padding = 20.0
+
+        # Heuristic sizing for the monospace node labels.
+        char_width_px = 8.5
+        horizontal_padding_px = 24.0
+        node_height_px = 40.0
+        min_width_px = 80.0
+
+        node_sizes = {}
+
         for node in pipeline.nodes.values():
+            width_px = max(
+                min_width_px,
+                len(node.name) * char_width_px + horizontal_padding_px,
+            )
+
+            height_px = node_height_px
+
+            node_sizes[node.id] = {
+                "width": width_px,
+                "height": height_px,
+            }
+
             graph.node(
                 node.id,
-                label=node.name,
+                label="",
+                width=str(width_px / scale),
+                height=str(height_px / scale),
+                fixedsize="true",
             )
 
         for edge in pipeline.edges:
@@ -326,9 +361,6 @@ def build_pipeline_view(
             if fields and fields[0] == "graph":
                 graph_height = float(fields[3])
 
-        scale = 120.0
-        padding = 40.0
-
         positions = {}
 
         for line in lines:
@@ -339,13 +371,19 @@ def build_pipeline_view(
 
             node_id = fields[1]
 
-            x = float(fields[2])
+            center_x = float(fields[2])
+            center_y = float(fields[3])
 
-            y = float(fields[3])
+            width_px = node_sizes[node_id]["width"]
+            height_px = node_sizes[node_id]["height"]
+
+            center_x_px = padding + center_x * scale
+
+            center_y_px = padding + (graph_height - center_y) * scale
 
             positions[node_id] = {
-                "x": (padding + x * scale),
-                "y": (padding + (graph_height - y) * scale),
+                "x": center_x_px - width_px * 0.5,
+                "y": center_y_px - height_px * 0.5,
             }
 
         return positions
@@ -391,14 +429,8 @@ def build_pipeline_view(
                     continue
 
                 position = {
-                    "x": (
-                        start["x"]
-                        + (end["x"] - start["x"]) * alpha
-                    ),
-                    "y": (
-                        start["y"]
-                        + (end["y"] - start["y"]) * alpha
-                    ),
+                    "x": (start["x"] + (end["x"] - start["x"]) * alpha),
+                    "y": (start["y"] + (end["y"] - start["y"]) * alpha),
                 }
 
                 node_editor.update_node(
@@ -450,6 +482,7 @@ def build_pipeline_view(
         node_id: str,
     ) -> None:
         node_editor.remove_node(node_id)
+        schedule_pipeline_layout()
 
     def remove_edge(
         edge: PipelineEdge,
@@ -460,9 +493,9 @@ def build_pipeline_view(
             source_handle=(f"output-{edge.source_port}"),
             target_handle=(f"input-{edge.target_port}"),
         )
+        schedule_pipeline_layout()
 
     ctrl.pipeline_remove_node = remove_node
-
     ctrl.pipeline_remove_edge = remove_edge
 
     # -------------------------------------------------------------------------
@@ -473,6 +506,7 @@ def build_pipeline_view(
         node: PipelineNode,
     ) -> None:
         node_editor.add_node(node_data(node))
+        schedule_pipeline_layout()
 
     def add_edge(
         edge: PipelineEdge,
@@ -481,15 +515,12 @@ def build_pipeline_view(
             # Give Vue Flow time to instantiate
             # and measure the custom node handles.
             await asyncio.sleep(0.05)
-
             node_editor.add_edge(edge_data(edge))
-
-            node_editor.fit_view()
+            schedule_pipeline_layout()
 
         asyncio.create_task(deferred_add())
 
     ctrl.pipeline_add_node = add_node
-
     ctrl.pipeline_add_edge = add_edge
 
     # -------------------------------------------------------------------------

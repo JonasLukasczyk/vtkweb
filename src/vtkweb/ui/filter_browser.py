@@ -198,7 +198,7 @@ def build_filter_browser(
             ):
                 with html.Div(
                     v_for=("(item, index) in filter_browser_items"),
-                    key="item.value",
+                    key=("item.value",),
                     classes=(
                         (
                             "index === filter_browser_selected "

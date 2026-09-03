@@ -115,6 +115,7 @@ def build_ui(
         server,
         show_drawer=False,
         width=220,
+        theme=("theme", "dark"),
     ) as layout:
         layout.title.set_text("vtkweb")
 

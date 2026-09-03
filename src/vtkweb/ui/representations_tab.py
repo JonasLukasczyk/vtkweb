@@ -241,7 +241,7 @@ def build_representations_tab(
         v3.VTab(
             "Output {{ port - 1 }}",
             v_for=("port in (pipeline.nodes[active_node_id]?.output_port_count || 0)"),
-            key="port - 1",
+            key=("port - 1",),
             value=("port - 1",),
         )
 
@@ -258,7 +258,7 @@ def build_representations_tab(
                 "rep => rep.node_id === active_node_id && "
                 "rep.output_port === active_representation_output_port)"
             ),
-            key="representation.id",
+            key=("representation.id",),
             classes="vtkweb-representation-card",
         ):
             with html.Div(

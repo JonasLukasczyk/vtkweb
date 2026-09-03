@@ -36,7 +36,6 @@ def build_inspector_view(
         classes="pa-3",
         style=("height:100vh;overflow-y:auto;min-width:0;"),
     ):
-        v3.VLabel("Inspector")
 
         with v3.VCard(
             classes="mt-2 pa-3",

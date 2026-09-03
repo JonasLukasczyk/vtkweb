@@ -33,7 +33,7 @@ class RenderView:
 class Representation:
     node_id: str
     output_port: int = 0
-    kind: str = "surface"
+    kind: str = "outline"
 
     array_name: str | None = None
     association: str = "point"
