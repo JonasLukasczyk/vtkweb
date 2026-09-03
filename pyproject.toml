@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "mpi4py>=4.1.2",
     "trame>=3.13.2",
     "trame-flow>=2.2.2",
     "trame-vtk>=2.11.16",

@@ -23,10 +23,13 @@ def build_pipeline_view(
     ):
         v3.VLabel("Pipeline")
 
+        # ---------------------------------------------------------------------
+        # Graph
+        # ---------------------------------------------------------------------
+
         with v3.VCard(
-            classes="mt-2",
             style=(
-                "height:calc(100vh - 60px);"
+                "height:calc(100vh - 104px);"
             ),
         ):
             with flow.NodeEditor(
@@ -36,7 +39,26 @@ def build_pipeline_view(
                 ),
             ) as node_editor:
                 flow.Background()
-                flow.Controls()
+                with flow.Controls(
+                    classes="vtkweb-flow-controls",
+                ):
+                    with flow.ControlsButton(
+                        title="Compute layout",
+                        click=ctrl.compute_pipeline_layout,
+                    ):
+                        html.Div(
+                            "↕",
+                            style=(
+                                "display:flex;"
+                                "align-items:center;"
+                                "justify-content:center;"
+                                "width:100%;"
+                                "height:100%;"
+                                "font-size:14px;"
+                                "cursor:pointer;"
+                                "background:#fff;"
+                            ),
+                        )
 
                 with flow.CustomNode(
                     type="vtk-node",
@@ -63,7 +85,7 @@ def build_pipeline_view(
                         flow.Handle(
                             type="target",
                             position="top",
-                            style="top:-6px;",
+                            style="top:0px;",
                         )
 
                         with v3.VRow(
@@ -97,8 +119,12 @@ def build_pipeline_view(
                         flow.Handle(
                             type="source",
                             position="bottom",
-                            style="bottom:-6px;",
+                            style="bottom:0px;",
                         )
+
+    # -------------------------------------------------------------------------
+    # Serialization
+    # -------------------------------------------------------------------------
 
     def node_data(
         node: PipelineNode,
@@ -135,13 +161,27 @@ def build_pipeline_view(
             ),
         }
 
+    # -------------------------------------------------------------------------
+    # View operations
+    # -------------------------------------------------------------------------
+
+    def fit_view() -> None:
+        node_editor.fit_view()
+
+    ctrl.pipeline_fit_view = (
+        fit_view
+    )
+
+    # -------------------------------------------------------------------------
+    # Remove
+    # -------------------------------------------------------------------------
+
     def remove_node(
         node_id: str,
     ) -> None:
         node_editor.remove_node(
             node_id
         )
-
 
     def remove_edge(
         edge: PipelineEdge,
@@ -151,8 +191,17 @@ def build_pipeline_view(
             edge.target_node_id,
         )
 
-    ctrl.pipeline_remove_node = remove_node
-    ctrl.pipeline_remove_edge = remove_edge
+    ctrl.pipeline_remove_node = (
+        remove_node
+    )
+
+    ctrl.pipeline_remove_edge = (
+        remove_edge
+    )
+
+    # -------------------------------------------------------------------------
+    # Add
+    # -------------------------------------------------------------------------
 
     def add_node(
         node: PipelineNode,
@@ -179,8 +228,17 @@ def build_pipeline_view(
             deferred_add()
         )
 
-    ctrl.pipeline_add_node = add_node
-    ctrl.pipeline_add_edge = add_edge
+    ctrl.pipeline_add_node = (
+        add_node
+    )
+
+    ctrl.pipeline_add_edge = (
+        add_edge
+    )
+
+    # -------------------------------------------------------------------------
+    # Initial graph
+    # -------------------------------------------------------------------------
 
     for node in pipeline.nodes.values():
         node_editor.add_node(

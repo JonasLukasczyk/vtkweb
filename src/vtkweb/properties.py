@@ -50,10 +50,12 @@ def inspect_properties(
 
         # Hidden because ContourValues represents this
         # information more naturally.
-        if (
-            contour_values is not None
-            and name == "NumberOfContours"
-        ):
+        if contour_values is not None and name in {
+            "NumberOfContours",
+            "ContourValues",
+            "Values",
+            "Value",
+        }:
             continue
 
         getter = getattr(
