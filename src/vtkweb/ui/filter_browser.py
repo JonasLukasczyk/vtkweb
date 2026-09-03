@@ -36,7 +36,9 @@ FILTER_BROWSER_STYLE = """
 
 .vtkweb-filter-item {
     padding: 6px 10px;
+
     border-radius: 4px;
+
     cursor: pointer;
 }
 
@@ -51,6 +53,7 @@ FILTER_BROWSER_STYLE = """
 
 .vtkweb-filter-class {
     margin-top: 1px;
+
     font-size: 11px;
     opacity: 0.5;
 }
@@ -58,9 +61,12 @@ FILTER_BROWSER_STYLE = """
 
 
 def initialize_filter_browser(
-    state,
+    server,
     catalog: AlgorithmCatalog,
 ) -> None:
+    state = server.state
+    ctrl = server.controller
+
     items = [
         {
             "title": item.label,
@@ -77,6 +83,109 @@ def initialize_filter_browser(
     state.filter_browser_open = False
     state.filter_browser_query = ""
     state.filter_browser_selected = 0
+
+    # -------------------------------------------------------------------------
+    # Events
+    # -------------------------------------------------------------------------
+
+    def open_filter_browser() -> None:
+        with state:
+            state.filter_browser_query = ""
+            state.filter_browser_items = (
+                state.filter_catalog_items
+            )
+            state.filter_browser_selected = 0
+            state.filter_browser_open = True
+
+    def close_filter_browser() -> None:
+        state.filter_browser_open = False
+
+    def set_filter_browser_query(
+        query: str,
+    ) -> None:
+        query = query or ""
+        needle = query.casefold()
+
+        items = [
+            item
+            for item in state.filter_catalog_items
+            if (
+                not needle
+                or needle
+                in item["title"].casefold()
+                or needle
+                in item["class_name"].casefold()
+            )
+        ]
+
+        with state:
+            state.filter_browser_query = query
+            state.filter_browser_items = items
+            state.filter_browser_selected = 0
+
+    def set_filter_browser_selected(
+        index: int,
+    ) -> None:
+        state.filter_browser_selected = int(
+            index
+        )
+
+    def filter_browser_keydown(
+        key: str,
+    ) -> None:
+        items = state.filter_browser_items
+
+        if key == "ArrowDown" and items:
+            state.filter_browser_selected = min(
+                state.filter_browser_selected + 1,
+                len(items) - 1,
+            )
+
+        elif key == "ArrowUp" and items:
+            state.filter_browser_selected = max(
+                state.filter_browser_selected - 1,
+                0,
+            )
+
+        elif key == "Enter" and items:
+            ctrl.create_filter(
+                items[
+                    state.filter_browser_selected
+                ]["value"]
+            )
+
+        elif key == "Escape":
+            close_filter_browser()
+
+    # -------------------------------------------------------------------------
+    # Controller
+    # -------------------------------------------------------------------------
+
+    ctrl.open_filter_browser = (
+        open_filter_browser
+    )
+
+    ctrl.close_filter_browser = (
+        close_filter_browser
+    )
+
+    ctrl.set_filter_browser_query = (
+        set_filter_browser_query
+    )
+
+    ctrl.set_filter_browser_selected = (
+        set_filter_browser_selected
+    )
+
+    ctrl.filter_browser_keydown = (
+        filter_browser_keydown
+    )
+
+    server.trigger(
+        "open_filter_browser"
+    )(
+        open_filter_browser
+    )
 
 
 def build_filter_browser(

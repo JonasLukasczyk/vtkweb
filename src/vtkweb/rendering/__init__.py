@@ -1,5 +1,6 @@
 from vtkweb.rendering.base import (
     REPRESENTATION_KINDS,
+    RenderView,
     RenderingBackend,
     Representation,
     ViewSettings,
@@ -13,6 +14,7 @@ from vtkweb.rendering.vtk_backend import (
 
 __all__ = [
     "REPRESENTATION_KINDS",
+    "RenderView",
     "RenderingBackend",
     "Representation",
     "ViewSettings",

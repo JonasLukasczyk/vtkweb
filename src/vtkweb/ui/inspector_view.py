@@ -14,7 +14,25 @@ from vtkweb.ui.view_tab import (
 )
 
 
-def build_inspector_view(ctrl) -> None:
+def initialize_inspector(
+    state,
+    ctrl,
+) -> None:
+    state.inspector_tab = "properties"
+
+    def set_inspector_tab(
+        value: str,
+    ) -> None:
+        state.inspector_tab = value
+
+    ctrl.set_inspector_tab = (
+        set_inspector_tab
+    )
+
+
+def build_inspector_view(
+    ctrl,
+) -> None:
     with v3.VCol(
         cols=3,
         classes="pa-3",
@@ -42,7 +60,10 @@ def build_inspector_view(ctrl) -> None:
                 model_value=("inspector_tab",),
                 density="compact",
                 grow=True,
-                update_modelValue=(ctrl.set_inspector_tab, "[$event]",),
+                update_modelValue=(
+                    ctrl.set_inspector_tab,
+                    "[$event]",
+                ),
             ):
                 v3.VTab(
                     "Properties",
@@ -60,7 +81,7 @@ def build_inspector_view(ctrl) -> None:
                 )
 
             v3.VDivider(
-                classes="mb-3"
+                classes="mb-3",
             )
 
             with html.Div(

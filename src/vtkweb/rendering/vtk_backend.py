@@ -5,10 +5,16 @@ from dataclasses import dataclass
 import vtk
 
 from vtkweb.rendering.base import (
+    RenderView,
     RenderingBackend,
     Representation,
-    ViewSettings,
 )
+
+
+@dataclass
+class VTKViewHandle:
+    renderer: vtk.vtkRenderer
+    render_window: vtk.vtkRenderWindow
 
 
 @dataclass
@@ -25,40 +31,128 @@ class VTKRenderingBackend(
     name = "vtk"
 
     def __init__(self) -> None:
-        self.renderer = vtk.vtkRenderer()
+        self._views: dict[
+            str,
+            VTKViewHandle,
+        ] = {}
 
-        self.render_window = (
+        self._representations: dict[
+            tuple[str, str],
+            VTKRepresentationHandle,
+        ] = {}
+
+    # -------------------------------------------------------------------------
+    # Views
+    # -------------------------------------------------------------------------
+
+    def add_view(
+        self,
+        view: RenderView,
+    ) -> None:
+        renderer = vtk.vtkRenderer()
+
+        render_window = (
             vtk.vtkRenderWindow()
         )
 
-        self.render_window.AddRenderer(
-            self.renderer
+        render_window.AddRenderer(
+            renderer
         )
 
-        self.render_window.SetOffScreenRendering(
+        render_window.SetOffScreenRendering(
             1
         )
 
-        self._handles: dict[
-            str,
-            VTKRepresentationHandle,
-        ] = {}
+        self._views[
+            view.id
+        ] = VTKViewHandle(
+            renderer=renderer,
+            render_window=render_window,
+        )
+
+        self.set_view_settings(
+            view
+        )
+
+    def remove_view(
+        self,
+        view_id: str,
+    ) -> None:
+        keys = [
+            key
+            for key in self._representations
+            if key[1] == view_id
+        ]
+
+        for representation_id, _ in keys:
+            self.remove_representation(
+                representation_id,
+                view_id,
+            )
+
+        self._views.pop(
+            view_id,
+            None,
+        )
+
+    def get_render_window(
+        self,
+        view_id: str,
+    ) -> vtk.vtkRenderWindow:
+        return self._views[
+            view_id
+        ].render_window
+
+    def set_view_settings(
+        self,
+        view: RenderView,
+    ) -> None:
+        handle = self._views[
+            view.id
+        ]
+
+        handle.renderer.SetBackground(
+            *view.settings.background_color
+        )
+
+    def reset_camera(
+        self,
+        view_id: str,
+    ) -> None:
+        self._views[
+            view_id
+        ].renderer.ResetCamera()
+
+    # -------------------------------------------------------------------------
+    # Representations
+    # -------------------------------------------------------------------------
 
     def add_representation(
         self,
         representation: Representation,
+        view: RenderView,
         source: vtk.vtkAlgorithm,
     ) -> None:
+        key = (
+            representation.id,
+            view.id,
+        )
+
+        if key in self._representations:
+            return
+
         handle = self._create_handle(
             representation,
             source,
         )
 
-        self._handles[
-            representation.id
+        self._representations[
+            key
         ] = handle
 
-        self.renderer.AddActor(
+        self._views[
+            view.id
+        ].renderer.AddActor(
             handle.actor
         )
 
@@ -70,31 +164,37 @@ class VTKRenderingBackend(
     def update_representation(
         self,
         representation: Representation,
+        view: RenderView,
         source: vtk.vtkAlgorithm,
     ) -> None:
-        handle = self._handles.get(
-            representation.id
+        key = (
+            representation.id,
+            view.id,
+        )
+
+        handle = self._representations.get(
+            key
         )
 
         if handle is None:
             self.add_representation(
                 representation,
+                view,
                 source,
             )
             return
 
-        # Outline requires a different VTK pipeline,
-        # so recreate the backend object when the type changes.
         if handle.kind != representation.kind:
             self.remove_representation(
-                representation.id
+                representation.id,
+                view.id,
             )
 
             self.add_representation(
                 representation,
+                view,
                 source,
             )
-
             return
 
         self._apply_representation(
@@ -105,29 +205,33 @@ class VTKRenderingBackend(
     def remove_representation(
         self,
         representation_id: str,
+        view_id: str,
     ) -> None:
-        handle = self._handles.pop(
+        key = (
             representation_id,
+            view_id,
+        )
+
+        handle = self._representations.pop(
+            key,
             None,
         )
 
         if handle is None:
             return
 
-        self.renderer.RemoveActor(
-            handle.actor
+        view = self._views.get(
+            view_id
         )
 
-    def set_view_settings(
-        self,
-        settings: ViewSettings,
-    ) -> None:
-        self.renderer.SetBackground(
-            *settings.background_color
-        )
+        if view is not None:
+            view.renderer.RemoveActor(
+                handle.actor
+            )
 
-    def reset_camera(self) -> None:
-        self.renderer.ResetCamera()
+    # -------------------------------------------------------------------------
+    # Internal
+    # -------------------------------------------------------------------------
 
     def _create_handle(
         self,
@@ -138,26 +242,32 @@ class VTKRenderingBackend(
 
         pipeline_filter = None
 
+        source_port = source.GetOutputPort(
+            representation.output_port
+        )
+
         if representation.kind == "outline":
             pipeline_filter = (
                 vtk.vtkOutlineFilter()
             )
 
             pipeline_filter.SetInputConnection(
-                source.GetOutputPort(0)
+                source_port
             )
 
             mapper.SetInputConnection(
-                pipeline_filter.GetOutputPort(0)
+                pipeline_filter.GetOutputPort()
             )
 
         else:
             mapper.SetInputConnection(
-                source.GetOutputPort(0)
+                source_port
             )
 
         actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
+        actor.SetMapper(
+            mapper
+        )
 
         return VTKRepresentationHandle(
             mapper=mapper,
@@ -171,14 +281,13 @@ class VTKRenderingBackend(
         representation: Representation,
         handle: VTKRepresentationHandle,
     ) -> None:
-        actor = handle.actor
         mapper = handle.mapper
+        actor = handle.actor
+        prop = actor.GetProperty()
 
         actor.SetVisibility(
-            1 if representation.visible else 0
+            1
         )
-
-        prop = actor.GetProperty()
 
         if representation.kind == "wireframe":
             prop.SetRepresentationToWireframe()
