@@ -169,16 +169,18 @@ def build_render_view(
         sync_slot_layout()
 
     def reset_render_view(view_id: str | None = None) -> None:
-        if view_id is None:
-            view_id = state.active_view_id
         if view_id is None or view_id not in state.views:
             return
         value = state.views[view_id]
         if value.get("type") != "vtk":
             return
-        rendering.reset_camera(view_id)
+
+        # Keyboard camera reset belongs to the focused VtkLocalView.  Reset
+        # the client-side local view directly, matching the pre-tiling
+        # behavior, rather than treating Space as a workspace-level action.
         widget = vtk_widgets_by_slot.get(value["backend_id"])
         if widget is not None:
+            widget.reset_camera()
             widget.update()
 
     ctrl.trigger("render_view_reset")(reset_render_view)
@@ -242,16 +244,15 @@ def build_render_view(
                     ctrl.set_active_view,
                     f"[vtk_slot_layout['{slot_id}'].view_id]",
                 ),
-                raw_attrs=[
-                    f"@keydown.space.prevent=\"trigger('render_view_reset', [vtk_slot_layout['{slot_id}'].view_id])\""
-                ],
-                tabindex=0,
             ):
                 widget = vtk_widgets.VtkLocalView(
                     backend.get_render_window(slot_id),
                     ref=f"render_view_{slot_id}",
                     tabindex=0,
                     style="height:100%;width:100%;outline:none;",
+                    raw_attrs=[
+                        f"@keydown.space.exact.prevent=\"trigger('render_view_reset', [vtk_slot_layout['{slot_id}'].view_id])\""
+                    ],
                 )
                 vtk_widgets_by_slot[slot_id] = widget
 
