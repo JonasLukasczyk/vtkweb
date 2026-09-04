@@ -6,11 +6,6 @@ from trame.widgets import html
 def build_view_tab(
     ctrl,
 ) -> None:
-    html.Div(
-        "View",
-        classes="vtkweb-section-title",
-    )
-
     with html.Label(
         classes="vtkweb-color-box",
     ):

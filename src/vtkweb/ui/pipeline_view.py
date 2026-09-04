@@ -76,18 +76,56 @@ def build_pipeline_view(
     state,
     ctrl,
 ):
+    node_editor = None
+    space_task: asyncio.Task | None = None
+
+    def pipeline_view_space() -> None:
+        nonlocal space_task
+
+        if space_task is not None and not space_task.done():
+            space_task.cancel()
+            space_task = None
+
+            async def relayout() -> None:
+                start_positions = current_positions()
+                end_positions = compute_layout_positions()
+                await animate_positions(start_positions, end_positions)
+
+            asyncio.create_task(relayout())
+            return
+
+        async def fit_after_delay() -> None:
+            nonlocal space_task
+            try:
+                await asyncio.sleep(0.25)
+                node_editor.fit_view()
+            finally:
+                space_task = None
+
+        space_task = asyncio.create_task(fit_after_delay())
+
+    ctrl.trigger("pipeline_view_space")(pipeline_view_space)
+
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
 
-    with v3.VCol(
-        cols=3,
+    with html.Div(
         classes="pa-2",
-        style="height:100vh;",
+        style=("height:100%;width:100%;min-width:0;min-height:0;outline:none;"),
+        tabindex=0,
+        raw_attrs=[
+            (
+                '@keydown.space="'
+                "['INPUT','TEXTAREA','SELECT','BUTTON'].includes("
+                "$event.target.tagName) || "
+                "($event.preventDefault(), trigger('pipeline_view_space'))"
+                '"'
+            ),
+        ],
     ):
         with v3.VCard(
-            classes="mt-2",
-            style=("height:calc(100vh - 60px);"),
+            style=("height:100%;width:100%;min-width:0;min-height:0;outline:none;"),
         ):
             with flow.NodeEditor(
                 style=("height:100%;width:100%;"),

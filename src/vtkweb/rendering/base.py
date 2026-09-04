@@ -44,6 +44,7 @@ class Representation:
         ]
         | None
     ) = None
+    color: str = "#ffffff"
 
     view_ids: set[str] = field(default_factory=set)
 

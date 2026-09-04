@@ -137,33 +137,66 @@ INSPECTOR_STYLE = """
     overflow: hidden;
 }
 
-.vtkweb-select-control {
+.vtkweb-compact-select {
     flex: 1 1 auto;
     min-width: 0;
     width: 0;
 }
 
-.vtkweb-select-control .v-input__control,
-.vtkweb-select-control .v-field {
-    min-height: 26px !important;
-    height: 26px !important;
+.vtkweb-compact-select .v-field {
+    min-height: 26px;
+    height: 26px;
+    padding: 0;
+    background: transparent;
 }
 
-.vtkweb-select-control .v-field {
-    padding: 0 !important;
-    background: transparent !important;
-    box-shadow: none !important;
-}
-
-.vtkweb-select-control .v-field__outline {
-    display: none !important;
-}
-
-.vtkweb-select-control .v-field__input {
-    min-height: 26px !important;
-    height: 26px !important;
-    padding: 0 4px !important;
+.vtkweb-compact-select .v-field__input {
+    min-height: 26px;
+    height: 26px;
+    padding: 0 2px 0 6px;
     font-size: 12px;
+}
+
+.vtkweb-compact-select .v-field__append-inner {
+    align-self: stretch;
+    min-height: 26px;
+    height: 26px;
+    align-items: center;
+    padding-top: 0;
+}
+
+.vtkweb-compact-select .v-field__append-inner > .v-icon {
+    align-self: center;
+    margin-top: 0;
+}
+
+.vtkweb-compact-select .v-input__control {
+    min-height: 26px;
+}
+
+.vtkweb-compact-select .v-field__outline,
+.vtkweb-compact-select .v-field__overlay {
+    display: none;
+}
+
+
+/* VSelect menus are teleported outside the inspector DOM, so this selector
+ * intentionally targets select menus globally. Keep their rows as compact as
+ * the 28px inspector controls. */
+.v-select__content .v-list {
+    padding-top: 2px;
+    padding-bottom: 2px;
+}
+
+.v-select__content .v-list-item {
+    min-height: 30px;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.v-select__content .v-list-item-title {
+    font-size: 12px;
+    line-height: 20px;
 }
 
 .vtkweb-list-property {

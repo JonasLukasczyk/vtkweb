@@ -388,6 +388,14 @@ class VTKRenderingBackend(RenderingBackend):
         if representation.kind == "outline" or representation.array_name is None:
             mapper.ScalarVisibilityOff()
 
+            if representation.kind != "outline":
+                color = representation.color.lstrip("#")
+                prop.SetColor(
+                    int(color[0:2], 16) / 255.0,
+                    int(color[2:4], 16) / 255.0,
+                    int(color[4:6], 16) / 255.0,
+                )
+
             mapper.Modified()
             actor.Modified()
 

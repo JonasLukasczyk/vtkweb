@@ -9,16 +9,15 @@ def build_title_bar_actions(ctrl) -> None:
     v3.VSpacer()
 
     v3.VBtn(
-        "Save State",
-        prepend_icon="mdi-content-save-outline",
+        icon="mdi-content-save-outline",
         variant="text",
         click=ctrl.save_python_state,
+        density="compact",
     )
 
     v3.VBtn(
-        "Load State",
-        prepend_icon="mdi-folder-open-outline",
+        icon="mdi-folder-open-outline",
         variant="text",
         click=ctrl.open_python_state,
-        title="Only load trusted Python state files; loading executes code.",
+        density="compact",
     )

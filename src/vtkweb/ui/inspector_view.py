@@ -31,59 +31,71 @@ def initialize_inspector(
 def build_inspector_view(
     ctrl,
 ) -> None:
-    with v3.VCol(
-        cols=3,
+    with html.Div(
         classes="pa-3",
-        style=("height:100vh;overflow-y:auto;min-width:0;"),
+        style=(
+            "height:100%;"
+            "width:100%;"
+            "min-width:0;"
+            "min-height:0;"
+            "overflow:hidden;"
+            "display:flex;"
+            "flex-direction:column;"
+        ),
     ):
         with v3.VCard(
             classes="mt-2 pa-3",
-            style=("width:100%;min-width:0;"),
+            style=(
+                "width:100%;"
+                "min-width:0;"
+                "min-height:0;"
+                "height:100%;"
+                "display:flex;"
+                "flex-direction:column;"
+            ),
         ):
-            v3.VCardTitle(
-                "{{ pipeline.nodes[active_node_id]?.name || '' }}",
-                classes="pa-0 mb-2",
-            )
-
             with v3.VTabs(
                 model_value=("inspector_tab",),
                 density="compact",
-                grow=True,
+                # grow=True,
                 update_modelValue=(
                     ctrl.set_inspector_tab,
                     "[$event]",
                 ),
             ):
-                v3.VTab(
-                    "Properties",
+                with v3.VTab(
                     value="properties",
-                )
+                ):
+                    v3.VIcon("mdi-tune")
 
-                v3.VTab(
-                    "Representations",
+                with v3.VTab(
                     value="representations",
-                )
+                ):
+                    v3.VIcon("mdi-cube-scan")
 
-                v3.VTab(
-                    "View",
+                with v3.VTab(
                     value="view",
-                )
+                ):
+                    v3.VIcon("mdi-monitor-edit")
 
             v3.VDivider(
                 classes="mb-3",
             )
 
             with html.Div(
-                v_if=("inspector_tab === 'properties'"),
+                style=("flex:1;min-height:0;overflow-y:auto;"),
             ):
-                build_properties_tab(ctrl)
+                with html.Div(
+                    v_if=("inspector_tab === 'properties'"),
+                ):
+                    build_properties_tab(ctrl)
 
-            with html.Div(
-                v_if=("inspector_tab === 'representations'"),
-            ):
-                build_representations_tab(ctrl)
+                with html.Div(
+                    v_if=("inspector_tab === 'representations'"),
+                ):
+                    build_representations_tab(ctrl)
 
-            with html.Div(
-                v_if=("inspector_tab === 'view'"),
-            ):
-                build_view_tab(ctrl)
+                with html.Div(
+                    v_if=("inspector_tab === 'view'"),
+                ):
+                    build_view_tab(ctrl)

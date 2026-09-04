@@ -15,11 +15,6 @@ def initialize_representations_tab(
 ) -> None:
     state.active_representation_output_port = 0
     state.color_array_items = []
-    state.representation_kind_items = [
-        {"title": "Surface", "value": "surface"},
-        {"title": "Wireframe", "value": "wireframe"},
-        {"title": "Outline", "value": "outline"},
-    ]
 
     @state.change(
         "active_node_id",
@@ -79,11 +74,6 @@ def initialize_representations_tab(
 def build_representations_tab(
     ctrl,
 ) -> None:
-    html.Div(
-        "Representations",
-        classes="vtkweb-section-title",
-    )
-
     # -------------------------------------------------------------------------
     # Output ports
     # -------------------------------------------------------------------------
@@ -188,15 +178,23 @@ def build_representations_tab(
                     classes="vtkweb-control-label",
                 )
                 v3.VSelect(
-                    items=("representation_kind_items",),
+                    classes="vtkweb-compact-select",
                     model_value=("representation.kind",),
+                    items=(
+                        [
+                            {"title": "Surface", "value": "surface"},
+                            {"title": "Wireframe", "value": "wireframe"},
+                            {"title": "Outline", "value": "outline"},
+                        ],
+                    ),
+                    item_title="title",
+                    item_value="value",
                     density="compact",
-                    hide_details=True,
                     variant="plain",
-                    classes="vtkweb-select-control",
+                    hide_details=True,
                     update_modelValue=(
                         ctrl.set_representation_kind,
-                        ("[representation.id,$event]"),
+                        "[representation.id,$event]",
                     ),
                 )
 
@@ -212,24 +210,48 @@ def build_representations_tab(
                         classes="vtkweb-control-label",
                     )
                     v3.VSelect(
-                        items=("color_array_items",),
+                        classes="vtkweb-compact-select",
                         model_value=(
-                            "representation.array_name "
-                            "? representation.association + ':' + "
-                            "representation.array_name : null",
+                            "representation.array_name === null "
+                            "? 'fixed' "
+                            ": representation.association + ':' + "
+                            "representation.array_name",
                         ),
-                        clearable=True,
+                        items=(
+                            "[{ title: 'Fixed', value: 'fixed' }, "
+                            "...color_array_items]",
+                        ),
+                        item_title="title",
+                        item_value="value",
                         density="compact",
-                        hide_details=True,
                         variant="plain",
-                        classes="vtkweb-select-control",
+                        hide_details=True,
                         update_modelValue=(
                             ctrl.set_representation_array,
                             (
                                 "[representation.id,"
-                                "$event ? $event.split(':')[1] : null,"
-                                "$event ? $event.split(':')[0] : 'point']"
+                                "$event === 'fixed' "
+                                "? null : $event.split(':')[1],"
+                                "$event === 'fixed' "
+                                "? 'point' : $event.split(':')[0]]"
                             ),
+                        ),
+                    )
+
+                with html.Label(
+                    v_if=("representation.array_name === null"),
+                    classes="vtkweb-color-box mt-1",
+                ):
+                    html.Span(
+                        "Color",
+                        classes="vtkweb-control-label",
+                    )
+                    html.Input(
+                        type="color",
+                        value=("representation.color || '#ffffff'",),
+                        input=(
+                            ctrl.set_representation_color,
+                            "[representation.id,$event.target.value]",
                         ),
                     )
 

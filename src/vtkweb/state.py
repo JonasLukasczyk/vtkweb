@@ -194,6 +194,16 @@ def export_python_state(
                 ]
             )
 
+        if representation.color != "#ffffff":
+            lines.extend(
+                [
+                    "    ctrl.set_representation_color(",
+                    f"        {variable},",
+                    f"        {representation.color!r},",
+                    "    )",
+                ]
+            )
+
         if representation.scalar_range is not None:
             minimum, maximum = representation.scalar_range
             lines.extend(

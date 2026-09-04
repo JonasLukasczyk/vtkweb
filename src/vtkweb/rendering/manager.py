@@ -215,6 +215,7 @@ class RenderManager:
                 "point",
             ),
             scalar_range=(tuple(scalar_range) if scalar_range is not None else None),
+            color=value.get("color", "#ffffff"),
             view_ids=set(
                 value.get(
                     "view_ids",
@@ -271,6 +272,7 @@ class RenderManager:
             "array_name": None,
             "association": "point",
             "scalar_range": None,
+            "color": "#ffffff",
             "view_ids": [],
         }
 
@@ -431,6 +433,19 @@ class RenderManager:
                 ),
             }
         )
+        self._set_representation_state(
+            representation_id,
+            value,
+        )
+        self._update_representation(representation_id)
+
+    def set_color(
+        self,
+        representation_id: str,
+        color: str,
+    ) -> None:
+        value = dict(self.state.representations[representation_id])
+        value["color"] = color
         self._set_representation_state(
             representation_id,
             value,

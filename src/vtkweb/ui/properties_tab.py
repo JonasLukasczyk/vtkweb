@@ -52,11 +52,6 @@ def initialize_properties_tab(
 def build_properties_tab(
     ctrl,
 ) -> None:
-    html.Div(
-        "Node",
-        classes="vtkweb-section-title",
-    )
-
     # -------------------------------------------------------------------------
     # Input arrays
     # -------------------------------------------------------------------------
@@ -79,13 +74,14 @@ def build_properties_tab(
             )
 
             v3.VSelect(
-                items=("array.items",),
-                model_value=("array.value",),
-                clearable=True,
+                classes="vtkweb-compact-select",
+                model_value=("array.value ?? null",),
+                items=("[{ title: 'None', value: null }, ...array.items]",),
+                item_title="title",
+                item_value="value",
                 density="compact",
-                hide_details=True,
                 variant="plain",
-                classes="vtkweb-select-control",
+                hide_details=True,
                 update_modelValue=(
                     ctrl.set_node_input_array,
                     "[active_node_id, array.index, $event]",

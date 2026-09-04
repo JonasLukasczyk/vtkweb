@@ -180,6 +180,15 @@ def initialize_app_controller(
             association,
         )
 
+    def set_representation_color(
+        representation_id: str,
+        value: str,
+    ) -> None:
+        rendering.set_color(
+            representation_id,
+            value,
+        )
+
     def set_representation_scalar_range(
         representation_id: str,
         minimum: float,
@@ -419,6 +428,7 @@ def initialize_app_controller(
     ctrl.set_representation_kind = set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
     ctrl.set_representation_array = set_representation_array
+    ctrl.set_representation_color = set_representation_color
     ctrl.set_representation_scalar_range = set_representation_scalar_range
     ctrl.set_active_view = set_active_view
     ctrl.set_view_background_color = set_view_background_color
