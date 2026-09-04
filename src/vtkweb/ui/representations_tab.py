@@ -81,92 +81,6 @@ def initialize_representations_tab(
         if pipeline.active_node_id is not None:
             update_representation_state(pipeline.active_node_id)
 
-    def remove_representation(
-        representation_id: str,
-    ) -> None:
-        rendering.remove_representation(representation_id)
-        ctrl.view_update()
-
-    def toggle_representation_in_view(
-        representation_id: str,
-        view_id: str,
-    ) -> None:
-        rendering.toggle_representation_in_view(
-            representation_id,
-            view_id,
-        )
-        ctrl.view_update()
-
-    def set_representation_kind(
-        representation_id: str,
-        kind: str,
-    ) -> None:
-        rendering.set_representation_kind(
-            representation_id,
-            kind,
-        )
-        ctrl.view_update()
-
-    def set_color_array(
-        representation_id: str,
-        value,
-    ) -> None:
-        if not value:
-            rendering.set_array(
-                representation_id,
-                None,
-            )
-        else:
-            association, array_name = value.split(
-                ":",
-                1,
-            )
-            rendering.set_array(
-                representation_id,
-                array_name,
-                association,
-            )
-
-        ctrl.view_update()
-
-    def set_color_range_min(
-        representation_id: str,
-        value,
-    ) -> None:
-        if value in ("", None):
-            return
-
-        representation = rendering.get_representation(representation_id)
-        if representation.scalar_range is None:
-            return
-
-        _, maximum = representation.scalar_range
-        rendering.set_scalar_range(
-            representation_id,
-            float(value),
-            maximum,
-        )
-        ctrl.view_update()
-
-    def set_color_range_max(
-        representation_id: str,
-        value,
-    ) -> None:
-        if value in ("", None):
-            return
-
-        representation = rendering.get_representation(representation_id)
-        if representation.scalar_range is None:
-            return
-
-        minimum, _ = representation.scalar_range
-        rendering.set_scalar_range(
-            representation_id,
-            minimum,
-            float(value),
-        )
-        ctrl.view_update()
-
     def fit_color_range(
         representation_id: str,
     ) -> None:
@@ -184,20 +98,13 @@ def initialize_representations_tab(
         if scalar_range is None:
             return
 
-        rendering.set_scalar_range(
+        ctrl.set_representation_scalar_range(
             representation_id,
             *scalar_range,
         )
-        ctrl.view_update()
 
     ctrl.update_representation_state = update_representation_state
     ctrl.set_representation_output_port = set_representation_output_port
-    ctrl.remove_representation = remove_representation
-    ctrl.toggle_representation_in_view = toggle_representation_in_view
-    ctrl.set_representation_kind = set_representation_kind
-    ctrl.set_color_array = set_color_array
-    ctrl.set_color_range_min = set_color_range_min
-    ctrl.set_color_range_max = set_color_range_max
     ctrl.fit_color_range = fit_color_range
 
 
@@ -353,8 +260,12 @@ def build_representations_tab(
                         variant="plain",
                         classes="vtkweb-select-control",
                         update_modelValue=(
-                            ctrl.set_color_array,
-                            ("[representation.id,$event]"),
+                            ctrl.set_representation_array,
+                            (
+                                "[representation.id,"
+                                "$event ? $event.split(':')[1] : null,"
+                                "$event ? $event.split(':')[0] : 'point']"
+                            ),
                         ),
                     )
 
@@ -368,8 +279,11 @@ def build_representations_tab(
                         value=("representation.scalar_range?.[0] ?? 0",),
                         classes="vtkweb-range-input",
                         change=(
-                            ctrl.set_color_range_min,
-                            ("[representation.id,$event.target.value]"),
+                            ctrl.set_representation_scalar_range,
+                            (
+                                "[representation.id,$event.target.value,"
+                                "representation.scalar_range[1]]"
+                            ),
                         ),
                     )
                     html.Input(
@@ -378,8 +292,11 @@ def build_representations_tab(
                         value=("representation.scalar_range?.[1] ?? 1",),
                         classes="vtkweb-range-input",
                         change=(
-                            ctrl.set_color_range_max,
-                            ("[representation.id,$event.target.value]"),
+                            ctrl.set_representation_scalar_range,
+                            (
+                                "[representation.id,representation.scalar_range[0],"
+                                "$event.target.value]"
+                            ),
                         ),
                     )
                     v3.VBtn(

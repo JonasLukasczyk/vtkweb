@@ -130,6 +130,52 @@ class RenderManager:
                 None,
             )
 
+    def rename_view(
+        self,
+        view_id: str,
+        new_view_id: str,
+        *,
+        name: str | None = None,
+    ) -> RenderView:
+        self.get_view(view_id)
+
+        if new_view_id != view_id and new_view_id in self.state.views:
+            raise ValueError(f"View ID already exists: {new_view_id}")
+
+        value = dict(self.state.views[view_id])
+        value["id"] = new_view_id
+        if name is not None:
+            value["name"] = name
+
+        views = dict(self.state.views)
+        del views[view_id]
+        views[new_view_id] = value
+
+        self.backend.rename_view(
+            view_id,
+            new_view_id,
+        )
+
+        representations = dict(self.state.representations)
+        for representation_id, representation in representations.items():
+            if view_id not in representation.get("view_ids", []):
+                continue
+
+            updated = dict(representation)
+            updated["view_ids"] = [
+                new_view_id if item == view_id else item
+                for item in representation.get("view_ids", [])
+            ]
+            representations[representation_id] = updated
+
+        self.state.views = views
+        self.state.representations = representations
+
+        if self.active_view_id == view_id:
+            self.state.active_view_id = new_view_id
+
+        return self.get_view(new_view_id)
+
     def set_active_view(
         self,
         view_id: str,

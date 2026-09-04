@@ -162,6 +162,18 @@ class PipelineGraph:
     ) -> vtk.vtkAlgorithm:
         return self._processors[node_id]
 
+    def clear(
+        self,
+    ) -> None:
+        """Clear pipeline state without inspecting or executing processors."""
+
+        self._processors.clear()
+        self.state.pipeline = {
+            "nodes": {},
+            "edges": [],
+        }
+        self.state.active_node_id = None
+
     # -------------------------------------------------------------------------
     # Nodes
     # -------------------------------------------------------------------------
@@ -289,6 +301,7 @@ class PipelineGraph:
         *,
         source_port: int = 0,
         target_port: int = 0,
+        sync: bool = True,
     ) -> PipelineEdge:
         edge = PipelineEdge(
             source_node_id=source_node_id,
@@ -309,7 +322,8 @@ class PipelineGraph:
 
         self._sync_inputs(target_node_id)
 
-        self.sync_node_from_runtime(target_node_id)
+        if sync:
+            self.sync_node_from_runtime(target_node_id)
 
         return edge
 

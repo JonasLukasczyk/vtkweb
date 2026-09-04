@@ -18,11 +18,13 @@ class PropertyDescriptor:
 
 IGNORED_PROPERTIES = {
     "AbortExecute",
+    "AbortOutput",
     "Debug",
     "GlobalWarningDisplay",
     "ObjectName",
     "Progress",
     "ProgressObserver",
+    "ReferenceCount",
     "ReleaseDataFlag",
 }
 
@@ -130,7 +132,14 @@ def set_property(
         setter(str(value))
 
     elif descriptor.kind == "vector":
-        setter(*[float(component) for component in value])
+        converted = []
+        for component, current in zip(value, descriptor.value):
+            if isinstance(current, int) and not isinstance(current, bool):
+                converted.append(int(component))
+            else:
+                converted.append(float(component))
+
+        setter(*converted)
 
 
 def _inspect_contour_values(

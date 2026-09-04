@@ -19,5 +19,6 @@ def build_title_bar_actions(ctrl) -> None:
         "Load State",
         prepend_icon="mdi-folder-open-outline",
         variant="text",
-        click=ctrl.load_python_state,
+        click=ctrl.open_python_state,
+        title="Only load trusted Python state files; loading executes code.",
     )

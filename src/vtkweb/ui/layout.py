@@ -43,9 +43,6 @@ from vtkweb.ui.render_view import (
 from vtkweb.ui.representations_tab import (
     initialize_representations_tab,
 )
-from vtkweb.ui.view_tab import (
-    initialize_view_tab,
-)
 from vtkweb.ui.title_bar import (
     build_title_bar_actions,
 )
@@ -83,13 +80,6 @@ def build_ui(
     )
 
     initialize_representations_tab(
-        state,
-        ctrl,
-        pipeline,
-        rendering,
-    )
-
-    initialize_view_tab(
         state,
         ctrl,
         pipeline,

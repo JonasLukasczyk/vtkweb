@@ -68,6 +68,14 @@ class RenderingBackend(ABC):
         pass
 
     @abstractmethod
+    def rename_view(
+        self,
+        view_id: str,
+        new_view_id: str,
+    ) -> None:
+        pass
+
+    @abstractmethod
     def add_representation(
         self,
         representation: Representation,

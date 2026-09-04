@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 
 from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
+from vtkweb.state import export_python_state, load_python_state
 
 
 def initialize_app_controller(
@@ -48,12 +50,14 @@ def initialize_app_controller(
         *,
         source_port: int = 0,
         target_port: int = 0,
+        sync: bool = True,
     ) -> None:
         edge = pipeline.connect(
             source_node_id,
             target_node_id,
             source_port=int(source_port),
             target_port=int(target_port),
+            sync=sync,
         )
 
         ctrl.pipeline_add_edge(edge)
@@ -155,6 +159,110 @@ def initialize_app_controller(
         ctrl.update_representation_state(node_id)
         ctrl.view_update()
         return representation.id
+
+    def remove_representation(
+        representation_id: str,
+    ) -> None:
+        representation = rendering.get_representation(representation_id)
+
+        rendering.remove_representation(representation_id)
+
+        ctrl.update_representation_state(representation.node_id)
+
+        ctrl.view_update()
+
+    def set_representation_kind(
+        representation_id: str,
+        kind: str,
+    ) -> None:
+        rendering.set_representation_kind(
+            representation_id,
+            kind,
+        )
+
+        ctrl.view_update()
+
+    def toggle_representation_in_view(
+        representation_id: str,
+        view_id: str,
+    ) -> None:
+        rendering.toggle_representation_in_view(
+            representation_id,
+            view_id,
+        )
+
+        ctrl.view_update()
+
+    def set_representation_array(
+        representation_id: str,
+        array_name: str | None,
+        association: str = "point",
+    ) -> None:
+        rendering.set_array(
+            representation_id,
+            array_name,
+            association,
+        )
+
+        ctrl.view_update()
+
+    def set_representation_scalar_range(
+        representation_id: str,
+        minimum: float,
+        maximum: float,
+    ) -> None:
+        rendering.set_scalar_range(
+            representation_id,
+            float(minimum),
+            float(maximum),
+        )
+
+        ctrl.view_update()
+
+    def set_active_view(
+        view_id: str,
+    ) -> None:
+        rendering.set_active_view(view_id)
+
+        if pipeline.active_node_id is not None:
+            ctrl.update_representation_state(pipeline.active_node_id)
+
+    def set_view_background_color(
+        view_id: str,
+        value: str,
+    ) -> None:
+        rendering.set_background_color(
+            view_id,
+            _hex_to_rgb(value),
+        )
+
+        ctrl.view_update()
+
+    def restore_view(
+        *,
+        name: str,
+        view_id: str,
+    ) -> str:
+        """Restore the ID of the single render view without replacing it."""
+
+        views = rendering.views
+
+        if len(views) != 1:
+            raise RuntimeError(
+                "Current vtkweb UI can restore state only with one render view"
+            )
+
+        current = views[0]
+
+        restored = rendering.rename_view(
+            current.id,
+            view_id,
+            name=name,
+        )
+
+        rendering.set_active_view(restored.id)
+
+        return restored.id
 
     # -------------------------------------------------------------------------
     # Refresh / synchronization
@@ -295,6 +403,88 @@ def initialize_app_controller(
             delete_node(node_id)
 
     # -------------------------------------------------------------------------
+    # Python state reconstruction
+    # -------------------------------------------------------------------------
+
+    def clear_state() -> None:
+        """Clear reconstructable state while preserving the displayed view."""
+
+        for edge in tuple(pipeline.edges):
+            ctrl.pipeline_remove_edge(edge)
+
+        for node_id in tuple(pipeline.nodes):
+            ctrl.pipeline_remove_node(node_id)
+
+        for representation in tuple(rendering.representations):
+            rendering.remove_representation(representation.id)
+
+        pipeline.clear()
+
+        state.active_representation_output_port = 0
+
+        ctrl.update_representation_state(None)
+
+    def finish_state_load() -> None:
+        """Synchronize runtime metadata after reconstruction is complete."""
+
+        for node_id in pipeline.nodes:
+            pipeline.sync_node_from_runtime(node_id)
+
+        ctrl.update_representation_state(pipeline.active_node_id)
+
+        if rendering.active_view_id is not None:
+            rendering.reset_camera(rendering.active_view_id)
+
+        ctrl.compute_pipeline_layout()
+        ctrl.pipeline_fit_view()
+        ctrl.view_update()
+
+    def export_state_source() -> str:
+        return export_python_state(
+            pipeline,
+            rendering,
+        )
+
+    def load_state_source(
+        source: str | bytes,
+        *,
+        filename: str = "<vtkweb-state>",
+    ) -> None:
+        load_python_state(
+            source,
+            ctrl,
+            filename=filename,
+        )
+
+    def save_python_state() -> str | None:
+        """Save the current state to a server-side Python file."""
+
+        filename = _ask_save_state_filename()
+        if filename is None:
+            return None
+
+        path = Path(filename)
+        path.write_text(
+            export_state_source(),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def open_python_state() -> str | None:
+        """Load a trusted Python state file from the server filesystem."""
+
+        filename = _ask_open_state_filename()
+        if filename is None:
+            return None
+
+        path = Path(filename)
+        load_state_source(
+            path.read_text(encoding="utf-8"),
+            filename=str(path),
+        )
+        return str(path)
+
+    # -------------------------------------------------------------------------
     # Controller
     # -------------------------------------------------------------------------
 
@@ -307,6 +497,14 @@ def initialize_app_controller(
     ctrl.remove_node_list_value = remove_node_list_value
     ctrl.set_node_input_array = set_node_input_array
     ctrl.add_representation = add_representation
+    ctrl.remove_representation = remove_representation
+    ctrl.set_representation_kind = set_representation_kind
+    ctrl.toggle_representation_in_view = toggle_representation_in_view
+    ctrl.set_representation_array = set_representation_array
+    ctrl.set_representation_scalar_range = set_representation_scalar_range
+    ctrl.set_active_view = set_active_view
+    ctrl.set_view_background_color = set_view_background_color
+    ctrl.restore_view = restore_view
     ctrl.refresh_node = refresh_node
     ctrl.sync_node_from_runtime = sync_node_from_runtime
     ctrl.set_active_node = set_active_node
@@ -314,5 +512,66 @@ def initialize_app_controller(
     ctrl.insert_node = insert_node
     ctrl.delete_node = delete_node
     ctrl.delete_active_node = delete_active_node
+    ctrl.clear_state = clear_state
+    ctrl.finish_state_load = finish_state_load
+    ctrl.export_python_state = export_state_source
+    ctrl.load_python_state = load_state_source
+    ctrl.save_python_state = save_python_state
+    ctrl.open_python_state = open_python_state
 
     server.trigger("delete_active_node")(delete_active_node)
+
+
+def _ask_save_state_filename() -> str | None:
+    """Open a server-side save-file dialog for a Python state file."""
+
+    from tkinter import Tk, filedialog
+
+    root = Tk()
+    root.withdraw()
+    try:
+        filename = filedialog.asksaveasfilename(
+            title="Save vtkweb State",
+            defaultextension=".py",
+            filetypes=[
+                ("Python state files", "*.py"),
+                ("All files", "*"),
+            ],
+            initialfile="vtkweb_state.py",
+        )
+    finally:
+        root.destroy()
+
+    return filename or None
+
+
+def _ask_open_state_filename() -> str | None:
+    """Open a server-side file dialog for a trusted Python state file."""
+
+    from tkinter import Tk, filedialog
+
+    root = Tk()
+    root.withdraw()
+    try:
+        filename = filedialog.askopenfilename(
+            title="Open vtkweb State",
+            filetypes=[
+                ("Python state files", "*.py"),
+                ("All files", "*"),
+            ],
+        )
+    finally:
+        root.destroy()
+
+    return filename or None
+
+
+def _hex_to_rgb(
+    value: str,
+) -> tuple[float, float, float]:
+    value = value.lstrip("#")
+    return (
+        int(value[0:2], 16) / 255.0,
+        int(value[2:4], 16) / 255.0,
+        int(value[4:6], 16) / 255.0,
+    )

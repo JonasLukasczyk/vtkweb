@@ -127,6 +127,30 @@ class VTKRenderingBackend(RenderingBackend):
             None,
         )
 
+    def rename_view(
+        self,
+        view_id: str,
+        new_view_id: str,
+    ) -> None:
+        if new_view_id != view_id and new_view_id in self._views:
+            raise ValueError(f"View ID already exists: {new_view_id}")
+
+        handle = self._views.pop(view_id)
+        self._views[new_view_id] = handle
+
+        renamed = {}
+        for (
+            representation_id,
+            current_view_id,
+        ), representation in self._representations.items():
+            key = (
+                representation_id,
+                new_view_id if current_view_id == view_id else current_view_id,
+            )
+            renamed[key] = representation
+
+        self._representations = renamed
+
     def get_render_window(
         self,
         view_id: str,
