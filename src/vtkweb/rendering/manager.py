@@ -38,10 +38,14 @@ class RenderManager:
         self.state.representations = {}
         self.state.active_view_id = None
 
-        view = self.add_view("View 1")
-        self.set_active_view(view.id)
-
-        self.reset_camera(view.id)
+        # VtkLocalView components are created once when the Trame UI is built.
+        # Keep a small pool of backend render windows alive and map logical
+        # vtk views onto those slots. Logical view IDs remain fully dynamic and
+        # serializable while the client-side VTK components stay stable.
+        self._slot_ids = tuple(f"vtk_slot_{index}" for index in range(8))
+        self._slot_owners: dict[str, str | None] = {slot: None for slot in self._slot_ids}
+        for slot_id in self._slot_ids:
+            self.backend.add_view(RenderView(id=slot_id, name=slot_id))
 
     # -------------------------------------------------------------------------
     # Views
@@ -51,18 +55,28 @@ class RenderManager:
     def views(
         self,
     ) -> tuple[RenderView, ...]:
-        return tuple(self.get_view(view_id) for view_id in self.state.views)
+        return tuple(
+            self.get_view(view_id)
+            for view_id, value in self.state.views.items()
+            if value.get("type") == "vtk"
+        )
+
+    @property
+    def backend_slots(self) -> tuple[str, ...]:
+        return self._slot_ids
 
     @property
     def active_view_id(
         self,
-    ) -> str:
+    ) -> str | None:
         return self.state.active_view_id
 
     @property
     def active_view(
         self,
-    ) -> RenderView:
+    ) -> RenderView | None:
+        if self.active_view_id is None:
+            return None
         return self.get_view(self.active_view_id)
 
     def get_view(
@@ -70,6 +84,8 @@ class RenderManager:
         view_id: str,
     ) -> RenderView:
         value = self.state.views[view_id]
+        if value.get("type") != "vtk":
+            raise ValueError(f"View is not a VTK view: {view_id}")
         return RenderView(
             id=value["id"],
             name=value["name"],
@@ -78,6 +94,15 @@ class RenderManager:
             ),
         )
 
+    def backend_view_id(self, view_id: str) -> str:
+        value = self.state.views[view_id]
+        if value.get("type") != "vtk":
+            raise ValueError(f"View is not a VTK view: {view_id}")
+        return value["backend_id"]
+
+    def get_render_window(self, view_id: str):
+        return self.backend.get_render_window(self.backend_view_id(view_id))
+
     def add_view(
         self,
         name: str | None = None,
@@ -85,25 +110,35 @@ class RenderManager:
         view_id: str | None = None,
     ) -> RenderView:
         if name is None:
-            name = f"View {len(self.state.views) + 1}"
+            name = f"View {len(self.views) + 1}"
 
         view_id = view_id or uuid4().hex
         if view_id in self.state.views:
             raise ValueError(f"View ID already exists: {view_id}")
 
+        backend_id = next(
+            (slot for slot, owner in self._slot_owners.items() if owner is None),
+            None,
+        )
+        if backend_id is None:
+            raise RuntimeError(
+                f"Maximum number of VTK views reached ({len(self._slot_ids)})"
+            )
+
         value = {
             "id": view_id,
+            "type": "vtk",
             "name": name,
             "background_color": "#1a1a1a",
+            "backend_id": backend_id,
         }
 
         views = dict(self.state.views)
         views[view_id] = value
         self.state.views = views
-
-        view = self.get_view(view_id)
-        self.backend.add_view(view)
-        return view
+        self._slot_owners[backend_id] = view_id
+        self.backend.set_view_settings(self._backend_view(view_id))
+        return self.get_view(view_id)
 
     def remove_view(
         self,
@@ -113,12 +148,10 @@ class RenderManager:
 
         for representation in tuple(self.representations):
             if view_id in representation.view_ids:
-                self.unassign_representation(
-                    representation.id,
-                    view_id,
-                )
+                self.unassign_representation(representation.id, view_id)
 
-        self.backend.remove_view(view_id)
+        backend_id = self.backend_view_id(view_id)
+        self._slot_owners[backend_id] = None
 
         views = dict(self.state.views)
         del views[view_id]
@@ -126,55 +159,9 @@ class RenderManager:
 
         if self.active_view_id == view_id:
             self.state.active_view_id = next(
-                iter(views),
+                (view.id for view in self.views),
                 None,
             )
-
-    def rename_view(
-        self,
-        view_id: str,
-        new_view_id: str,
-        *,
-        name: str | None = None,
-    ) -> RenderView:
-        self.get_view(view_id)
-
-        if new_view_id != view_id and new_view_id in self.state.views:
-            raise ValueError(f"View ID already exists: {new_view_id}")
-
-        value = dict(self.state.views[view_id])
-        value["id"] = new_view_id
-        if name is not None:
-            value["name"] = name
-
-        views = dict(self.state.views)
-        del views[view_id]
-        views[new_view_id] = value
-
-        self.backend.rename_view(
-            view_id,
-            new_view_id,
-        )
-
-        representations = dict(self.state.representations)
-        for representation_id, representation in representations.items():
-            if view_id not in representation.get("view_ids", []):
-                continue
-
-            updated = dict(representation)
-            updated["view_ids"] = [
-                new_view_id if item == view_id else item
-                for item in representation.get("view_ids", [])
-            ]
-            representations[representation_id] = updated
-
-        self.state.views = views
-        self.state.representations = representations
-
-        if self.active_view_id == view_id:
-            self.state.active_view_id = new_view_id
-
-        return self.get_view(new_view_id)
 
     def set_active_view(
         self,
@@ -340,7 +327,7 @@ class RenderManager:
 
         self.backend.add_representation(
             representation,
-            view,
+            self._backend_view(view_id),
             node.processor,
         )
 
@@ -369,7 +356,7 @@ class RenderManager:
 
         self.backend.remove_representation(
             representation.id,
-            view_id,
+            self.backend_view_id(view_id),
         )
 
         value = dict(self.state.representations[representation_id])
@@ -547,7 +534,7 @@ class RenderManager:
         views[view_id] = value
         self.state.views = views
 
-        self.backend.set_view_settings(self.get_view(view_id))
+        self.backend.set_view_settings(self._backend_view(view_id))
 
     def reset_camera(
         self,
@@ -556,11 +543,19 @@ class RenderManager:
         if view_id is None:
             view_id = self.active_view_id
 
-        self.backend.reset_camera(view_id)
+        self.backend.reset_camera(self.backend_view_id(view_id))
 
     # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
+
+    def _backend_view(self, view_id: str) -> RenderView:
+        logical = self.get_view(view_id)
+        return RenderView(
+            id=self.backend_view_id(view_id),
+            name=logical.name,
+            settings=logical.settings,
+        )
 
     def _set_representation_state(
         self,
@@ -581,7 +576,7 @@ class RenderManager:
         for view_id in tuple(representation.view_ids):
             self.backend.update_representation(
                 representation,
-                self.get_view(view_id),
+                self._backend_view(view_id),
                 node.processor,
             )
 

@@ -7,12 +7,16 @@ from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
 from vtkweb.state import export_python_state, load_python_state
+from vtkweb.views import ViewManager
+from vtkweb.workspace import WorkspaceManager
 
 
 def initialize_app_controller(
     server,
     pipeline: PipelineGraph,
     rendering: RenderManager,
+    views: ViewManager,
+    workspace: WorkspaceManager,
     catalog: AlgorithmCatalog,
 ) -> None:
     state = server.state
@@ -200,6 +204,24 @@ def initialize_app_controller(
             float(maximum),
         )
 
+    def create_view(
+        view_type: str,
+        *,
+        name: str | None = None,
+        view_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        return views.create_view(
+            view_type,
+            name=name,
+            view_id=view_id,
+            **kwargs,
+        )
+
+    def remove_view(view_id: str) -> None:
+        workspace.unassign_view(view_id)
+        views.remove_view(view_id)
+
     def set_active_view(
         view_id: str,
     ) -> None:
@@ -219,26 +241,56 @@ def initialize_app_controller(
     ) -> None:
         rendering.reset_camera(view_id)
 
+    def create_workspace(*, container_id: str | None = None) -> str:
+        return workspace.create_workspace(container_id=container_id)
+
+    def split_container(
+        container_id: str,
+        orientation: str,
+        ratio: float = 0.5,
+        *,
+        first_id: str | None = None,
+        second_id: str | None = None,
+    ) -> tuple[str, str]:
+        return workspace.split_container(
+            container_id,
+            orientation,
+            ratio=float(ratio),
+            first_id=first_id,
+            second_id=second_id,
+        )
+
+    def assign_view_to_container(container_id: str, view_id: str | None) -> None:
+        if view_id is not None:
+            views.get(view_id)
+            previous = workspace.container_for_view(view_id)
+            if previous is not None and previous != container_id:
+                workspace.assign_view(previous, None)
+        workspace.assign_view(container_id, view_id)
+
+    def set_split_ratio(container_id: str, ratio: float) -> None:
+        workspace.set_split_ratio(container_id, float(ratio))
+
+    def split_view_container(
+        container_id: str,
+        orientation: str,
+    ) -> tuple[str, str]:
+        """UI workflow: split a leaf and populate the new leaf with the same view type."""
+        current_view_id = workspace.state.workspace_nodes[container_id].get("view_id")
+        first_id, second_id = split_container(container_id, orientation)
+        if current_view_id is not None:
+            view_type = views.get(current_view_id)["type"]
+            new_view_id = create_view(view_type)
+            assign_view_to_container(second_id, new_view_id)
+        return first_id, second_id
+
     def restore_view(
         *,
         name: str,
         view_id: str,
     ) -> str:
-        """Restore the ID of the single render view without replacing it."""
-
-        views = rendering.views
-        if len(views) != 1:
-            raise RuntimeError(
-                "Current vtkweb UI can restore state only with one render view"
-            )
-
-        restored = rendering.rename_view(
-            views[0].id,
-            view_id,
-            name=name,
-        )
-        rendering.set_active_view(restored.id)
-        return restored.id
+        """Backward-compatible loader for state files from the single-view UI."""
+        return create_view("vtk", name=name, view_id=view_id)
 
     def set_active_node(
         node_id: str,
@@ -351,12 +403,17 @@ def initialize_app_controller(
     # -------------------------------------------------------------------------
 
     def clear_state() -> None:
-        """Clear reconstructable state while preserving the displayed view."""
+        """Clear all reconstructable application and workspace state."""
 
         for representation in tuple(rendering.representations):
             rendering.remove_representation(representation.id)
 
+        for view in tuple(views.views):
+            views.remove_view(view["id"])
+
+        workspace.clear()
         pipeline.clear()
+        state.active_view_id = None
         state.active_representation_output_port = 0
 
     def finish_state_load() -> None:
@@ -369,7 +426,7 @@ def initialize_app_controller(
             rendering.reset_camera(rendering.active_view_id)
 
     def export_state_source() -> str:
-        return export_python_state(pipeline, rendering)
+        return export_python_state(pipeline, rendering, views, workspace)
 
     def load_state_source(
         source: str | bytes,
@@ -430,6 +487,13 @@ def initialize_app_controller(
     ctrl.set_representation_array = set_representation_array
     ctrl.set_representation_color = set_representation_color
     ctrl.set_representation_scalar_range = set_representation_scalar_range
+    ctrl.create_view = create_view
+    ctrl.remove_view = remove_view
+    ctrl.create_workspace = create_workspace
+    ctrl.split_container = split_container
+    ctrl.assign_view_to_container = assign_view_to_container
+    ctrl.set_split_ratio = set_split_ratio
+    ctrl.split_view_container = split_view_container
     ctrl.set_active_view = set_active_view
     ctrl.set_view_background_color = set_view_background_color
     ctrl.reset_camera = reset_camera

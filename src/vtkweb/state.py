@@ -6,6 +6,8 @@ from typing import Any
 
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
+from vtkweb.views import ViewManager
+from vtkweb.workspace import WorkspaceManager
 
 
 _IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z_]+")
@@ -14,6 +16,8 @@ _IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z_]+")
 def export_python_state(
     pipeline: PipelineGraph,
     rendering: RenderManager,
+    views: ViewManager,
+    workspace: WorkspaceManager,
 ) -> str:
     """Return the current application state as executable Python source."""
 
@@ -25,45 +29,72 @@ def export_python_state(
         "    ctrl.clear_state()",
     ]
 
-    if len(rendering.views) != 1:
-        raise RuntimeError(
-            "Current vtkweb UI can export state only with one render view"
-        )
-
     view_vars: dict[str, str] = {}
     used_names: set[str] = set()
 
-    if rendering.views:
+    if views.views:
         lines.append("")
         lines.append("    # Views")
 
-    for index, view in enumerate(rendering.views, start=1):
+    for index, value in enumerate(views.views, start=1):
         variable = _unique_identifier(
-            view.name or f"view_{index}",
+            value.get("name") or f"view_{index}",
             used_names,
             fallback=f"view_{index}",
         )
-        view_vars[view.id] = variable
+        view_vars[value["id"]] = variable
+
+        kwargs = []
+        if value.get("type") == "dummy" and value.get("message") is not None:
+            kwargs.append(f"        message={value['message']!r},")
 
         lines.extend(
             [
-                f"    {variable} = ctrl.restore_view(",
-                f"        name={view.name!r},",
-                f"        view_id={view.id!r},",
+                f"    {variable} = ctrl.create_view(",
+                f"        {value['type']!r},",
+                f"        name={value.get('name')!r},",
+                f"        view_id={value['id']!r},",
+                *kwargs,
                 "    )",
             ]
         )
 
-        background = rendering.state.views[view.id].get("background_color")
-        if background is not None:
-            lines.extend(
-                [
-                    "    ctrl.set_view_background_color(",
-                    f"        {variable},",
-                    f"        {background!r},",
-                    "    )",
-                ]
-            )
+        if value.get("type") == "vtk":
+            background = value.get("background_color")
+            if background is not None:
+                lines.extend(
+                    [
+                        "    ctrl.set_view_background_color(",
+                        f"        {variable},",
+                        f"        {background!r},",
+                        "    )",
+                    ]
+                )
+
+    container_vars: dict[str, str] = {}
+    root_id = workspace.state.workspace_root_id
+    if root_id is not None:
+        lines.append("")
+        lines.append("    # Workspace layout")
+        root_var = _unique_identifier(
+            "root_container", used_names, fallback="root_container"
+        )
+        container_vars[root_id] = root_var
+        lines.extend(
+            [
+                f"    {root_var} = ctrl.create_workspace(",
+                f"        container_id={root_id!r},",
+                "    )",
+            ]
+        )
+        _export_workspace_node(
+            lines,
+            workspace.state.workspace_nodes,
+            root_id,
+            container_vars,
+            view_vars,
+            used_names,
+        )
 
     node_vars: dict[str, str] = {}
 
@@ -277,6 +308,60 @@ def load_python_state(
         raise ValueError("Python state file must define callable load(ctrl)")
 
     load(ctrl)
+
+
+def _export_workspace_node(
+    lines: list[str],
+    nodes: dict,
+    node_id: str,
+    container_vars: dict[str, str],
+    view_vars: dict[str, str],
+    used_names: set[str],
+) -> None:
+    node = nodes[node_id]
+    variable = container_vars[node_id]
+
+    if node["kind"] == "leaf":
+        view_id = node.get("view_id")
+        if view_id is not None:
+            lines.extend(
+                [
+                    "    ctrl.assign_view_to_container(",
+                    f"        {variable},",
+                    f"        {view_vars[view_id]},",
+                    "    )",
+                ]
+            )
+        return
+
+    first_id = node["first"]
+    second_id = node["second"]
+    first_var = _unique_identifier(
+        f"container_{first_id[:8]}", used_names, fallback="container_a"
+    )
+    second_var = _unique_identifier(
+        f"container_{second_id[:8]}", used_names, fallback="container_b"
+    )
+    container_vars[first_id] = first_var
+    container_vars[second_id] = second_var
+
+    lines.extend(
+        [
+            f"    {first_var}, {second_var} = ctrl.split_container(",
+            f"        {variable},",
+            f"        {node['orientation']!r},",
+            f"        ratio={float(node['ratio'])!r},",
+            f"        first_id={first_id!r},",
+            f"        second_id={second_id!r},",
+            "    )",
+        ]
+    )
+    _export_workspace_node(
+        lines, nodes, first_id, container_vars, view_vars, used_names
+    )
+    _export_workspace_node(
+        lines, nodes, second_id, container_vars, view_vars, used_names
+    )
 
 
 def _unique_identifier(

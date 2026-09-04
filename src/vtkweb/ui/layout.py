@@ -18,6 +18,8 @@ from vtkweb.pipeline import (
 from vtkweb.rendering import (
     RenderManager,
 )
+from vtkweb.views import ViewManager
+from vtkweb.workspace import WorkspaceManager
 from vtkweb.ui.node_browser import (
     NODE_BROWSER_STYLE,
     build_node_browser,
@@ -137,6 +139,8 @@ def build_ui(
     server,
     pipeline: PipelineGraph,
     rendering: RenderManager,
+    views: ViewManager,
+    workspace: WorkspaceManager,
     catalog: AlgorithmCatalog,
 ) -> None:
     state = server.state
@@ -150,6 +154,8 @@ def build_ui(
         server,
         pipeline,
         rendering,
+        views,
+        workspace,
         catalog,
     )
 
