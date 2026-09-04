@@ -13,22 +13,6 @@ def initialize_properties_tab(
     ctrl,
     pipeline: PipelineGraph,
 ) -> None:
-    # Properties and input-array descriptors are part of state.pipeline. This
-    # module only owns inspector synchronization and UI-specific helpers.
-
-    def update_properties_state(
-        node_id: str | None,
-    ) -> None:
-        # Compatibility hook for existing callers. There is no second property
-        # list to synchronize anymore. Explicit callers may use this to pull
-        # direct/raw processor mutations back into state.
-        if node_id is not None:
-            pipeline.sync_node_from_runtime(node_id)
-
-    # -------------------------------------------------------------------------
-    # Elevation helper
-    # -------------------------------------------------------------------------
-
     def set_elevation_axis(
         node_id: str,
         axis: str,
@@ -37,54 +21,31 @@ def initialize_properties_tab(
             return
 
         node = pipeline.nodes[node_id]
-
-        if not isinstance(
-            node.processor,
-            vtk.vtkElevationFilter,
-        ):
+        if not isinstance(node.processor, vtk.vtkElevationFilter):
             return
 
         processor = node.processor
-        input_data = processor.GetInputDataObject(
-            0,
-            0,
-        )
-
+        input_data = processor.GetInputDataObject(0, 0)
         if input_data is None:
             return
 
-        (
-            xmin,
-            xmax,
-            ymin,
-            ymax,
-            zmin,
-            zmax,
-        ) = input_data.GetBounds()
-
+        xmin, xmax, ymin, ymax, zmin, zmax = input_data.GetBounds()
         cx = (xmin + xmax) / 2
         cy = (ymin + ymax) / 2
         cz = (zmin + zmax) / 2
 
         if axis == "x":
-            low = (xmin, cy, cz)
-            high = (xmax, cy, cz)
+            low, high = (xmin, cy, cz), (xmax, cy, cz)
         elif axis == "y":
-            low = (cx, ymin, cz)
-            high = (cx, ymax, cz)
+            low, high = (cx, ymin, cz), (cx, ymax, cz)
         else:
-            low = (cx, cy, zmin)
-            high = (cx, cy, zmax)
+            low, high = (cx, cy, zmin), (cx, cy, zmax)
 
         processor.SetLowPoint(*low)
         processor.SetHighPoint(*high)
         processor.Update()
+        pipeline.sync_node_from_runtime(node_id)
 
-        pipeline.sync_node_from_runtime(node.id)
-        ctrl.update_representation_state(node.id)
-        ctrl.view_update()
-
-    ctrl.update_properties_state = update_properties_state
     ctrl.set_elevation_axis = set_elevation_axis
 
 

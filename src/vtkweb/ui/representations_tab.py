@@ -13,79 +13,51 @@ def initialize_representations_tab(
     pipeline: PipelineGraph,
     rendering: RenderManager,
 ) -> None:
-    # ``state.representations`` is the global authoritative representation
-    # model owned by RenderManager. The only local state here is inspector
-    # selection plus derived color-array choices for the selected output.
     state.active_representation_output_port = 0
     state.color_array_items = []
-
     state.representation_kind_items = [
-        {
-            "title": "Surface",
-            "value": "surface",
-        },
-        {
-            "title": "Wireframe",
-            "value": "wireframe",
-        },
-        {
-            "title": "Outline",
-            "value": "outline",
-        },
+        {"title": "Surface", "value": "surface"},
+        {"title": "Wireframe", "value": "wireframe"},
+        {"title": "Outline", "value": "outline"},
     ]
 
-    def update_representation_state(
-        node_id: str | None,
-    ) -> None:
-        if node_id is None:
+    @state.change(
+        "active_node_id",
+        "active_representation_output_port",
+        "pipeline",
+    )
+    def update_color_array_items(**_):
+        node_id = pipeline.active_node_id
+        if node_id is None or node_id not in pipeline.nodes:
             state.color_array_items = []
             return
 
         node = pipeline.nodes[node_id]
         output_count = node.processor.GetNumberOfOutputPorts()
-
-        active_port = int(state.active_representation_output_port)
-
-        if output_count == 0 or active_port < 0 or active_port >= output_count:
-            active_port = 0
-            state.active_representation_output_port = 0
+        output_port = int(state.active_representation_output_port)
 
         if output_count == 0:
+            state.active_representation_output_port = 0
             state.color_array_items = []
             return
 
-        arrays = rendering.get_arrays(
-            node_id,
-            active_port,
-        )
+        if output_port < 0 or output_port >= output_count:
+            state.active_representation_output_port = 0
+            output_port = 0
 
+        arrays = rendering.get_arrays(node_id, output_port)
         state.color_array_items = [
-            {
-                "title": f"{name} (Point)",
-                "value": f"point:{name}",
-            }
+            {"title": f"{name} (Point)", "value": f"point:{name}"}
             for name in arrays["point"]
         ] + [
-            {
-                "title": f"{name} (Cell)",
-                "value": f"cell:{name}",
-            }
+            {"title": f"{name} (Cell)", "value": f"cell:{name}"}
             for name in arrays["cell"]
         ]
-
-    def set_representation_output_port(
-        output_port: int,
-    ) -> None:
-        state.active_representation_output_port = int(output_port)
-
-        if pipeline.active_node_id is not None:
-            update_representation_state(pipeline.active_node_id)
 
     def fit_color_range(
         representation_id: str,
     ) -> None:
         representation = rendering.get_representation(representation_id)
-
         if representation.array_name is None:
             return
 
@@ -95,16 +67,12 @@ def initialize_representations_tab(
             representation.array_name,
             representation.association,
         )
-        if scalar_range is None:
-            return
+        if scalar_range is not None:
+            ctrl.set_representation_scalar_range(
+                representation_id,
+                *scalar_range,
+            )
 
-        ctrl.set_representation_scalar_range(
-            representation_id,
-            *scalar_range,
-        )
-
-    ctrl.update_representation_state = update_representation_state
-    ctrl.set_representation_output_port = set_representation_output_port
     ctrl.fit_color_range = fit_color_range
 
 
@@ -121,14 +89,10 @@ def build_representations_tab(
     # -------------------------------------------------------------------------
 
     with v3.VTabs(
-        model_value=("active_representation_output_port",),
+        v_model=("active_representation_output_port", 0),
         density="compact",
         grow=True,
         classes="mb-3",
-        update_modelValue=(
-            ctrl.set_representation_output_port,
-            "[$event]",
-        ),
     ):
         v3.VTab(
             "Output {{ port - 1 }}",

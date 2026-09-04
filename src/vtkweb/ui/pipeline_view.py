@@ -8,12 +8,6 @@ import graphviz
 from trame.widgets import flow, html
 from trame.widgets import vuetify3 as v3
 
-from vtkweb.pipeline import (
-    PipelineEdge,
-    PipelineGraph,
-    PipelineNode,
-)
-
 
 PIPELINE_VIEW_STYLE = """
 .vtkweb-flow-controls {
@@ -81,7 +75,6 @@ PIPELINE_VIEW_STYLE = """
 def build_pipeline_view(
     state,
     ctrl,
-    pipeline: PipelineGraph,
 ):
     # -------------------------------------------------------------------------
     # UI
@@ -203,339 +196,205 @@ def build_pipeline_view(
                         )
 
     # -------------------------------------------------------------------------
-    # Node serialization
+    # Serialization from authoritative state
     # -------------------------------------------------------------------------
 
     def node_data(
-        node: PipelineNode,
+        node_id: str,
+        value: dict,
+        index: int,
     ) -> dict:
-        index = list(pipeline.nodes).index(node.id)
-
-        processor = node.processor
-
-        input_port_count = processor.GetNumberOfInputPorts()
-
-        output_port_count = processor.GetNumberOfOutputPorts()
-
         return {
-            "id": node.id,
+            "id": node_id,
             "type": "vtk-node",
-            "label": node.name,
+            "label": value["name"],
             "data": {
-                "input_port_count": input_port_count,
-                "output_port_count": output_port_count,
+                "input_port_count": int(value["input_port_count"]),
+                "output_port_count": int(value["output_port_count"]),
             },
             "position": {
                 "x": 100,
-                "y": (80 + index * 140),
+                "y": 80 + index * 140,
             },
         }
 
-    # -------------------------------------------------------------------------
-    # Edge serialization
-    # -------------------------------------------------------------------------
+    def edge_key(value: dict) -> tuple[str, int, str, int]:
+        return (
+            value["source_node_id"],
+            int(value["source_port"]),
+            value["target_node_id"],
+            int(value["target_port"]),
+        )
 
-    def edge_data(
-        edge: PipelineEdge,
-    ) -> dict:
+    def edge_data(value: dict) -> dict:
+        source, source_port, target, target_port = edge_key(value)
         return {
-            "id": (
-                f"{edge.source_node_id}-"
-                f"{edge.source_port}-"
-                f"{edge.target_node_id}-"
-                f"{edge.target_port}"
-            ),
-            "source": (edge.source_node_id),
-            "target": (edge.target_node_id),
-            "sourceHandle": (f"output-{edge.source_port}"),
-            "targetHandle": (f"input-{edge.target_port}"),
+            "id": f"{source}-{source_port}-{target}-{target_port}",
+            "source": source,
+            "target": target,
+            "sourceHandle": f"output-{source_port}",
+            "targetHandle": f"input-{target_port}",
         }
 
-    # -------------------------------------------------------------------------
-    # Current positions
-    # -------------------------------------------------------------------------
-
-    def current_positions() -> dict[
-        str,
-        dict[str, float],
-    ]:
+    def current_positions() -> dict[str, dict[str, float]]:
         result = {}
-
-        for node in pipeline.nodes.values():
-            editor_node = node_editor.get_node(node.id)
-
+        for node_id in state.pipeline["nodes"]:
+            editor_node = node_editor.get_node(node_id)
             if editor_node is None:
                 continue
-
             position = editor_node.get("position")
-
             if position is None:
                 continue
-
-            result[node.id] = {
+            result[node_id] = {
                 "x": float(position["x"]),
                 "y": float(position["y"]),
             }
-
         return result
 
-    # -------------------------------------------------------------------------
-    # Graphviz layout
-    # -------------------------------------------------------------------------
-
-    layout_task: asyncio.Task | None = None
-
-    def schedule_pipeline_layout() -> None:
-        nonlocal layout_task
-
-        if layout_task is not None:
-            layout_task.cancel()
-
-        async def deferred_layout():
-            # Let Vue Flow process the node add/remove first.
-            await asyncio.sleep(0.05)
-
-            start_positions = current_positions()
-            end_positions = compute_layout_positions()
-
-            await animate_positions(
-                start_positions,
-                end_positions,
-            )
-
-        layout_task = asyncio.create_task(deferred_layout())
-
-    def compute_layout_positions() -> dict[
-        str,
-        dict[str, float],
-    ]:
+    def compute_layout_positions() -> dict[str, dict[str, float]]:
         graph = graphviz.Digraph(engine="dot")
-
         scale = 40.0
         padding = 20.0
-
-        # Heuristic sizing for the monospace node labels.
         char_width_px = 8.5
         horizontal_padding_px = 24.0
         node_height_px = 40.0
         min_width_px = 80.0
-
         node_sizes = {}
 
-        for node in pipeline.nodes.values():
+        for node_id, node in state.pipeline["nodes"].items():
             width_px = max(
                 min_width_px,
-                len(node.name) * char_width_px + horizontal_padding_px,
+                len(node["name"]) * char_width_px + horizontal_padding_px,
             )
-
-            height_px = node_height_px
-
-            node_sizes[node.id] = {
+            node_sizes[node_id] = {
                 "width": width_px,
-                "height": height_px,
+                "height": node_height_px,
             }
-
             graph.node(
-                node.id,
+                node_id,
                 label="",
                 width=str(width_px / scale),
-                height=str(height_px / scale),
+                height=str(node_height_px / scale),
                 fixedsize="true",
             )
 
-        for edge in pipeline.edges:
+        for edge in state.pipeline["edges"]:
             graph.edge(
-                edge.source_node_id,
-                edge.target_node_id,
+                edge["source_node_id"],
+                edge["target_node_id"],
             )
 
         plain = graph.pipe(format="plain").decode("utf-8")
-
         lines = plain.splitlines()
-
         graph_height = 0.0
-
         if lines:
             fields = shlex.split(lines[0])
-
             if fields and fields[0] == "graph":
                 graph_height = float(fields[3])
 
         positions = {}
-
         for line in lines:
             fields = shlex.split(line)
-
             if not fields or fields[0] != "node":
                 continue
-
             node_id = fields[1]
-
             center_x = float(fields[2])
             center_y = float(fields[3])
-
-            width_px = node_sizes[node_id]["width"]
-            height_px = node_sizes[node_id]["height"]
-
-            center_x_px = padding + center_x * scale
-
-            center_y_px = padding + (graph_height - center_y) * scale
-
+            size = node_sizes[node_id]
             positions[node_id] = {
-                "x": center_x_px - width_px * 0.5,
-                "y": center_y_px - height_px * 0.5,
+                "x": padding + center_x * scale - size["width"] * 0.5,
+                "y": padding + (graph_height - center_y) * scale - size["height"] * 0.5,
             }
-
         return positions
 
-    # -------------------------------------------------------------------------
-    # Layout animation
-    # -------------------------------------------------------------------------
-
     async def animate_positions(
-        start_positions: dict[
-            str,
-            dict[str, float],
-        ],
-        end_positions: dict[
-            str,
-            dict[str, float],
-        ],
+        start_positions: dict[str, dict[str, float]],
+        end_positions: dict[str, dict[str, float]],
         duration: float = 0.2,
     ) -> None:
-        fps = 60.0
-
-        steps = max(
-            1,
-            round(duration * fps),
-        )
-
-        for step in range(
-            1,
-            steps + 1,
-        ):
+        steps = max(1, round(duration * 60.0))
+        for step in range(1, steps + 1):
             t = step / steps
-
-            # Smoothstep easing
             alpha = t * t * (3.0 - 2.0 * t)
-
-            for (
-                node_id,
-                end,
-            ) in end_positions.items():
+            for node_id, end in end_positions.items():
                 start = start_positions.get(node_id)
-
                 if start is None:
                     continue
-
-                position = {
-                    "x": (start["x"] + (end["x"] - start["x"]) * alpha),
-                    "y": (start["y"] + (end["y"] - start["y"]) * alpha),
-                }
-
                 node_editor.update_node(
                     node_id,
-                    position=position,
+                    position={
+                        "x": start["x"] + (end["x"] - start["x"]) * alpha,
+                        "y": start["y"] + (end["y"] - start["y"]) * alpha,
+                    },
+                )
+            await asyncio.sleep(1.0 / 60.0)
+
+        for node_id, position in end_positions.items():
+            node_editor.update_node(node_id, position=position)
+
+    sync_task: asyncio.Task | None = None
+    known_nodes: set[str] = set()
+    known_edges: set[tuple[str, int, str, int]] = set()
+
+    def schedule_sync() -> None:
+        nonlocal sync_task
+        if sync_task is not None:
+            sync_task.cancel()
+
+        async def sync_view() -> None:
+            nonlocal known_nodes, known_edges
+            await asyncio.sleep(0.05)
+
+            pipeline_state = state.pipeline
+            nodes = pipeline_state["nodes"]
+            edges = pipeline_state["edges"]
+            current_nodes = set(nodes)
+            current_edges = {edge_key(edge) for edge in edges}
+
+            for source, source_port, target, target_port in known_edges - current_edges:
+                node_editor.remove_edge(
+                    source,
+                    target,
+                    source_handle=f"output-{source_port}",
+                    target_handle=f"input-{target_port}",
                 )
 
-            await asyncio.sleep(1.0 / fps)
+            for node_id in known_nodes - current_nodes:
+                node_editor.remove_node(node_id)
 
-        # Land exactly on the final
-        # Graphviz coordinates.
-        for (
-            node_id,
-            position,
-        ) in end_positions.items():
-            node_editor.update_node(
-                node_id,
-                position=position,
-            )
+            for index, (node_id, value) in enumerate(nodes.items()):
+                if node_id not in known_nodes:
+                    node_editor.add_node(node_data(node_id, value, index))
 
-    def compute_pipeline_layout() -> None:
-        start_positions = current_positions()
+            if current_nodes - known_nodes:
+                await asyncio.sleep(0.05)
 
-        end_positions = compute_layout_positions()
+            for edge in edges:
+                if edge_key(edge) not in known_edges:
+                    node_editor.add_edge(edge_data(edge))
 
-        asyncio.create_task(
-            animate_positions(
-                start_positions,
-                end_positions,
-            )
-        )
+            known_nodes = current_nodes
+            known_edges = current_edges
 
-    ctrl.compute_pipeline_layout = compute_pipeline_layout
+            start_positions = current_positions()
+            end_positions = compute_layout_positions()
+            await animate_positions(start_positions, end_positions)
 
-    # -------------------------------------------------------------------------
-    # Fit
-    # -------------------------------------------------------------------------
+        sync_task = asyncio.create_task(sync_view())
 
-    def fit_view() -> None:
-        node_editor.fit_view()
+    @state.change("pipeline")
+    def on_pipeline_change(**_):
+        schedule_sync()
 
-    ctrl.pipeline_fit_view = fit_view
+    def initialize_graph() -> None:
+        schedule_sync()
 
-    # -------------------------------------------------------------------------
-    # Remove
-    # -------------------------------------------------------------------------
+        async def fit_after_sync():
+            await asyncio.sleep(0.35)
+            node_editor.fit_view()
 
-    def remove_node(
-        node_id: str,
-    ) -> None:
-        node_editor.remove_node(node_id)
-        schedule_pipeline_layout()
+        asyncio.create_task(fit_after_sync())
 
-    def remove_edge(
-        edge: PipelineEdge,
-    ) -> None:
-        node_editor.remove_edge(
-            edge.source_node_id,
-            edge.target_node_id,
-            source_handle=(f"output-{edge.source_port}"),
-            target_handle=(f"input-{edge.target_port}"),
-        )
-        schedule_pipeline_layout()
-
-    ctrl.pipeline_remove_node = remove_node
-    ctrl.pipeline_remove_edge = remove_edge
-
-    # -------------------------------------------------------------------------
-    # Add
-    # -------------------------------------------------------------------------
-
-    def add_node(
-        node: PipelineNode,
-    ) -> None:
-        node_editor.add_node(node_data(node))
-        schedule_pipeline_layout()
-
-    def add_edge(
-        edge: PipelineEdge,
-    ) -> None:
-        async def deferred_add():
-            # Give Vue Flow time to instantiate
-            # and measure the custom node handles.
-            await asyncio.sleep(0.05)
-            node_editor.add_edge(edge_data(edge))
-            schedule_pipeline_layout()
-
-        asyncio.create_task(deferred_add())
-
-    ctrl.pipeline_add_node = add_node
-    ctrl.pipeline_add_edge = add_edge
-
-    # -------------------------------------------------------------------------
-    # Initial graph
-    # -------------------------------------------------------------------------
-
-    for node in pipeline.nodes.values():
-        node_editor.add_node(node_data(node))
-
-    def initialize_edges():
-        for edge in pipeline.edges:
-            node_editor.add_edge(edge_data(edge))
-
-        node_editor.fit_view()
-
-    ctrl.on_client_connected.add(initialize_edges)
+    ctrl.on_client_connected.add(initialize_graph)
 
     return node_editor

@@ -31,17 +31,12 @@ def initialize_app_controller(
         descriptor = next(
             item for item in catalog.algorithms if item.class_name == class_name
         )
-
         processor = catalog.create(class_name)
-
         node = pipeline.add_node(
             processor,
             name=name or descriptor.label,
             node_id=node_id,
         )
-
-        ctrl.pipeline_add_node(node)
-
         return node.id
 
     def connect_nodes(
@@ -52,7 +47,7 @@ def initialize_app_controller(
         target_port: int = 0,
         sync: bool = True,
     ) -> None:
-        edge = pipeline.connect(
+        pipeline.connect(
             source_node_id,
             target_node_id,
             source_port=int(source_port),
@@ -60,20 +55,12 @@ def initialize_app_controller(
             sync=sync,
         )
 
-        ctrl.pipeline_add_edge(edge)
-
     def set_node_property(
         node_id: str,
         name: str,
         value,
     ) -> None:
-        pipeline.set_property(
-            node_id,
-            name,
-            value,
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
+        pipeline.set_property(node_id, name, value)
 
     def set_node_vector_component(
         node_id: str,
@@ -87,8 +74,6 @@ def initialize_app_controller(
             int(index),
             value,
         )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
 
     def set_node_list_value(
         node_id: str,
@@ -102,19 +87,12 @@ def initialize_app_controller(
             int(index),
             value,
         )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
 
     def add_node_list_value(
         node_id: str,
         name: str,
     ) -> None:
-        pipeline.add_list_value(
-            node_id,
-            name,
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
+        pipeline.add_list_value(node_id, name)
 
     def remove_node_list_value(
         node_id: str,
@@ -126,8 +104,6 @@ def initialize_app_controller(
             name,
             int(index),
         )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
 
     def set_node_input_array(
         node_id: str,
@@ -139,8 +115,11 @@ def initialize_app_controller(
             int(index),
             value,
         )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
+
+    def sync_node_from_runtime(
+        node_id: str,
+    ) -> None:
+        pipeline.sync_node_from_runtime(node_id)
 
     def add_representation(
         node_id: str,
@@ -156,20 +135,12 @@ def initialize_app_controller(
             view_ids=view_ids,
             representation_id=representation_id,
         )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
         return representation.id
 
     def remove_representation(
         representation_id: str,
     ) -> None:
-        representation = rendering.get_representation(representation_id)
-
         rendering.remove_representation(representation_id)
-
-        ctrl.update_representation_state(representation.node_id)
-
-        ctrl.view_update()
 
     def set_representation_kind(
         representation_id: str,
@@ -180,18 +151,23 @@ def initialize_app_controller(
             kind,
         )
 
-        ctrl.view_update()
-
     def toggle_representation_in_view(
         representation_id: str,
         view_id: str,
     ) -> None:
-        rendering.toggle_representation_in_view(
+        if rendering.representation_in_view(
             representation_id,
             view_id,
-        )
-
-        ctrl.view_update()
+        ):
+            rendering.unassign_representation(
+                representation_id,
+                view_id,
+            )
+        else:
+            rendering.assign_representation(
+                representation_id,
+                view_id,
+            )
 
     def set_representation_array(
         representation_id: str,
@@ -204,8 +180,6 @@ def initialize_app_controller(
             association,
         )
 
-        ctrl.view_update()
-
     def set_representation_scalar_range(
         representation_id: str,
         minimum: float,
@@ -217,15 +191,10 @@ def initialize_app_controller(
             float(maximum),
         )
 
-        ctrl.view_update()
-
     def set_active_view(
         view_id: str,
     ) -> None:
         rendering.set_active_view(view_id)
-
-        if pipeline.active_node_id is not None:
-            ctrl.update_representation_state(pipeline.active_node_id)
 
     def set_view_background_color(
         view_id: str,
@@ -236,7 +205,10 @@ def initialize_app_controller(
             _hex_to_rgb(value),
         )
 
-        ctrl.view_update()
+    def reset_camera(
+        view_id: str,
+    ) -> None:
+        rendering.reset_camera(view_id)
 
     def restore_view(
         *,
@@ -246,55 +218,27 @@ def initialize_app_controller(
         """Restore the ID of the single render view without replacing it."""
 
         views = rendering.views
-
         if len(views) != 1:
             raise RuntimeError(
                 "Current vtkweb UI can restore state only with one render view"
             )
 
-        current = views[0]
-
         restored = rendering.rename_view(
-            current.id,
+            views[0].id,
             view_id,
             name=name,
         )
-
         rendering.set_active_view(restored.id)
-
         return restored.id
-
-    # -------------------------------------------------------------------------
-    # Refresh / synchronization
-    # -------------------------------------------------------------------------
-
-    def refresh_node(
-        node_id: str,
-    ) -> None:
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
-
-    def sync_node_from_runtime(
-        node_id: str,
-    ) -> None:
-        pipeline.sync_node_from_runtime(node_id)
-        refresh_node(node_id)
-
-    # -------------------------------------------------------------------------
-    # Active node
-    # -------------------------------------------------------------------------
 
     def set_active_node(
         node_id: str,
     ) -> None:
         pipeline.set_active_node(node_id)
-
         state.active_representation_output_port = 0
 
-        ctrl.update_representation_state(node_id)
-
     # -------------------------------------------------------------------------
-    # Output-port interaction
+    # UI workflows
     # -------------------------------------------------------------------------
 
     def output_port_click(
@@ -303,31 +247,49 @@ def initialize_app_controller(
         shift_key: bool = False,
     ) -> None:
         output_port = int(output_port)
-
         set_active_node(node_id)
 
         if not shift_key:
             return
 
-        rendering.toggle_output_in_view(
+        representations = rendering.get_representations(
             node_id,
             output_port,
-            state.active_view_id,
+        )
+        view_id = state.active_view_id
+
+        if not representations:
+            representation_id = add_representation(
+                node_id,
+                output_port=output_port,
+                kind="surface",
+            )
+            rendering.assign_representation(
+                representation_id,
+                view_id,
+            )
+            return
+
+        visible = any(
+            view_id in representation.view_ids for representation in representations
         )
 
-        ctrl.update_representation_state(node_id)
-
-        ctrl.view_update()
-
-    # -------------------------------------------------------------------------
-    # Interactive node insertion
-    # -------------------------------------------------------------------------
+        for representation in representations:
+            if visible:
+                rendering.unassign_representation(
+                    representation.id,
+                    view_id,
+                )
+            else:
+                rendering.assign_representation(
+                    representation.id,
+                    view_id,
+                )
 
     def insert_node(
         class_name: str,
     ) -> None:
         previous_active = pipeline.active_node
-
         node_id = create_node(class_name)
         node = pipeline.nodes[node_id]
         processor = node.processor
@@ -350,22 +312,11 @@ def initialize_app_controller(
 
         ctrl.close_node_browser()
 
-        # At this point all required automatic input connections have been
-        # established. Node creation itself intentionally never inspects or
-        # executes a processor with mandatory inputs.
+        # Required automatic inputs are connected before processor inspection.
         processor.Update()
-
         pipeline.sync_node_from_runtime(node_id)
-
         set_active_node(node_id)
-
-        rendering.reset_camera()
-
-        ctrl.view_update()
-
-    # -------------------------------------------------------------------------
-    # Delete node
-    # -------------------------------------------------------------------------
+        rendering.reset_camera(state.active_view_id)
 
     def delete_node(
         node_id: str,
@@ -373,29 +324,13 @@ def initialize_app_controller(
         if node_id not in pipeline.nodes:
             return
 
-        incident_edges = [
-            edge
-            for edge in pipeline.edges
-            if (edge.source_node_id == node_id or edge.target_node_id == node_id)
-        ]
-
-        for edge in incident_edges:
-            ctrl.pipeline_remove_edge(edge)
-
         rendering.remove_node(node_id)
-
         pipeline.remove_node(node_id)
-
-        ctrl.pipeline_remove_node(node_id)
 
         if pipeline.active_node is not None:
             set_active_node(pipeline.active_node.id)
         else:
             state.active_representation_output_port = 0
-
-            ctrl.update_representation_state(None)
-
-        ctrl.view_update()
 
     def delete_active_node() -> None:
         node_id = pipeline.active_node_id
@@ -409,20 +344,11 @@ def initialize_app_controller(
     def clear_state() -> None:
         """Clear reconstructable state while preserving the displayed view."""
 
-        for edge in tuple(pipeline.edges):
-            ctrl.pipeline_remove_edge(edge)
-
-        for node_id in tuple(pipeline.nodes):
-            ctrl.pipeline_remove_node(node_id)
-
         for representation in tuple(rendering.representations):
             rendering.remove_representation(representation.id)
 
         pipeline.clear()
-
         state.active_representation_output_port = 0
-
-        ctrl.update_representation_state(None)
 
     def finish_state_load() -> None:
         """Synchronize runtime metadata after reconstruction is complete."""
@@ -430,20 +356,11 @@ def initialize_app_controller(
         for node_id in pipeline.nodes:
             pipeline.sync_node_from_runtime(node_id)
 
-        ctrl.update_representation_state(pipeline.active_node_id)
-
         if rendering.active_view_id is not None:
             rendering.reset_camera(rendering.active_view_id)
 
-        ctrl.compute_pipeline_layout()
-        ctrl.pipeline_fit_view()
-        ctrl.view_update()
-
     def export_state_source() -> str:
-        return export_python_state(
-            pipeline,
-            rendering,
-        )
+        return export_python_state(pipeline, rendering)
 
     def load_state_source(
         source: str | bytes,
@@ -496,6 +413,7 @@ def initialize_app_controller(
     ctrl.add_node_list_value = add_node_list_value
     ctrl.remove_node_list_value = remove_node_list_value
     ctrl.set_node_input_array = set_node_input_array
+    ctrl.sync_node_from_runtime = sync_node_from_runtime
     ctrl.add_representation = add_representation
     ctrl.remove_representation = remove_representation
     ctrl.set_representation_kind = set_representation_kind
@@ -504,14 +422,12 @@ def initialize_app_controller(
     ctrl.set_representation_scalar_range = set_representation_scalar_range
     ctrl.set_active_view = set_active_view
     ctrl.set_view_background_color = set_view_background_color
+    ctrl.reset_camera = reset_camera
     ctrl.restore_view = restore_view
-    ctrl.refresh_node = refresh_node
-    ctrl.sync_node_from_runtime = sync_node_from_runtime
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
     ctrl.insert_node = insert_node
     ctrl.delete_node = delete_node
-    ctrl.delete_active_node = delete_active_node
     ctrl.clear_state = clear_state
     ctrl.finish_state_load = finish_state_load
     ctrl.export_python_state = export_state_source

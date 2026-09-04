@@ -92,15 +92,6 @@ def build_ui(
     )
 
     # -------------------------------------------------------------------------
-    # Initial inspector state
-    # -------------------------------------------------------------------------
-
-    if pipeline.active_node_id is not None:
-        ctrl.update_properties_state(pipeline.active_node_id)
-
-        ctrl.update_representation_state(pipeline.active_node_id)
-
-    # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
 
@@ -213,10 +204,10 @@ def build_ui(
                     build_pipeline_view(
                         state,
                         ctrl,
-                        pipeline,
                     )
 
                     build_render_view(
+                        state,
                         ctrl,
                         rendering,
                     )
