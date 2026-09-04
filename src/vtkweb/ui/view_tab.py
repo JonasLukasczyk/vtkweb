@@ -14,7 +14,7 @@ def initialize_view_tab(
 ) -> None:
     # View data and active_view_id are authoritative RenderManager state.
 
-    def set_active_render_view(
+    def set_active_view(
         view_id: str,
     ) -> None:
         rendering.set_active_view(view_id)
@@ -23,15 +23,16 @@ def initialize_view_tab(
             ctrl.update_representation_state(pipeline.active_node_id)
 
     def set_view_background_color(
+        view_id: str,
         value: str,
     ) -> None:
         rendering.set_background_color(
-            rendering.active_view_id,
+            view_id,
             _hex_to_rgb(value),
         )
         ctrl.view_update()
 
-    ctrl.set_active_render_view = set_active_render_view
+    ctrl.set_active_view = set_active_view
     ctrl.set_view_background_color = set_view_background_color
 
 
@@ -56,7 +57,7 @@ def build_view_tab(
             value=("views[active_view_id]?.background_color || '#1a1a1a'",),
             input=(
                 ctrl.set_view_background_color,
-                "[$event.target.value]",
+                "[active_view_id,$event.target.value]",
             ),
         )
 

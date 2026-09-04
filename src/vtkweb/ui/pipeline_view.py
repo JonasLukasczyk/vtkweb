@@ -211,11 +211,11 @@ def build_pipeline_view(
     ) -> dict:
         index = list(pipeline.nodes).index(node.id)
 
-        algorithm = node.algorithm
+        processor = node.processor
 
-        input_port_count = algorithm.GetNumberOfInputPorts()
+        input_port_count = processor.GetNumberOfInputPorts()
 
-        output_port_count = algorithm.GetNumberOfOutputPorts()
+        output_port_count = processor.GetNumberOfOutputPorts()
 
         return {
             "id": node.id,

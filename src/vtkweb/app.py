@@ -20,9 +20,9 @@ pipeline = PipelineGraph(server.state)
 # # Hard-coded contour setup for debugging
 # # -------------------------------------------------------------------------
 #
-# rt.algorithm.Update()
+# rt.processor.Update()
 #
-# rt_output = rt.algorithm.GetOutput()
+# rt_output = rt.processor.GetOutput()
 # rt_data = rt_output.GetPointData().GetArray("RTData")
 #
 # print(
@@ -38,7 +38,7 @@ pipeline = PipelineGraph(server.state)
 # minimum, maximum = rt_data.GetRange()
 # iso_value = 0.5 * (minimum + maximum)
 #
-# contour.algorithm.SetInputArrayToProcess(
+# contour.processor.SetInputArrayToProcess(
 #     0,
 #     0,
 #     0,
@@ -46,20 +46,20 @@ pipeline = PipelineGraph(server.state)
 #     "RTData",
 # )
 #
-# contour.algorithm.SetNumberOfContours(1)
-# contour.algorithm.SetValue(
+# contour.processor.SetNumberOfContours(1)
+# contour.processor.SetValue(
 #     0,
 #     iso_value,
 # )
 #
 # print(
 #     "Contour value:",
-#     contour.algorithm.GetValue(0),
+#     contour.processor.GetValue(0),
 # )
 #
-# contour.algorithm.Update()
+# contour.processor.Update()
 #
-# contour_output = contour.algorithm.GetOutput()
+# contour_output = contour.processor.GetOutput()
 #
 # print(
 #     "Contour output points:",

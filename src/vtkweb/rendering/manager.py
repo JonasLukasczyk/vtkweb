@@ -81,11 +81,16 @@ class RenderManager:
     def add_view(
         self,
         name: str | None = None,
+        *,
+        view_id: str | None = None,
     ) -> RenderView:
         if name is None:
             name = f"View {len(self.state.views) + 1}"
 
-        view_id = uuid4().hex
+        view_id = view_id or uuid4().hex
+        if view_id in self.state.views:
+            raise ValueError(f"View ID already exists: {view_id}")
+
         value = {
             "id": view_id,
             "name": name,
@@ -193,12 +198,13 @@ class RenderManager:
         output_port: int = 0,
         kind: str = "surface",
         view_ids: Iterable[str] = (),
+        representation_id: str | None = None,
     ) -> Representation:
         if kind not in REPRESENTATION_KINDS:
             raise ValueError(f"Unknown representation kind: {kind}")
 
         node = self.pipeline.nodes[node_id]
-        output_count = node.algorithm.GetNumberOfOutputPorts()
+        output_count = node.processor.GetNumberOfOutputPorts()
 
         if output_port < 0 or output_port >= output_count:
             raise ValueError(
@@ -207,7 +213,10 @@ class RenderManager:
                 f"port {output_port} is invalid"
             )
 
-        representation_id = uuid4().hex
+        representation_id = representation_id or uuid4().hex
+        if representation_id in self.state.representations:
+            raise ValueError(f"Representation ID already exists: {representation_id}")
+
         value = {
             "id": representation_id,
             "node_id": node_id,
@@ -284,7 +293,7 @@ class RenderManager:
         self.backend.add_representation(
             representation,
             view,
-            node.algorithm,
+            node.processor,
         )
 
         value = dict(self.state.representations[representation_id])
@@ -484,10 +493,10 @@ class RenderManager:
         node_id: str,
         output_port: int,
     ) -> dict[str, list[str]]:
-        algorithm = self.pipeline.algorithm(node_id)
-        algorithm.Update()
+        processor = self.pipeline.processor(node_id)
+        processor.Update()
 
-        data = algorithm.GetOutputDataObject(output_port)
+        data = processor.GetOutputDataObject(output_port)
         result = {
             "point": [],
             "cell": [],
@@ -517,10 +526,10 @@ class RenderManager:
         array_name: str,
         association: str = "point",
     ) -> tuple[float, float] | None:
-        algorithm = self.pipeline.algorithm(node_id)
-        algorithm.Update()
+        processor = self.pipeline.processor(node_id)
+        processor.Update()
 
-        data = algorithm.GetOutputDataObject(output_port)
+        data = processor.GetOutputDataObject(output_port)
         if data is None:
             return None
 
@@ -588,7 +597,7 @@ class RenderManager:
             self.backend.update_representation(
                 representation,
                 self.get_view(view_id),
-                node.algorithm,
+                node.processor,
             )
 
 

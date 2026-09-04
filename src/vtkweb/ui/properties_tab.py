@@ -14,134 +14,38 @@ def initialize_properties_tab(
     pipeline: PipelineGraph,
 ) -> None:
     # Properties and input-array descriptors are part of state.pipeline. This
-    # module only owns the UI actions which mutate them through PipelineGraph.
-
-    def active_node_id() -> str | None:
-        return pipeline.active_node_id
+    # module only owns inspector synchronization and UI-specific helpers.
 
     def update_properties_state(
         node_id: str | None,
     ) -> None:
         # Compatibility hook for existing callers. There is no second property
         # list to synchronize anymore. Explicit callers may use this to pull
-        # direct/raw VTK mutations back into state.
+        # direct/raw processor mutations back into state.
         if node_id is not None:
             pipeline.sync_node_from_runtime(node_id)
-
-    def set_active_input_array(
-        index: int,
-        value,
-    ) -> None:
-        node_id = active_node_id()
-        if node_id is None:
-            return
-
-        pipeline.set_input_array(
-            node_id,
-            int(index),
-            value,
-        )
-        ctrl.view_update()
-
-    def set_filter_property(
-        name: str,
-        value,
-    ) -> None:
-        node_id = active_node_id()
-        if node_id is None:
-            return
-
-        pipeline.set_property(
-            node_id,
-            name,
-            value,
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
-
-    def set_filter_vector_component(
-        name: str,
-        index: int,
-        value,
-    ) -> None:
-        node_id = active_node_id()
-        if node_id is None:
-            return
-
-        pipeline.set_vector_component(
-            node_id,
-            name,
-            int(index),
-            value,
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
-
-    def set_filter_list_value(
-        name: str,
-        index: int,
-        value,
-    ) -> None:
-        node_id = active_node_id()
-        if node_id is None:
-            return
-
-        pipeline.set_list_value(
-            node_id,
-            name,
-            int(index),
-            value,
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
-
-    def add_filter_list_value(
-        name: str,
-    ) -> None:
-        node_id = active_node_id()
-        if node_id is None:
-            return
-
-        pipeline.add_list_value(
-            node_id,
-            name,
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
-
-    def remove_filter_list_value(
-        name: str,
-        index: int,
-    ) -> None:
-        node_id = active_node_id()
-        if node_id is None:
-            return
-
-        pipeline.remove_list_value(
-            node_id,
-            name,
-            int(index),
-        )
-        ctrl.update_representation_state(node_id)
-        ctrl.view_update()
 
     # -------------------------------------------------------------------------
     # Elevation helper
     # -------------------------------------------------------------------------
 
     def set_elevation_axis(
+        node_id: str,
         axis: str,
     ) -> None:
-        node = pipeline.active_node
+        if node_id not in pipeline.nodes:
+            return
 
-        if node is None or not isinstance(
-            node.algorithm,
+        node = pipeline.nodes[node_id]
+
+        if not isinstance(
+            node.processor,
             vtk.vtkElevationFilter,
         ):
             return
 
-        algorithm = node.algorithm
-        input_data = algorithm.GetInputDataObject(
+        processor = node.processor
+        input_data = processor.GetInputDataObject(
             0,
             0,
         )
@@ -172,25 +76,15 @@ def initialize_properties_tab(
             low = (cx, cy, zmin)
             high = (cx, cy, zmax)
 
-        algorithm.SetLowPoint(*low)
-        algorithm.SetHighPoint(*high)
-        algorithm.Update()
+        processor.SetLowPoint(*low)
+        processor.SetHighPoint(*high)
+        processor.Update()
 
         pipeline.sync_node_from_runtime(node.id)
         ctrl.update_representation_state(node.id)
         ctrl.view_update()
 
-    # -------------------------------------------------------------------------
-    # Controller
-    # -------------------------------------------------------------------------
-
     ctrl.update_properties_state = update_properties_state
-    ctrl.set_input_array = set_active_input_array
-    ctrl.set_filter_property = set_filter_property
-    ctrl.set_filter_vector_component = set_filter_vector_component
-    ctrl.set_filter_list_value = set_filter_list_value
-    ctrl.add_filter_list_value = add_filter_list_value
-    ctrl.remove_filter_list_value = remove_filter_list_value
     ctrl.set_elevation_axis = set_elevation_axis
 
 
@@ -198,7 +92,7 @@ def build_properties_tab(
     ctrl,
 ) -> None:
     html.Div(
-        "Filter",
+        "Node",
         classes="vtkweb-section-title",
     )
 
@@ -232,8 +126,8 @@ def build_properties_tab(
                 variant="plain",
                 classes="vtkweb-select-control",
                 update_modelValue=(
-                    ctrl.set_input_array,
-                    "[array.index, $event]",
+                    ctrl.set_node_input_array,
+                    "[active_node_id, array.index, $event]",
                 ),
             )
 
@@ -258,7 +152,7 @@ def build_properties_tab(
                     size="small",
                     click=(
                         ctrl.set_elevation_axis,
-                        f"['{axis}']",
+                        f"[active_node_id, '{axis}']",
                     ),
                 )
 
@@ -290,8 +184,8 @@ def build_properties_tab(
                     type="checkbox",
                     checked=("Boolean(property.value)",),
                     change=(
-                        ctrl.set_filter_property,
-                        ("[property.name,$event.target.checked]"),
+                        ctrl.set_node_property,
+                        ("[active_node_id,property.name,$event.target.checked]"),
                     ),
                 )
 
@@ -312,8 +206,8 @@ def build_properties_tab(
                     step=("property.kind === 'int' ? 1 : 'any'",),
                     value=("property.value",),
                     change=(
-                        ctrl.set_filter_property,
-                        ("[property.name,$event.target.value]"),
+                        ctrl.set_node_property,
+                        ("[active_node_id,property.name,$event.target.value]"),
                     ),
                 )
 
@@ -335,8 +229,10 @@ def build_properties_tab(
                         step="any",
                         value=("component",),
                         change=(
-                            ctrl.set_filter_vector_component,
-                            ("[property.name,index,$event.target.value]"),
+                            ctrl.set_node_vector_component,
+                            (
+                                "[active_node_id,property.name,index,$event.target.value]"
+                            ),
                         ),
                     )
 
@@ -358,8 +254,10 @@ def build_properties_tab(
                         step="any",
                         value=("value",),
                         change=(
-                            ctrl.set_filter_list_value,
-                            ("[property.name,index,$event.target.value]"),
+                            ctrl.set_node_list_value,
+                            (
+                                "[active_node_id,property.name,index,$event.target.value]"
+                            ),
                         ),
                     )
 
@@ -369,8 +267,8 @@ def build_properties_tab(
                     classes="vtkweb-list-inline-button",
                     disabled=("property.value.length === 0",),
                     click=(
-                        ctrl.remove_filter_list_value,
-                        ("[property.name,property.value.length - 1]"),
+                        ctrl.remove_node_list_value,
+                        ("[active_node_id,property.name,property.value.length - 1]"),
                     ),
                 )
                 html.Button(
@@ -378,7 +276,7 @@ def build_properties_tab(
                     type="button",
                     classes="vtkweb-list-inline-button",
                     click=(
-                        ctrl.add_filter_list_value,
-                        "[property.name]",
+                        ctrl.add_node_list_value,
+                        "[active_node_id,property.name]",
                     ),
                 )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
@@ -13,6 +15,146 @@ def initialize_app_controller(
 ) -> None:
     state = server.state
     ctrl = server.controller
+
+    # -------------------------------------------------------------------------
+    # Primitive application commands
+    # -------------------------------------------------------------------------
+
+    def create_node(
+        class_name: str,
+        *,
+        name: str | None = None,
+        node_id: str | None = None,
+    ) -> str:
+        descriptor = next(
+            item for item in catalog.algorithms if item.class_name == class_name
+        )
+
+        processor = catalog.create(class_name)
+
+        node = pipeline.add_node(
+            processor,
+            name=name or descriptor.label,
+            node_id=node_id,
+        )
+
+        ctrl.pipeline_add_node(node)
+
+        return node.id
+
+    def connect_nodes(
+        source_node_id: str,
+        target_node_id: str,
+        *,
+        source_port: int = 0,
+        target_port: int = 0,
+    ) -> None:
+        edge = pipeline.connect(
+            source_node_id,
+            target_node_id,
+            source_port=int(source_port),
+            target_port=int(target_port),
+        )
+
+        ctrl.pipeline_add_edge(edge)
+
+    def set_node_property(
+        node_id: str,
+        name: str,
+        value,
+    ) -> None:
+        pipeline.set_property(
+            node_id,
+            name,
+            value,
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+
+    def set_node_vector_component(
+        node_id: str,
+        name: str,
+        index: int,
+        value,
+    ) -> None:
+        pipeline.set_vector_component(
+            node_id,
+            name,
+            int(index),
+            value,
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+
+    def set_node_list_value(
+        node_id: str,
+        name: str,
+        index: int,
+        value,
+    ) -> None:
+        pipeline.set_list_value(
+            node_id,
+            name,
+            int(index),
+            value,
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+
+    def add_node_list_value(
+        node_id: str,
+        name: str,
+    ) -> None:
+        pipeline.add_list_value(
+            node_id,
+            name,
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+
+    def remove_node_list_value(
+        node_id: str,
+        name: str,
+        index: int,
+    ) -> None:
+        pipeline.remove_list_value(
+            node_id,
+            name,
+            int(index),
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+
+    def set_node_input_array(
+        node_id: str,
+        index: int,
+        value,
+    ) -> None:
+        pipeline.set_input_array(
+            node_id,
+            int(index),
+            value,
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+
+    def add_representation(
+        node_id: str,
+        output_port: int = 0,
+        kind: str = "surface",
+        view_ids: Iterable[str] = (),
+        representation_id: str | None = None,
+    ) -> str:
+        representation = rendering.add_representation(
+            node_id,
+            output_port=int(output_port),
+            kind=kind,
+            view_ids=view_ids,
+            representation_id=representation_id,
+        )
+        ctrl.update_representation_state(node_id)
+        ctrl.view_update()
+        return representation.id
 
     # -------------------------------------------------------------------------
     # Refresh / synchronization
@@ -41,9 +183,7 @@ def initialize_app_controller(
 
         state.active_representation_output_port = 0
 
-        ctrl.update_representation_state(
-            node_id
-        )
+        ctrl.update_representation_state(node_id)
 
     # -------------------------------------------------------------------------
     # Output-port interaction
@@ -54,13 +194,9 @@ def initialize_app_controller(
         output_port: int,
         shift_key: bool = False,
     ) -> None:
-        output_port = int(
-            output_port
-        )
+        output_port = int(output_port)
 
-        set_active_node(
-            node_id
-        )
+        set_active_node(node_id)
 
         if not shift_key:
             return
@@ -71,80 +207,49 @@ def initialize_app_controller(
             state.active_view_id,
         )
 
-        ctrl.update_representation_state(
-            node_id
-        )
+        ctrl.update_representation_state(node_id)
 
         ctrl.view_update()
 
     # -------------------------------------------------------------------------
-    # Create source / filter
+    # Interactive node insertion
     # -------------------------------------------------------------------------
 
-    def create_filter(
+    def insert_node(
         class_name: str,
     ) -> None:
-        descriptor = next(
-            item
-            for item in catalog.algorithms
-            if item.class_name == class_name
-        )
+        previous_active = pipeline.active_node
 
-        algorithm = catalog.create(
-            class_name
-        )
+        node_id = create_node(class_name)
+        node = pipeline.nodes[node_id]
+        processor = node.processor
 
-        previous_active = (
-            pipeline.active_node
-        )
-
-        node = pipeline.add_node(
-            algorithm,
-            name=descriptor.label,
-        )
-
-        ctrl.pipeline_add_node(
-            node
-        )
-
-        if (
-            algorithm.GetNumberOfInputPorts() > 0
-            and previous_active is not None
-        ):
-            edge = pipeline.connect(
+        if processor.GetNumberOfInputPorts() > 0 and previous_active is not None:
+            connect_nodes(
                 previous_active.id,
-                node.id,
+                node_id,
                 source_port=0,
                 target_port=0,
             )
 
-            ctrl.pipeline_add_edge(
-                edge
-            )
-
-        if algorithm.GetNumberOfOutputPorts() > 0:
-            rendering.add_representation(
-                node.id,
+        if processor.GetNumberOfOutputPorts() > 0:
+            add_representation(
+                node_id,
                 output_port=0,
                 kind="outline",
-                view_ids={
-                    state.active_view_id
-                },
+                view_ids={state.active_view_id},
             )
 
-        ctrl.close_filter_browser()
+        ctrl.close_node_browser()
 
-        # At this point all required automatic input
-        # connections have been established.
-        algorithm.Update()
+        # At this point all required automatic input connections have been
+        # established. Node creation itself intentionally never inspects or
+        # executes a processor with mandatory inputs.
+        processor.Update()
 
-        pipeline.sync_node_from_runtime(
-            node.id
-        )
+        pipeline.sync_node_from_runtime(node_id)
 
-        set_active_node(
-            node.id
-        )
+        set_active_node(node_id)
 
         rendering.reset_camera()
 
@@ -154,66 +259,60 @@ def initialize_app_controller(
     # Delete node
     # -------------------------------------------------------------------------
 
-    def delete_active_node() -> None:
-        node = pipeline.active_node
-
-        if node is None:
+    def delete_node(
+        node_id: str,
+    ) -> None:
+        if node_id not in pipeline.nodes:
             return
-
-        node_id = node.id
 
         incident_edges = [
             edge
             for edge in pipeline.edges
-            if (
-                edge.source_node_id == node_id
-                or edge.target_node_id == node_id
-            )
+            if (edge.source_node_id == node_id or edge.target_node_id == node_id)
         ]
 
         for edge in incident_edges:
-            ctrl.pipeline_remove_edge(
-                edge
-            )
+            ctrl.pipeline_remove_edge(edge)
 
-        rendering.remove_node(
-            node_id
-        )
+        rendering.remove_node(node_id)
 
-        pipeline.remove_node(
-            node_id
-        )
+        pipeline.remove_node(node_id)
 
-        ctrl.pipeline_remove_node(
-            node_id
-        )
+        ctrl.pipeline_remove_node(node_id)
 
         if pipeline.active_node is not None:
-            set_active_node(
-                pipeline.active_node.id
-            )
+            set_active_node(pipeline.active_node.id)
         else:
             state.active_representation_output_port = 0
 
-            ctrl.update_representation_state(
-                None
-            )
+            ctrl.update_representation_state(None)
 
         ctrl.view_update()
+
+    def delete_active_node() -> None:
+        node_id = pipeline.active_node_id
+        if node_id is not None:
+            delete_node(node_id)
 
     # -------------------------------------------------------------------------
     # Controller
     # -------------------------------------------------------------------------
 
+    ctrl.create_node = create_node
+    ctrl.connect_nodes = connect_nodes
+    ctrl.set_node_property = set_node_property
+    ctrl.set_node_vector_component = set_node_vector_component
+    ctrl.set_node_list_value = set_node_list_value
+    ctrl.add_node_list_value = add_node_list_value
+    ctrl.remove_node_list_value = remove_node_list_value
+    ctrl.set_node_input_array = set_node_input_array
+    ctrl.add_representation = add_representation
     ctrl.refresh_node = refresh_node
     ctrl.sync_node_from_runtime = sync_node_from_runtime
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
-    ctrl.create_filter = create_filter
+    ctrl.insert_node = insert_node
+    ctrl.delete_node = delete_node
     ctrl.delete_active_node = delete_active_node
 
-    server.trigger(
-        "delete_active_node"
-    )(
-        delete_active_node
-    )
+    server.trigger("delete_active_node")(delete_active_node)

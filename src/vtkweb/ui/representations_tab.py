@@ -42,7 +42,7 @@ def initialize_representations_tab(
             return
 
         node = pipeline.nodes[node_id]
-        output_count = node.algorithm.GetNumberOfOutputPorts()
+        output_count = node.processor.GetNumberOfOutputPorts()
 
         active_port = int(state.active_representation_output_port)
 
@@ -81,33 +81,19 @@ def initialize_representations_tab(
         if pipeline.active_node_id is not None:
             update_representation_state(pipeline.active_node_id)
 
-    def add_representation(
-        kind: str,
-    ) -> None:
-        node_id = pipeline.active_node_id
-        if node_id is None:
-            return
-
-        rendering.add_representation(
-            node_id,
-            output_port=int(state.active_representation_output_port),
-            kind=kind,
-            view_ids={rendering.active_view_id},
-        )
-        ctrl.view_update()
-
     def remove_representation(
         representation_id: str,
     ) -> None:
         rendering.remove_representation(representation_id)
         ctrl.view_update()
 
-    def toggle_representation_in_active_view(
+    def toggle_representation_in_view(
         representation_id: str,
+        view_id: str,
     ) -> None:
         rendering.toggle_representation_in_view(
             representation_id,
-            rendering.active_view_id,
+            view_id,
         )
         ctrl.view_update()
 
@@ -206,9 +192,8 @@ def initialize_representations_tab(
 
     ctrl.update_representation_state = update_representation_state
     ctrl.set_representation_output_port = set_representation_output_port
-    ctrl.add_representation = add_representation
     ctrl.remove_representation = remove_representation
-    ctrl.toggle_representation_in_active_view = toggle_representation_in_active_view
+    ctrl.toggle_representation_in_view = toggle_representation_in_view
     ctrl.set_representation_kind = set_representation_kind
     ctrl.set_color_array = set_color_array
     ctrl.set_color_range_min = set_color_range_min
@@ -276,8 +261,8 @@ def build_representations_tab(
                     type="button",
                     title=("Toggle representation in active render view"),
                     click=(
-                        ctrl.toggle_representation_in_active_view,
-                        "[representation.id]",
+                        ctrl.toggle_representation_in_view,
+                        "[representation.id,active_view_id]",
                     ),
                     style=(
                         "position:relative;"
@@ -426,6 +411,10 @@ def build_representations_tab(
                     size="small",
                     click=(
                         ctrl.add_representation,
-                        f"['{kind}']",
+                        (
+                            "[active_node_id, "
+                            "active_representation_output_port, "
+                            f"'{kind}', [active_view_id]]"
+                        ),
                     ),
                 )

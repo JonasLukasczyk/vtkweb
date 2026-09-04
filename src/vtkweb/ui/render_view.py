@@ -47,13 +47,9 @@ def build_render_view(
             render_window,
             ref=f"render_view_{view.id}",
             tabindex=0,
-            style=(
-                "height:100%;"
-                "width:100%;"
-                "outline:none;"
-            ),
+            style=("height:100%;width:100%;outline:none;"),
             click=(
-                ctrl.set_active_render_view,
+                ctrl.set_active_view,
                 f"['{view.id}']",
             ),
             keydown=(

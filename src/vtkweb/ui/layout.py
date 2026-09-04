@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trame.ui.vuetify3 import (
-    SinglePageWithDrawerLayout,
+    SinglePageLayout,
 )
 from trame.widgets import client
 from trame.widgets import vuetify3 as v3
@@ -18,10 +18,10 @@ from vtkweb.pipeline import (
 from vtkweb.rendering import (
     RenderManager,
 )
-from vtkweb.ui.filter_browser import (
-    FILTER_BROWSER_STYLE,
-    build_filter_browser,
-    initialize_filter_browser,
+from vtkweb.ui.node_browser import (
+    NODE_BROWSER_STYLE,
+    build_node_browser,
+    initialize_node_browser,
 )
 from vtkweb.ui.inspector_style import (
     INSPECTOR_STYLE,
@@ -45,6 +45,9 @@ from vtkweb.ui.representations_tab import (
 )
 from vtkweb.ui.view_tab import (
     initialize_view_tab,
+)
+from vtkweb.ui.title_bar import (
+    build_title_bar_actions,
 )
 
 
@@ -93,7 +96,7 @@ def build_ui(
         rendering,
     )
 
-    initialize_filter_browser(
+    initialize_node_browser(
         server,
         catalog,
     )
@@ -111,28 +114,15 @@ def build_ui(
     # UI
     # -------------------------------------------------------------------------
 
-    with SinglePageWithDrawerLayout(
+    with SinglePageLayout(
         server,
-        show_drawer=False,
-        width=220,
         theme=("theme", "dark"),
     ) as layout:
         layout.title.set_text("vtkweb")
+        layout.icon.hide()
 
-        # ---------------------------------------------------------------------
-        # Drawer
-        # ---------------------------------------------------------------------
-
-        with layout.drawer:
-            with v3.VList(
-                density="compact",
-                nav=True,
-            ):
-                v3.VListItem(
-                    title=("Add Source / Filter"),
-                    prepend_icon="mdi-plus",
-                    click=(ctrl.open_filter_browser),
-                )
+        with layout.toolbar:
+            build_title_bar_actions(ctrl)
 
         # ---------------------------------------------------------------------
         # Content
@@ -141,7 +131,7 @@ def build_ui(
         with layout.content:
             client.Style(INSPECTOR_STYLE)
 
-            client.Style(FILTER_BROWSER_STYLE)
+            client.Style(NODE_BROWSER_STYLE)
 
             client.Style(PIPELINE_VIEW_STYLE)
 
@@ -169,7 +159,7 @@ def build_ui(
                             event.preventDefault();
 
                             trigger(
-                                'open_filter_browser'
+                                'open_node_browser'
                             );
 
                             return;
@@ -178,7 +168,7 @@ def build_ui(
                         if (
                             event.key === 'Delete' &&
                             !editing &&
-                            !filter_browser_open
+                            !node_browser_open
                         ) {
                             event.preventDefault();
 
@@ -210,10 +200,10 @@ def build_ui(
             )
 
             # -----------------------------------------------------------------
-            # Filter browser
+            # Node browser
             # -----------------------------------------------------------------
 
-            build_filter_browser(
+            build_node_browser(
                 state,
                 ctrl,
             )
