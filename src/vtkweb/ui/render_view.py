@@ -152,7 +152,7 @@ def build_render_view(
         layout = {slot_id: None for slot_id in rendering.backend_slots}
         tiles_by_view = {
             tile.get("view_id"): tile
-            for tile in state.workspace_tiles
+            for tile in state.workspace_geometry.get("tiles", [])
             if tile.get("view_id") is not None
         }
         for view_id, value in state.views.items():
@@ -171,7 +171,7 @@ def build_render_view(
 
     sync_slot_layout()
 
-    @state.change("workspace_tiles", "views")
+    @state.change("workspace_geometry", "views")
     def _sync_slots(**_):
         sync_slot_layout()
 
@@ -268,7 +268,7 @@ def build_render_view(
         # Dummy and empty content are ordinary Vue/HTML and therefore need no
         # backend slots.
         with html.Div(
-            v_for=("tile in workspace_tiles", "tile.container_id"),
+            v_for=("tile in workspace_geometry.tiles", "tile.container_id"),
             classes=(
                 "['vtkweb-workspace-tile', "
                 "tile.view_id === active_view_id && views[tile.view_id]?.type === 'vtk' "
@@ -310,15 +310,13 @@ def build_render_view(
                 )
 
         html.Div(
-            v_for=("splitter in workspace_splitters", "splitter.id"),
+            v_for=("splitter in workspace_geometry.splitters", "splitter.id"),
             classes=("['vtkweb-tile-splitter', splitter.orientation]",),
             style=("splitter.style",),
             raw_attrs=['@mousedown="window.__vtkwebStartTileResize(splitter, $event)"'],
         )
 
-    @state.change(
-        "pipeline", "representations", "views", "workspace_tiles", "render_revision"
-    )
+    @state.change("render_revision")
     def update_render_views(**_):
         for slot_id, widget in vtk_widgets_by_slot.items():
             if state.vtk_slot_layout.get(slot_id) is not None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -103,6 +104,7 @@ class PipelineGraph:
 
         self.state.active_node_id = None
         self._modification_versions: dict[str, int] = {}
+        self._runtime_sync_defer_depth = 0
 
     # -------------------------------------------------------------------------
     # State access
@@ -307,7 +309,6 @@ class PipelineGraph:
         *,
         source_port: int = 0,
         target_port: int = 0,
-        sync: bool = True,
     ) -> PipelineEdge:
         edge = PipelineEdge(
             source_node_id=source_node_id,
@@ -329,8 +330,7 @@ class PipelineGraph:
         self.mark_modified(target_node_id)
         self.bind_inputs(target_node_id)
 
-        if sync:
-            self.sync_node_from_runtime(target_node_id)
+        self._sync_node_from_runtime_if_enabled(target_node_id)
 
         return edge
 
@@ -425,6 +425,12 @@ class PipelineGraph:
         automatically keep state synchronized. This explicit method also gives
         callers a supported escape hatch after intentionally mutating a raw VTK
         processor directly.
+
+        Future optimization: consider a targeted variant that refreshes only one
+        property/getter instead of re-inspecting the entire processor. Be careful:
+        a VTK setter may internally affect multiple other properties, so refreshing
+        only the property that the UI changed could leave related UI state stale.
+        Any targeted synchronization API must account for those side effects.
         """
 
         processor = self.processor(node_id)
@@ -478,13 +484,25 @@ class PipelineGraph:
 
         self.state.pipeline = pipeline_state
 
+    def _sync_node_from_runtime_if_enabled(self, node_id: str) -> None:
+        if self._runtime_sync_defer_depth == 0:
+            self.sync_node_from_runtime(node_id)
+
+    @contextmanager
+    def deferred_runtime_sync(self):
+        """Temporarily defer automatic runtime-to-state metadata refreshes."""
+
+        self._runtime_sync_defer_depth += 1
+        try:
+            yield
+        finally:
+            self._runtime_sync_defer_depth -= 1
+
     def set_property(
         self,
         node_id: str,
         name: str,
         value,
-        *,
-        sync: bool = True,
     ) -> None:
         processor = self.processor(node_id)
 
@@ -514,8 +532,7 @@ class PipelineGraph:
         )
 
         self.mark_modified(node_id)
-        if sync:
-            self.sync_node_from_runtime(node_id)
+        self._sync_node_from_runtime_if_enabled(node_id)
 
     def set_vector_component(
         self,

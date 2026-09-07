@@ -10,6 +10,7 @@ REPRESENTATION_KINDS = (
     "surface",
     "wireframe",
     "outline",
+    "volume",
 )
 
 
@@ -35,16 +36,9 @@ class Representation:
     output_port: int = 0
     kind: str = "outline"
 
-    array_name: str | None = None
-    association: str = "point"
-    scalar_range: (
-        tuple[
-            float,
-            float,
-        ]
-        | None
-    ) = None
-    color: str = "#ffffff"
+    # Serializable, renderer-agnostic representation properties. Backends
+    # consume the keys they understand and ignore the rest.
+    properties: dict[str, Any] = field(default_factory=dict)
 
     view_ids: set[str] = field(default_factory=set)
 

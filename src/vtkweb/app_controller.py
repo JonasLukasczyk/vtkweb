@@ -53,28 +53,25 @@ def initialize_app_controller(
         *,
         source_port: int = 0,
         target_port: int = 0,
-        sync: bool = True,
     ) -> None:
         pipeline.connect(
             source_node_id,
             target_node_id,
             source_port=int(source_port),
             target_port=int(target_port),
-            sync=sync,
         )
 
     def set_node_property(
         node_id: str,
         name: str,
         value,
-        *,
-        sync: bool = True,
     ) -> None:
+        if state.pipeline_executing:
+            return
         pipeline.set_property(
             node_id,
             name,
             value,
-            sync=sync,
         )
 
     def set_node_vector_component(
@@ -83,6 +80,8 @@ def initialize_app_controller(
         index: int,
         value,
     ) -> None:
+        if state.pipeline_executing:
+            return
         pipeline.set_vector_component(
             node_id,
             name,
@@ -96,6 +95,8 @@ def initialize_app_controller(
         index: int,
         value,
     ) -> None:
+        if state.pipeline_executing:
+            return
         pipeline.set_list_value(
             node_id,
             name,
@@ -107,6 +108,8 @@ def initialize_app_controller(
         node_id: str,
         name: str,
     ) -> None:
+        if state.pipeline_executing:
+            return
         pipeline.add_list_value(node_id, name)
 
     def remove_node_list_value(
@@ -114,6 +117,8 @@ def initialize_app_controller(
         name: str,
         index: int,
     ) -> None:
+        if state.pipeline_executing:
+            return
         pipeline.remove_list_value(
             node_id,
             name,
@@ -125,6 +130,8 @@ def initialize_app_controller(
         index: int,
         value,
     ) -> None:
+        if state.pipeline_executing:
+            return
         pipeline.set_input_array(
             node_id,
             int(index),
@@ -195,25 +202,17 @@ def initialize_app_controller(
             association,
         )
 
-    def set_representation_color(
+    def set_representation_property(
         representation_id: str,
-        value: str,
+        name: str,
+        value,
     ) -> None:
-        rendering.set_color(
-            representation_id,
-            value,
-        )
+        rendering.set_representation_property(representation_id, name, value)
 
-    def set_representation_scalar_range(
+    def reset_volume_transfer_function(
         representation_id: str,
-        minimum: float,
-        maximum: float,
     ) -> None:
-        rendering.set_scalar_range(
-            representation_id,
-            float(minimum),
-            float(maximum),
-        )
+        rendering.reset_volume_transfer_function(representation_id)
 
     def create_view(
         view_type: str,
@@ -460,11 +459,12 @@ def initialize_app_controller(
         *,
         filename: str = "<vtkweb-state>",
     ) -> None:
-        load_python_state(
-            source,
-            ctrl,
-            filename=filename,
-        )
+        with pipeline.deferred_runtime_sync():
+            load_python_state(
+                source,
+                ctrl,
+                filename=filename,
+            )
 
     def save_python_state_file(filename: str) -> str:
         """Save the current state to an explicit server-side path."""
@@ -504,8 +504,8 @@ def initialize_app_controller(
     ctrl.set_representation_kind = set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
     ctrl.set_representation_array = set_representation_array
-    ctrl.set_representation_color = set_representation_color
-    ctrl.set_representation_scalar_range = set_representation_scalar_range
+    ctrl.set_representation_property = set_representation_property
+    ctrl.reset_volume_transfer_function = reset_volume_transfer_function
     ctrl.create_view = create_view
     ctrl.remove_view = remove_view
     ctrl.create_workspace = create_workspace
@@ -531,6 +531,7 @@ def initialize_app_controller(
     ctrl.abort_pipeline = abort_pipeline
 
     server.trigger("delete_active_node")(delete_active_node)
+    server.trigger("execute_pipeline")(execute_pipeline)
 
 
 def _hex_to_rgb(

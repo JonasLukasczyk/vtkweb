@@ -80,12 +80,6 @@ class PipelineExecutionManager:
                     self.pipeline.set_execution_state(node_id, "running")
                     self._flush_state()
 
-                    # Deliberately leave the node in its freshly-pushed
-                    # ``running`` state for a moment before entering VTK.
-                    # This makes scheduler transitions easy to observe in the
-                    # pipeline browser while debugging.
-                    await asyncio.sleep(0.5)
-
                     started_at = datetime.now().astimezone()
                     started_perf = perf_counter()
                     print(
@@ -123,7 +117,7 @@ class PipelineExecutionManager:
                             f"after {elapsed:.3f}s -> failed: {'; '.join(errors)}",
                             flush=True,
                         )
-                        self._fail_queued_downstream(node_id)
+                        self._fail_all_queued()
                         return
 
                     # If a property/input changed while this node was executing,
@@ -159,11 +153,6 @@ class PipelineExecutionManager:
                         self.rendering.ensure_output_representations(node_id)
                     self.rendering.refresh_node(node_id)
                     self._flush_state()
-
-                    # Keep the completed state visible before scheduling the
-                    # next node. This is intentionally outside the measured VTK
-                    # execution duration printed above.
-                    await asyncio.sleep(0.5)
 
                 # Required execution model: graph mutations performed during an
                 # execution are respected by sorting and scanning from the start.
@@ -210,16 +199,6 @@ class PipelineExecutionManager:
         failed = [
             item
             for item in self.pipeline.nodes
-            if self.pipeline.execution_state(item) == "queued"
-        ]
-        self.pipeline.set_execution_states(failed, "failed")
-        self._flush_state()
-
-    def _fail_queued_downstream(self, node_id: str) -> None:
-        downstream = self.pipeline.downstream_subgraph(node_id)
-        failed = [
-            item
-            for item in downstream
             if self.pipeline.execution_state(item) == "queued"
         ]
         self.pipeline.set_execution_states(failed, "failed")

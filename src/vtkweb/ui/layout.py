@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from trame.ui.vuetify3 import (
     SinglePageLayout,
 )
@@ -193,6 +195,33 @@ def build_ui(
         pipeline,
     )
 
+    # Use the same delayed single-press / cancel-on-second-press pattern as
+    # the pipeline view's double-space shortcut. A single Ctrl+Space opens
+    # the node browser after a short delay; a second Ctrl+Space within that
+    # window cancels the pending single action and executes the pipeline.
+    global_space_task: asyncio.Task | None = None
+
+    def global_ctrl_space() -> None:
+        nonlocal global_space_task
+
+        if global_space_task is not None and not global_space_task.done():
+            global_space_task.cancel()
+            global_space_task = None
+            ctrl.execute_pipeline()
+            return
+
+        async def open_after_delay() -> None:
+            nonlocal global_space_task
+            try:
+                await asyncio.sleep(0.25)
+                ctrl.open_node_browser()
+            finally:
+                global_space_task = None
+
+        global_space_task = asyncio.create_task(open_after_delay())
+
+    ctrl.trigger("global_ctrl_space")(global_ctrl_space)
+
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
@@ -253,16 +282,9 @@ def build_ui(
                             tag === 'select' ||
                             target?.isContentEditable;
 
-                        if (
-                            event.ctrlKey &&
-                            event.code === 'Space'
-                        ) {
+                        if (event.ctrlKey && event.code === 'Space' && !event.repeat) {
                             event.preventDefault();
-
-                            trigger(
-                                'open_node_browser'
-                            );
-
+                            trigger('global_ctrl_space');
                             return;
                         }
 
@@ -413,6 +435,7 @@ def build_ui(
                             window.__vtkwebGlobalKeydown
                         );
                     }
+
 
                     // ---------------------------------------------------------
                     // Splitter cleanup

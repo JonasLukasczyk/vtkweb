@@ -441,66 +441,70 @@ def build_pipeline_view(
             node_editor.update_node(node_id, position=position)
 
     sync_task: asyncio.Task | None = None
+    sync_pending = False
     known_nodes: set[str] = set()
     known_edges: set[tuple[str, int, str, int]] = set()
 
     def schedule_sync() -> None:
-        nonlocal sync_task
-        if sync_task is not None:
-            sync_task.cancel()
+        nonlocal sync_task, sync_pending
+        sync_pending = True
+        if sync_task is not None and not sync_task.done():
+            return
 
-        async def sync_view() -> None:
-            nonlocal known_nodes, known_edges
-            await asyncio.sleep(0.05)
+        async def sync_worker() -> None:
+            nonlocal sync_task, sync_pending, known_nodes, known_edges
+            try:
+                while sync_pending:
+                    sync_pending = False
+                    await asyncio.sleep(0)
+                    pipeline_state = state.pipeline
+                    nodes = pipeline_state["nodes"]
+                    edges = pipeline_state["edges"]
+                    current_nodes = set(nodes)
+                    current_edges = {edge_key(edge) for edge in edges}
 
-            pipeline_state = state.pipeline
-            nodes = pipeline_state["nodes"]
-            edges = pipeline_state["edges"]
-            current_nodes = set(nodes)
-            current_edges = {edge_key(edge) for edge in edges}
+                    for source, source_port, target, target_port in (
+                        known_edges - current_edges
+                    ):
+                        node_editor.remove_edge(
+                            source,
+                            target,
+                            source_handle=f"output-{source_port}",
+                            target_handle=f"input-{target_port}",
+                        )
+                    for node_id in known_nodes - current_nodes:
+                        node_editor.remove_node(node_id)
 
-            for source, source_port, target, target_port in known_edges - current_edges:
-                node_editor.remove_edge(
-                    source,
-                    target,
-                    source_handle=f"output-{source_port}",
-                    target_handle=f"input-{target_port}",
-                )
-
-            for node_id in known_nodes - current_nodes:
-                node_editor.remove_node(node_id)
-
-            topology_changed = (
-                current_nodes != known_nodes or current_edges != known_edges
-            )
-
-            for index, (node_id, value) in enumerate(nodes.items()):
-                serialized = node_data(node_id, value, index)
-                if node_id not in known_nodes:
-                    node_editor.add_node(serialized)
-                else:
-                    node_editor.update_node(
-                        node_id,
-                        label=serialized["label"],
-                        data=serialized["data"],
+                    topology_changed = (
+                        current_nodes != known_nodes or current_edges != known_edges
                     )
+                    for index, (node_id, value) in enumerate(nodes.items()):
+                        serialized = node_data(node_id, value, index)
+                        if node_id not in known_nodes:
+                            node_editor.add_node(serialized)
+                        else:
+                            node_editor.update_node(
+                                node_id,
+                                label=serialized["label"],
+                                data=serialized["data"],
+                            )
+                    for edge in edges:
+                        if edge_key(edge) not in known_edges:
+                            node_editor.add_edge(edge_data(edge))
 
-            if current_nodes - known_nodes:
-                await asyncio.sleep(0.05)
+                    known_nodes = current_nodes
+                    known_edges = current_edges
+                    if topology_changed:
+                        await asyncio.sleep(0)
+                        start_positions = current_positions()
+                        end_positions = compute_layout_positions()
+                        await animate_positions(start_positions, end_positions)
+            finally:
+                sync_task = None
+                if sync_pending:
+                    schedule_sync()
 
-            for edge in edges:
-                if edge_key(edge) not in known_edges:
-                    node_editor.add_edge(edge_data(edge))
-
-            known_nodes = current_nodes
-            known_edges = current_edges
-
-            if topology_changed:
-                start_positions = current_positions()
-                end_positions = compute_layout_positions()
-                await animate_positions(start_positions, end_positions)
-
-        sync_task = asyncio.create_task(sync_view())
+        sync_task = asyncio.create_task(sync_worker())
 
     @state.change("pipeline")
     def on_pipeline_change(**_):

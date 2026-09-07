@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import vtk
 
@@ -23,11 +24,13 @@ class VTKViewHandle:
 
 @dataclass
 class VTKRepresentationHandle:
-    mapper: vtk.vtkMapper
-    actor: vtk.vtkActor
+    mapper: Any
+    actor: Any
     kind: str
 
     pipeline_filter: vtk.vtkAlgorithm | None = None
+    color_function: vtk.vtkColorTransferFunction | None = None
+    opacity_function: vtk.vtkPiecewiseFunction | None = None
 
 
 class VTKRenderingBackend(RenderingBackend):
@@ -216,7 +219,10 @@ class VTKRenderingBackend(RenderingBackend):
             source,
             representation.output_port,
         ):
-            view_handle.renderer.AddActor(handle.actor)
+            if representation.kind == "volume":
+                view_handle.renderer.AddVolume(handle.actor)
+            else:
+                view_handle.renderer.AddActor(handle.actor)
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -283,10 +289,13 @@ class VTKRenderingBackend(RenderingBackend):
         has_actor = bool(view_handle.renderer.HasViewProp(handle.actor))
 
         if has_geometry and not has_actor:
-            view_handle.renderer.AddActor(handle.actor)
+            if representation.kind == "volume":
+                view_handle.renderer.AddVolume(handle.actor)
+            else:
+                view_handle.renderer.AddActor(handle.actor)
 
         elif not has_geometry and has_actor:
-            view_handle.renderer.RemoveActor(handle.actor)
+            view_handle.renderer.RemoveViewProp(handle.actor)
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -315,7 +324,7 @@ class VTKRenderingBackend(RenderingBackend):
             return
 
         if view.renderer.HasViewProp(handle.actor):
-            view.renderer.RemoveActor(handle.actor)
+            view.renderer.RemoveViewProp(handle.actor)
 
         # Keepalive actor remains, so this renderer never becomes empty.
         view.renderer.Modified()
@@ -363,10 +372,33 @@ class VTKRenderingBackend(RenderingBackend):
         representation: Representation,
         source: vtk.vtkAlgorithm,
     ) -> VTKRepresentationHandle:
-        mapper = vtk.vtkDataSetMapper()
-
-        pipeline_filter = None
         source_data = source.GetOutputDataObject(representation.output_port)
+
+        if representation.kind == "volume":
+            mapper = vtk.vtkSmartVolumeMapper()
+            if source_data is not None:
+                mapper.SetInputDataObject(source_data)
+
+            color_function = vtk.vtkColorTransferFunction()
+            opacity_function = vtk.vtkPiecewiseFunction()
+            volume_property = vtk.vtkVolumeProperty()
+            volume_property.SetColor(color_function)
+            volume_property.SetScalarOpacity(opacity_function)
+
+            actor = vtk.vtkVolume()
+            actor.SetMapper(mapper)
+            actor.SetProperty(volume_property)
+
+            return VTKRepresentationHandle(
+                mapper=mapper,
+                actor=actor,
+                kind=representation.kind,
+                color_function=color_function,
+                opacity_function=opacity_function,
+            )
+
+        mapper = vtk.vtkDataSetMapper()
+        pipeline_filter = None
 
         if representation.kind == "outline":
             pipeline_filter = vtk.vtkOutlineFilter()
@@ -378,7 +410,6 @@ class VTKRenderingBackend(RenderingBackend):
             mapper.SetInputDataObject(source_data)
 
         actor = vtk.vtkActor()
-
         actor.SetMapper(mapper)
 
         return VTKRepresentationHandle(
@@ -393,6 +424,7 @@ class VTKRenderingBackend(RenderingBackend):
         representation: Representation,
         handle: VTKRepresentationHandle,
     ) -> None:
+        properties = representation.properties
         mapper = handle.mapper
         actor = handle.actor
         prop = actor.GetProperty()
@@ -401,16 +433,106 @@ class VTKRenderingBackend(RenderingBackend):
         # it is visible by definition.
         actor.SetVisibility(1)
 
+        if representation.kind == "volume":
+            volume_property = actor.GetProperty()
+
+            if properties.get("interpolation", "linear") == "nearest":
+                volume_property.SetInterpolationTypeToNearest()
+            else:
+                volume_property.SetInterpolationTypeToLinear()
+
+            if properties.get("shade", True):
+                volume_property.ShadeOn()
+            else:
+                volume_property.ShadeOff()
+            volume_property.SetAmbient(float(properties.get("ambient", 0.1)))
+            volume_property.SetDiffuse(float(properties.get("diffuse", 0.9)))
+            volume_property.SetSpecular(float(properties.get("specular", 0.2)))
+            volume_property.SetSpecularPower(
+                float(properties.get("specular_power", 10.0))
+            )
+
+            if properties.get("blend_mode", "composite") == "maximum":
+                mapper.SetBlendModeToMaximumIntensity()
+            elif properties.get("blend_mode", "composite") == "minimum":
+                mapper.SetBlendModeToMinimumIntensity()
+            else:
+                mapper.SetBlendModeToComposite()
+
+            mapper.SetAutoAdjustSampleDistances(
+                1 if properties.get("auto_adjust_sample_distances", True) else 0
+            )
+            mapper.SetSampleDistance(
+                max(1e-12, float(properties.get("sample_distance", 1.0)))
+            )
+
+            if hasattr(mapper, "SetGlobalIlluminationReach"):
+                mapper.SetGlobalIlluminationReach(
+                    max(
+                        0.0,
+                        min(
+                            1.0, float(properties.get("global_illumination_reach", 0.0))
+                        ),
+                    )
+                )
+            if hasattr(mapper, "SetVolumetricScatteringBlending"):
+                mapper.SetVolumetricScatteringBlending(
+                    max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(
+                                properties.get("volumetric_scattering_blending", 0.0)
+                            ),
+                        ),
+                    )
+                )
+
+            if properties.get("scalar_array") is not None:
+                if properties.get("scalar_association", "point") == "cell":
+                    mapper.SetScalarModeToUseCellFieldData()
+                else:
+                    mapper.SetScalarModeToUsePointFieldData()
+                mapper.SelectScalarArray(properties.get("scalar_array"))
+                if hasattr(mapper, "SetVectorMode"):
+                    mapper.SetVectorMode(0)
+                    mapper.SetVectorComponent(
+                        max(0, int(properties.get("scalar_component", 0)))
+                    )
+
+            scalar_range = properties.get("scalar_range") or (0.0, 1.0)
+            minimum, maximum = scalar_range
+            if maximum <= minimum:
+                maximum = minimum + 1.0
+
+            color_function = handle.color_function
+            opacity_function = handle.opacity_function
+            if color_function is not None:
+                color_function.RemoveAllPoints()
+                color_function.AddRGBPoint(minimum, 0.0, 0.0, 0.0)
+                color_function.AddRGBPoint(maximum, 1.0, 1.0, 1.0)
+                color_function.Modified()
+            if opacity_function is not None:
+                opacity_function.RemoveAllPoints()
+                opacity_function.AddPoint(minimum, 0.0)
+                opacity_function.AddPoint(maximum, 1.0)
+                opacity_function.Modified()
+
+            mapper.Modified()
+            volume_property.Modified()
+            actor.Modified()
+            return
+
         if representation.kind == "wireframe":
             prop.SetRepresentationToWireframe()
         else:
             prop.SetRepresentationToSurface()
 
-        if representation.kind == "outline" or representation.array_name is None:
+        if representation.kind == "outline" or properties.get("scalar_array") is None:
             mapper.ScalarVisibilityOff()
 
             if representation.kind != "outline":
-                color = representation.color.lstrip("#")
+                color = properties.get("color", "#ffffff").lstrip("#")
                 prop.SetColor(
                     int(color[0:2], 16) / 255.0,
                     int(color[2:4], 16) / 255.0,
@@ -424,17 +546,17 @@ class VTKRenderingBackend(RenderingBackend):
 
         mapper.ScalarVisibilityOn()
 
-        if representation.association == "point":
+        if properties.get("scalar_association", "point") == "point":
             mapper.SetScalarModeToUsePointFieldData()
         else:
             mapper.SetScalarModeToUseCellFieldData()
 
-        mapper.SelectColorArray(representation.array_name)
+        mapper.SelectColorArray(properties.get("scalar_array"))
 
         mapper.UseLookupTableScalarRangeOff()
 
-        if representation.scalar_range is not None:
-            mapper.SetScalarRange(*representation.scalar_range)
+        if properties.get("scalar_range") is not None:
+            mapper.SetScalarRange(*properties.get("scalar_range"))
 
         mapper.Modified()
         actor.Modified()

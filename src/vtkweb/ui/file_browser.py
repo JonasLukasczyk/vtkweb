@@ -170,13 +170,13 @@ def initialize_file_browser(
     state.file_browser_property_name = None
     state.file_browser_property_label = ""
     state.file_browser_mode = "file"
-    state.file_browser_context = "property"
-    state.file_browser_save_name = "vtkweb_state.py"
     state.file_browser_current_dir = ""
     state.file_browser_entries = []
     state.file_browser_breadcrumbs = []
     state.file_browser_selected_path = ""
     state.file_browser_error = ""
+    state.file_browser_purpose = "property"
+    state.file_browser_save_name = "state.py"
 
     def load_directory(path: str) -> None:
         try:
@@ -196,13 +196,6 @@ def initialize_file_browser(
                     continue
 
                 if not (is_dir or is_file):
-                    continue
-
-                if (
-                    is_file
-                    and state.file_browser_context == "state_open"
-                    and child.suffix.casefold() != ".py"
-                ):
                     continue
 
                 entries.append(
@@ -268,7 +261,7 @@ def initialize_file_browser(
             start_dir = Path.cwd().resolve()
 
         with state:
-            state.file_browser_context = "property"
+            state.file_browser_purpose = "property"
             state.file_browser_node_id = node_id
             state.file_browser_property_name = name
             state.file_browser_property_label = property_state.get("label", name)
@@ -281,40 +274,25 @@ def initialize_file_browser(
             state.file_browser_selected_path = selected_path
 
     def open_state_file_browser() -> None:
-        """Open the shared browser for loading a vtkweb Python state."""
-
-        start_dir = state.file_browser_current_dir or str(Path.cwd().resolve())
-
         with state:
-            state.file_browser_context = "state_open"
-            state.file_browser_mode = "file"
+            state.file_browser_purpose = "state_open"
             state.file_browser_node_id = None
             state.file_browser_property_name = None
-            state.file_browser_property_label = "Open vtkweb State"
-            state.file_browser_selected_path = ""
+            state.file_browser_property_label = "Open state"
+            state.file_browser_mode = "file"
             state.file_browser_open = True
-
-        load_directory(start_dir)
+        load_directory(state.file_browser_current_dir or str(Path.cwd().resolve()))
 
     def save_state_file_browser() -> None:
-        """Open the shared browser for saving a vtkweb Python state."""
-
-        start_dir = state.file_browser_current_dir or str(Path.cwd().resolve())
-
         with state:
-            state.file_browser_context = "state_save"
-            state.file_browser_mode = "save"
+            state.file_browser_purpose = "state_save"
             state.file_browser_node_id = None
             state.file_browser_property_name = None
-            state.file_browser_property_label = "Save vtkweb State"
-            state.file_browser_selected_path = ""
-            state.file_browser_save_name = "vtkweb_state.py"
+            state.file_browser_property_label = "Save state"
+            state.file_browser_mode = "file"
+            state.file_browser_save_name = state.file_browser_save_name or "state.py"
             state.file_browser_open = True
-
-        load_directory(start_dir)
-
-    def set_file_browser_save_name(value: str) -> None:
-        state.file_browser_save_name = str(value or "")
+        load_directory(state.file_browser_current_dir or str(Path.cwd().resolve()))
 
     def close_file_browser() -> None:
         state.file_browser_open = False
@@ -338,15 +316,14 @@ def initialize_file_browser(
         path: str,
         is_dir: bool,
     ) -> None:
-        # In file/open mode, folders are navigational rather than selectable.
-        if bool(is_dir) and state.file_browser_mode in ("file", "save"):
+        # In file mode, folders are navigational rather than selectable.
+        if bool(is_dir) and state.file_browser_mode == "file":
             state.file_browser_selected_path = ""
             return
 
-        if state.file_browser_context == "state_save" and not bool(is_dir):
-            state.file_browser_save_name = Path(path).name
-
         state.file_browser_selected_path = path
+        if state.file_browser_purpose == "state_save" and not bool(is_dir):
+            state.file_browser_save_name = Path(path).name
 
     def activate_file_browser_entry(
         path: str,
@@ -358,75 +335,35 @@ def initialize_file_browser(
                 state.file_browser_selected_path = str(_safe_resolve(path))
             return
 
-        if state.file_browser_context == "state_save":
-            state.file_browser_save_name = Path(path).name
-            state.file_browser_selected_path = path
-            confirm_file_browser_selection()
-            return
-
         if state.file_browser_mode == "file":
             state.file_browser_selected_path = path
-            confirm_file_browser_selection()
+            if state.file_browser_purpose == "state_save":
+                state.file_browser_save_name = Path(path).name
+            else:
+                confirm_file_browser_selection()
 
     def confirm_file_browser_selection() -> None:
-        context = state.file_browser_context
+        purpose = state.file_browser_purpose
 
-        if context == "state_open":
-            selected = state.file_browser_selected_path
-            if not selected:
+        if purpose == "state_save":
+            filename = str(state.file_browser_save_name or "").strip()
+            if not filename:
+                state.file_browser_error = "Enter a file name."
                 return
-
-            path = _safe_resolve(selected)
-            if not path.is_file():
-                state.file_browser_error = "Please select a Python state file."
-                return
-            if path.suffix.casefold() != ".py":
-                state.file_browser_error = "State files must use the .py extension."
-                return
-
             try:
-                ctrl.open_python_state_file(str(path))
-            except (OSError, ValueError, SyntaxError, TypeError) as exc:
+                selected_path = _safe_resolve(
+                    Path(state.file_browser_current_dir) / filename
+                )
+                ctrl.save_python_state_file(str(selected_path))
+            except (OSError, ValueError, Exception) as exc:
                 state.file_browser_error = str(exc)
                 return
-
             state.file_browser_open = False
-            return
-
-        if context == "state_save":
-            name = str(state.file_browser_save_name or "").strip()
-            if not name:
-                state.file_browser_error = "Please enter a file name."
-                return
-            if not name.casefold().endswith(".py"):
-                name += ".py"
-
-            try:
-                directory = _safe_resolve(state.file_browser_current_dir)
-                path = (directory / name).resolve()
-                ctrl.save_python_state_file(str(path))
-            except (OSError, ValueError) as exc:
-                state.file_browser_error = str(exc)
-                return
-
-            state.file_browser_save_name = path.name
-            state.file_browser_selected_path = str(path)
-            state.file_browser_open = False
-            return
-
-        node_id = state.file_browser_node_id
-        name = state.file_browser_property_name
-
-        if not node_id or not name or node_id not in pipeline.nodes:
             return
 
         selected = state.file_browser_selected_path
-
-        # Directory mode may confirm the directory currently being viewed even
-        # when no row is selected.
         if state.file_browser_mode == "directory" and not selected:
             selected = state.file_browser_current_dir
-
         if not selected:
             return
 
@@ -439,22 +376,29 @@ def initialize_file_browser(
         if state.file_browser_mode == "file" and not selected_path.is_file():
             state.file_browser_error = "Please select a file."
             return
-
         if state.file_browser_mode == "directory" and not selected_path.is_dir():
             state.file_browser_error = "Please select a directory."
             return
 
-        ctrl.set_node_property(
-            node_id,
-            name,
-            str(selected_path),
-        )
+        if purpose == "state_open":
+            try:
+                ctrl.open_python_state_file(str(selected_path))
+            except Exception as exc:
+                state.file_browser_error = str(exc)
+                return
+            state.file_browser_open = False
+            return
+
+        node_id = state.file_browser_node_id
+        name = state.file_browser_property_name
+        if not node_id or not name or node_id not in pipeline.nodes:
+            return
+        pipeline.set_property(node_id, name, str(selected_path))
         state.file_browser_open = False
 
     ctrl.open_file_browser = open_file_browser
     ctrl.open_python_state = open_state_file_browser
     ctrl.save_python_state = save_state_file_browser
-    ctrl.set_file_browser_save_name = set_file_browser_save_name
     ctrl.close_file_browser = close_file_browser
     ctrl.set_file_browser_open = set_file_browser_open
     ctrl.browse_file_browser_directory = browse_file_browser_directory
@@ -479,9 +423,7 @@ def build_file_browser(
         with v3.VCard(classes="vtkweb-file-browser-card"):
             with html.Div(classes="vtkweb-file-browser-header"):
                 html.Div(
-                    "{{ file_browser_context === 'state_open' ? 'Open vtkweb State' "
-                    ": file_browser_context === 'state_save' ? 'Save vtkweb State' "
-                    ": file_browser_mode === 'file' ? 'Select file' : 'Select folder' }}",
+                    "{{ file_browser_purpose === 'state_save' ? 'Save state' : (file_browser_purpose === 'state_open' ? 'Open state' : (file_browser_mode === 'file' ? 'Select file' : 'Select folder')) }}",
                     classes="vtkweb-file-browser-title",
                 )
 
@@ -574,21 +516,18 @@ def build_file_browser(
 
             with html.Div(classes="vtkweb-file-browser-footer"):
                 html.Input(
-                    v_if="file_browser_context === 'state_save'",
+                    v_if="file_browser_purpose === 'state_save'",
                     classes="vtkweb-file-browser-path",
                     value=("file_browser_save_name",),
-                    placeholder="vtkweb_state.py",
-                    input=(
-                        ctrl.set_file_browser_save_name,
-                        "[$event.target.value]",
-                    ),
+                    input="file_browser_save_name = $event.target.value",
                     keydown_enter=ctrl.confirm_file_browser_selection,
+                    placeholder="state.py",
                 )
-
                 html.Div(
-                    "{{ file_browser_selected_path || "
-                    "(file_browser_mode === 'directory' ? file_browser_current_dir : "
-                    "file_browser_context === 'state_save' ? file_browser_current_dir : 'No file selected') }}",
+                    "{{ file_browser_purpose === 'state_save' "
+                    "? file_browser_current_dir "
+                    ": (file_browser_selected_path || "
+                    "(file_browser_mode === 'directory' ? file_browser_current_dir : 'No file selected')) }}",
                     classes="vtkweb-file-browser-selection",
                 )
 
@@ -599,13 +538,11 @@ def build_file_browser(
                     click=ctrl.close_file_browser,
                 )
                 v3.VBtn(
-                    "{{ file_browser_context === 'state_save' ? 'Save' "
-                    ": file_browser_mode === 'file' ? 'Open' : 'Select' }}",
+                    "{{ file_browser_purpose === 'state_save' ? 'Save' : (file_browser_mode === 'file' ? 'Open' : 'Select') }}",
                     size="small",
                     variant="flat",
                     disabled=(
-                        "(file_browser_mode === 'file' && !file_browser_selected_path) || "
-                        "(file_browser_context === 'state_save' && !file_browser_save_name)",
+                        "file_browser_purpose !== 'state_save' && file_browser_mode === 'file' && !file_browser_selected_path",
                     ),
                     click=ctrl.confirm_file_browser_selection,
                 )

@@ -132,7 +132,6 @@ def export_python_state(
                 f"        {node_vars[edge.target_node_id]},",
                 f"        source_port={edge.source_port!r},",
                 f"        target_port={edge.target_port!r},",
-                "        sync=False,",
                 "    )",
             ]
         )
@@ -160,7 +159,6 @@ def export_python_state(
                     f"        {node_vars[node_id]},",
                     f"        {property_name!r},",
                     f"        {value!r},",
-                    "        sync=False,",
                     "    )",
                 ]
             )
@@ -224,35 +222,13 @@ def export_python_state(
             ]
         )
 
-        if representation.array_name is not None:
+        for property_name, property_value in representation.properties.items():
             lines.extend(
                 [
-                    "    ctrl.set_representation_array(",
+                    "    ctrl.set_representation_property(",
                     f"        {variable},",
-                    f"        {representation.array_name!r},",
-                    f"        association={representation.association!r},",
-                    "    )",
-                ]
-            )
-
-        if representation.color != "#ffffff":
-            lines.extend(
-                [
-                    "    ctrl.set_representation_color(",
-                    f"        {variable},",
-                    f"        {representation.color!r},",
-                    "    )",
-                ]
-            )
-
-        if representation.scalar_range is not None:
-            minimum, maximum = representation.scalar_range
-            lines.extend(
-                [
-                    "    ctrl.set_representation_scalar_range(",
-                    f"        {variable},",
-                    f"        {minimum!r},",
-                    f"        {maximum!r},",
+                    f"        {property_name!r},",
+                    f"        {property_value!r},",
                     "    )",
                 ]
             )
@@ -278,15 +254,20 @@ def export_python_state(
             ]
         )
 
-    lines.extend(
-        [
-            "",
-            "    ctrl.finish_state_load()",
-            "",
-        ]
-    )
+    # State files are plain executable statements.  The exporter historically
+    # generated the body inside ``def load(ctrl):``; keep the existing emitter
+    # indentation above and normalize it here so the serialized format stays
+    # simple and readable.
+    body_lines: list[str] = []
+    for line in lines:
+        if line == "def load(ctrl):":
+            continue
+        if line.startswith("    "):
+            line = line[4:]
+        body_lines.append(line)
 
-    return "\n".join(lines)
+    body_lines.append("")
+    return "\n".join(body_lines)
 
 
 def load_python_state(
@@ -295,11 +276,12 @@ def load_python_state(
     *,
     filename: str = "<vtkweb-state>",
 ) -> None:
-    """Execute a vtkweb Python state file and call its ``load(ctrl)`` function.
+    """Execute a vtkweb Python state file with ``ctrl`` available globally.
 
     Python state files are executable Python code. Only load state files from
     sources you trust. This function intentionally does not attempt to sandbox
-    or otherwise restrict the executed code.
+    or otherwise restrict the executed code.  State reconstruction is finalized
+    by this loader after the state statements complete successfully.
     """
 
     if isinstance(source, bytes):
@@ -308,16 +290,13 @@ def load_python_state(
     namespace: dict[str, Any] = {
         "__file__": filename,
         "__name__": "vtkweb_state_file",
+        "ctrl": ctrl,
     }
 
     code = compile(source, filename, "exec")
     exec(code, namespace, namespace)
 
-    load = namespace.get("load")
-    if not callable(load):
-        raise ValueError("Python state file must define callable load(ctrl)")
-
-    load(ctrl)
+    ctrl.finish_state_load()
 
 
 def _export_workspace_node(

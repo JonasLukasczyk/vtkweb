@@ -10,8 +10,7 @@ class WorkspaceManager:
         self.state = state
         self.state.workspace_root_id = None
         self.state.workspace_nodes = {}
-        self.state.workspace_tiles = []
-        self.state.workspace_splitters = []
+        self.state.workspace_geometry = {"tiles": [], "splitters": []}
 
     def create_workspace(self, *, container_id: str | None = None) -> str:
         container_id = container_id or uuid4().hex
@@ -106,8 +105,7 @@ class WorkspaceManager:
         if root_id is not None and root_id in nodes:
             self._walk_geometry(root_id, 0.0, 0.0, 100.0, 100.0, tiles, splitters)
 
-        self.state.workspace_tiles = tiles
-        self.state.workspace_splitters = splitters
+        self.state.workspace_geometry = {"tiles": tiles, "splitters": splitters}
 
     def _walk_geometry(
         self,

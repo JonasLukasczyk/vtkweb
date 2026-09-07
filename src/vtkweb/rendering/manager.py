@@ -16,6 +16,45 @@ from vtkweb.rendering.vtk_backend import (
 )
 
 
+DEFAULT_REPRESENTATION_PROPERTIES = {
+    "scalar_array": None,
+    "scalar_association": "point",
+    "scalar_range": None,
+    "color": "#ffffff",
+    "scalar_component": 0,
+    "interpolation": "linear",
+    "blend_mode": "composite",
+    "shade": True,
+    "ambient": 0.1,
+    "diffuse": 0.9,
+    "specular": 0.2,
+    "specular_power": 10.0,
+    "global_illumination_reach": 0.0,
+    "volumetric_scattering_blending": 0.0,
+    "auto_adjust_sample_distances": True,
+    "sample_distance": 1.0,
+}
+
+LEGACY_PROPERTY_NAMES = {
+    "array_name": "scalar_array",
+    "association": "scalar_association",
+    "scalar_range": "scalar_range",
+    "color": "color",
+    "component": "scalar_component",
+    "volume_interpolation": "interpolation",
+    "volume_blend_mode": "blend_mode",
+    "volume_shade": "shade",
+    "volume_ambient": "ambient",
+    "volume_diffuse": "diffuse",
+    "volume_specular": "specular",
+    "volume_specular_power": "specular_power",
+    "volume_global_illumination_reach": "global_illumination_reach",
+    "volume_scattering_blending": "volumetric_scattering_blending",
+    "volume_auto_adjust_sample_distances": "auto_adjust_sample_distances",
+    "volume_sample_distance": "sample_distance",
+}
+
+
 class RenderManager:
     """Rendering service backed by serializable trame state.
 
@@ -144,6 +183,7 @@ class RenderManager:
         self.state.views = views
         self._slot_owners[backend_id] = view_id
         self.backend.set_view_settings(self._backend_view(view_id))
+        self._notify_render()
         return self.get_view(view_id)
 
     def remove_view(
@@ -154,7 +194,7 @@ class RenderManager:
 
         for representation in tuple(self.representations):
             if view_id in representation.view_ids:
-                self.unassign_representation(representation.id, view_id)
+                self.unassign_representation(representation.id, view_id, notify=False)
 
         backend_id = self.backend_view_id(view_id)
         self._slot_owners[backend_id] = None
@@ -168,6 +208,8 @@ class RenderManager:
                 (view.id for view in self.views),
                 None,
             )
+
+        self._notify_render()
 
     def set_active_view(
         self,
@@ -194,27 +236,24 @@ class RenderManager:
         representation_id: str,
     ) -> Representation:
         value = self.state.representations[representation_id]
+        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
+        properties.update(value.get("properties", {}))
 
-        scalar_range = value.get("scalar_range")
+        # Backward compatibility for state created before representation
+        # properties were collected under the abstract properties mapping.
+        for legacy_name, property_name in LEGACY_PROPERTY_NAMES.items():
+            if legacy_name in value and property_name not in value.get(
+                "properties", {}
+            ):
+                properties[property_name] = value[legacy_name]
 
         return Representation(
             id=value["id"],
             node_id=value["node_id"],
             output_port=int(value["output_port"]),
             kind=value["kind"],
-            array_name=value.get("array_name"),
-            association=value.get(
-                "association",
-                "point",
-            ),
-            scalar_range=(tuple(scalar_range) if scalar_range is not None else None),
-            color=value.get("color", "#ffffff"),
-            view_ids=set(
-                value.get(
-                    "view_ids",
-                    [],
-                )
-            ),
+            properties=properties,
+            view_ids=set(value.get("view_ids", [])),
         )
 
     def get_representations(
@@ -239,6 +278,7 @@ class RenderManager:
         kind: str = "surface",
         view_ids: Iterable[str] = (),
         representation_id: str | None = None,
+        notify: bool = True,
     ) -> Representation:
         if kind not in REPRESENTATION_KINDS:
             raise ValueError(f"Unknown representation kind: {kind}")
@@ -254,20 +294,32 @@ class RenderManager:
             )
 
         representation_id = representation_id or uuid4().hex
+        view_ids = tuple(view_ids)
         if representation_id in self.state.representations:
             raise ValueError(f"Representation ID already exists: {representation_id}")
 
+        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
         value = {
             "id": representation_id,
             "node_id": node_id,
             "output_port": int(output_port),
             "kind": kind,
-            "array_name": None,
-            "association": "point",
-            "scalar_range": None,
-            "color": "#ffffff",
+            "properties": properties,
             "view_ids": [],
         }
+
+        if kind == "volume":
+            arrays = self.get_arrays(node_id, int(output_port))
+            association = "point" if arrays["point"] else "cell"
+            names = arrays[association]
+            if names:
+                properties["scalar_array"] = names[0]
+                properties["scalar_association"] = association
+                scalar_range = self.get_array_range(
+                    node_id, int(output_port), names[0], association
+                )
+                if scalar_range is not None:
+                    properties["scalar_range"] = list(scalar_range)
 
         representations = dict(self.state.representations)
         representations[representation_id] = value
@@ -277,8 +329,11 @@ class RenderManager:
             self.assign_representation(
                 representation_id,
                 view_id,
+                notify=False,
             )
 
+        if notify and view_ids:
+            self._notify_render()
         return self.get_representation(representation_id)
 
     def remove_representation(
@@ -291,6 +346,7 @@ class RenderManager:
             self.unassign_representation(
                 representation_id,
                 view_id,
+                notify=False,
             )
 
         representations = dict(self.state.representations)
@@ -299,6 +355,7 @@ class RenderManager:
             None,
         )
         self.state.representations = representations
+        self._notify_render()
 
     def remove_node(
         self,
@@ -336,6 +393,7 @@ class RenderManager:
                 output_port=output_port,
                 kind="outline",
                 view_ids=view_ids,
+                notify=False,
             )
             created.append(representation.id)
 
@@ -356,7 +414,7 @@ class RenderManager:
         for representation in tuple(self.get_representations(node_id)):
             self._update_representation(representation.id)
 
-        self.state.render_revision = int(self.state.render_revision or 0) + 1
+        self._notify_render()
 
     # -------------------------------------------------------------------------
     # View assignment / visibility
@@ -373,6 +431,8 @@ class RenderManager:
         self,
         representation_id: str,
         view_id: str,
+        *,
+        notify: bool = True,
     ) -> None:
         representation = self.get_representation(representation_id)
 
@@ -400,11 +460,15 @@ class RenderManager:
             representation_id,
             value,
         )
+        if notify:
+            self._notify_render()
 
     def unassign_representation(
         self,
         representation_id: str,
         view_id: str,
+        *,
+        notify: bool = True,
     ) -> None:
         representation = self.get_representation(representation_id)
 
@@ -429,6 +493,8 @@ class RenderManager:
             representation_id,
             value,
         )
+        if notify:
+            self._notify_render()
 
     # -------------------------------------------------------------------------
     # Representation properties
@@ -444,11 +510,51 @@ class RenderManager:
 
         value = dict(self.state.representations[representation_id])
         value["kind"] = kind
+        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
+        properties.update(value.get("properties", {}))
+        if kind == "volume" and properties.get("scalar_array") is None:
+            representation = self.get_representation(representation_id)
+            arrays = self.get_arrays(representation.node_id, representation.output_port)
+            association = "point" if arrays["point"] else "cell"
+            names = arrays[association]
+            if names:
+                properties["scalar_array"] = names[0]
+                properties["scalar_association"] = association
+                scalar_range = self.get_array_range(
+                    representation.node_id,
+                    representation.output_port,
+                    names[0],
+                    association,
+                )
+                if scalar_range is not None:
+                    properties["scalar_range"] = list(scalar_range)
+        value["properties"] = properties
         self._set_representation_state(
             representation_id,
             value,
         )
         self._update_representation(representation_id)
+        self._notify_render()
+
+    def set_representation_property(
+        self,
+        representation_id: str,
+        name: str,
+        value,
+    ) -> None:
+        """Set one renderer-agnostic serialized representation property.
+
+        The manager deliberately does not whitelist consumer-specific keys. A
+        backend reads the properties it understands and ignores the rest.
+        """
+        state_value = dict(self.state.representations[representation_id])
+        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
+        properties.update(state_value.get("properties", {}))
+        properties[str(name)] = value
+        state_value["properties"] = properties
+        self._set_representation_state(representation_id, state_value)
+        self._update_representation(representation_id)
+        self._notify_render()
 
     def set_array(
         self,
@@ -456,8 +562,8 @@ class RenderManager:
         array_name: str | None,
         association: str = "point",
     ) -> None:
+        """Convenience operation for the compound scalar-array selection."""
         representation = self.get_representation(representation_id)
-
         scalar_range = None
         if array_name is not None:
             scalar_range = self.get_array_range(
@@ -465,53 +571,49 @@ class RenderManager:
                 representation.output_port,
                 array_name,
                 association,
+                int(representation.properties.get("scalar_component", 0)),
             )
 
-        value = dict(self.state.representations[representation_id])
-        value.update(
+        state_value = dict(self.state.representations[representation_id])
+        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
+        properties.update(state_value.get("properties", {}))
+        properties.update(
             {
-                "array_name": array_name,
-                "association": association,
-                "scalar_range": (
-                    list(scalar_range) if scalar_range is not None else None
-                ),
+                "scalar_array": array_name,
+                "scalar_association": association,
+                "scalar_range": list(scalar_range)
+                if scalar_range is not None
+                else None,
             }
         )
-        self._set_representation_state(
-            representation_id,
-            value,
-        )
+        state_value["properties"] = properties
+        self._set_representation_state(representation_id, state_value)
         self._update_representation(representation_id)
+        self._notify_render()
 
-    def set_color(
+    def reset_volume_transfer_function(
         self,
         representation_id: str,
-        color: str,
     ) -> None:
-        value = dict(self.state.representations[representation_id])
-        value["color"] = color
-        self._set_representation_state(
-            representation_id,
-            value,
-        )
-        self._update_representation(representation_id)
+        representation = self.get_representation(representation_id)
+        properties = representation.properties
+        array_name = properties.get("scalar_array")
+        if representation.kind != "volume" or array_name is None:
+            return
 
-    def set_scalar_range(
-        self,
-        representation_id: str,
-        minimum: float,
-        maximum: float,
-    ) -> None:
-        value = dict(self.state.representations[representation_id])
-        value["scalar_range"] = [
-            float(minimum),
-            float(maximum),
-        ]
-        self._set_representation_state(
-            representation_id,
-            value,
+        scalar_range = self.get_array_range(
+            representation.node_id,
+            representation.output_port,
+            array_name,
+            properties.get("scalar_association", "point"),
+            int(properties.get("scalar_component", 0)),
         )
-        self._update_representation(representation_id)
+        if scalar_range is None:
+            return
+
+        self.set_representation_property(
+            representation_id, "scalar_range", list(scalar_range)
+        )
 
     # -------------------------------------------------------------------------
     # Output data
@@ -552,6 +654,7 @@ class RenderManager:
         output_port: int,
         array_name: str,
         association: str = "point",
+        component: int | None = None,
     ) -> tuple[float, float] | None:
         processor = self.pipeline.processor(node_id)
         data = processor.GetOutputDataObject(output_port)
@@ -565,7 +668,11 @@ class RenderManager:
         if array is None:
             return None
 
-        minimum, maximum = array.GetRange()
+        if component is None:
+            minimum, maximum = array.GetRange()
+        else:
+            component = max(0, min(int(component), array.GetNumberOfComponents() - 1))
+            minimum, maximum = array.GetRange(component)
         return (
             float(minimum),
             float(maximum),
@@ -588,6 +695,7 @@ class RenderManager:
         self.state.views = views
 
         self.backend.set_view_settings(self._backend_view(view_id))
+        self._notify_render()
 
     def reset_camera(
         self,
@@ -599,6 +707,7 @@ class RenderManager:
             return
 
         self.backend.reset_camera(self.backend_view_id(view_id))
+        self._notify_render()
 
     # -------------------------------------------------------------------------
     # Internal
@@ -634,6 +743,10 @@ class RenderManager:
                 self._backend_view(view_id),
                 node.processor,
             )
+
+    def _notify_render(self) -> None:
+        """Notify client render views after an atomic backend scene change."""
+        self.state.render_revision = int(self.state.render_revision or 0) + 1
 
 
 def _rgb_to_hex(

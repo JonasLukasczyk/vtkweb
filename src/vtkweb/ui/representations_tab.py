@@ -53,19 +53,21 @@ def initialize_representations_tab(
         representation_id: str,
     ) -> None:
         representation = rendering.get_representation(representation_id)
-        if representation.array_name is None:
+        if representation.properties.get("scalar_array") is None:
             return
 
         scalar_range = rendering.get_array_range(
             representation.node_id,
             representation.output_port,
-            representation.array_name,
-            representation.association,
+            representation.properties.get("scalar_array"),
+            representation.properties.get("scalar_association", "point"),
+            int(representation.properties.get("scalar_component", 0)),
         )
         if scalar_range is not None:
-            ctrl.set_representation_scalar_range(
+            rendering.set_representation_property(
                 representation_id,
-                *scalar_range,
+                "scalar_range",
+                list(scalar_range),
             )
 
     ctrl.fit_color_range = fit_color_range
@@ -185,6 +187,7 @@ def build_representations_tab(
                             {"title": "Surface", "value": "surface"},
                             {"title": "Wireframe", "value": "wireframe"},
                             {"title": "Outline", "value": "outline"},
+                            {"title": "Volume", "value": "volume"},
                         ],
                     ),
                     item_title="title",
@@ -199,7 +202,9 @@ def build_representations_tab(
                 )
 
             with html.Div(
-                v_if=("representation.kind !== 'outline'"),
+                v_if=(
+                    "representation.kind !== 'outline' && representation.kind !== 'volume'"
+                ),
                 classes="mt-1",
             ):
                 with html.Div(
@@ -212,10 +217,10 @@ def build_representations_tab(
                     v3.VSelect(
                         classes="vtkweb-compact-select",
                         model_value=(
-                            "representation.array_name === null "
+                            "representation.properties.scalar_array === null "
                             "? 'fixed' "
-                            ": representation.association + ':' + "
-                            "representation.array_name",
+                            ": representation.properties.scalar_association + ':' + "
+                            "representation.properties.scalar_array",
                         ),
                         items=(
                             "[{ title: 'Fixed', value: 'fixed' }, "
@@ -239,7 +244,7 @@ def build_representations_tab(
                     )
 
                 with html.Label(
-                    v_if=("representation.array_name === null"),
+                    v_if=("representation.properties.scalar_array === null"),
                     classes="vtkweb-color-box mt-1",
                 ):
                     html.Span(
@@ -248,40 +253,40 @@ def build_representations_tab(
                     )
                     html.Input(
                         type="color",
-                        value=("representation.color || '#ffffff'",),
+                        value=("representation.properties.color || '#ffffff'",),
                         input=(
-                            ctrl.set_representation_color,
-                            "[representation.id,$event.target.value]",
+                            ctrl.set_representation_property,
+                            "[representation.id,'color',$event.target.value]",
                         ),
                     )
 
                 with html.Div(
-                    v_if=("representation.array_name !== null"),
+                    v_if=("representation.properties.scalar_array !== null"),
                     classes="vtkweb-range-row",
                 ):
                     html.Input(
                         type="number",
                         step="any",
-                        value=("representation.scalar_range?.[0] ?? 0",),
+                        value=("representation.properties.scalar_range?.[0] ?? 0",),
                         classes="vtkweb-range-input",
                         change=(
-                            ctrl.set_representation_scalar_range,
+                            ctrl.set_representation_property,
                             (
-                                "[representation.id,$event.target.value,"
-                                "representation.scalar_range[1]]"
+                                "[representation.id,'scalar_range',[Number($event.target.value),"
+                                "representation.properties.scalar_range[1]]]"
                             ),
                         ),
                     )
                     html.Input(
                         type="number",
                         step="any",
-                        value=("representation.scalar_range?.[1] ?? 1",),
+                        value=("representation.properties.scalar_range?.[1] ?? 1",),
                         classes="vtkweb-range-input",
                         change=(
-                            ctrl.set_representation_scalar_range,
+                            ctrl.set_representation_property,
                             (
-                                "[representation.id,representation.scalar_range[0],"
-                                "$event.target.value]"
+                                "[representation.id,'scalar_range',[representation.properties.scalar_range[0],"
+                                "Number($event.target.value)]]"
                             ),
                         ),
                     )
@@ -291,6 +296,180 @@ def build_representations_tab(
                         click=(
                             ctrl.fit_color_range,
                             "[representation.id]",
+                        ),
+                    )
+
+            # -------------------------------------------------------------
+            # Volume controls
+            # -------------------------------------------------------------
+
+            with html.Div(
+                v_if=("representation.kind === 'volume'"),
+                classes="mt-1",
+            ):
+                with html.Div(classes="vtkweb-select-box"):
+                    html.Span("Scalar", classes="vtkweb-control-label")
+                    v3.VSelect(
+                        classes="vtkweb-compact-select",
+                        model_value=(
+                            "representation.properties.scalar_array === null ? null : "
+                            "representation.properties.scalar_association + ':' + representation.properties.scalar_array",
+                        ),
+                        items=("color_array_items",),
+                        item_title="title",
+                        item_value="value",
+                        density="compact",
+                        variant="plain",
+                        hide_details=True,
+                        update_modelValue=(
+                            ctrl.set_representation_array,
+                            "[representation.id,$event?.split(':')[1] ?? null,"
+                            "$event?.split(':')[0] ?? 'point']",
+                        ),
+                    )
+
+                with html.Div(classes="vtkweb-range-row mt-1"):
+                    html.Span(
+                        "{{ representation.properties.scalar_range?.[0] ?? '—' }} → "
+                        "{{ representation.properties.scalar_range?.[1] ?? '—' }}",
+                        classes="vtkweb-control-label",
+                    )
+                    v3.VBtn(
+                        "Reset B/W",
+                        size="small",
+                        title="Recompute black-white color and linear 0-1 opacity from the current scalar range",
+                        click=(
+                            ctrl.reset_volume_transfer_function,
+                            "[representation.id]",
+                        ),
+                    )
+
+                with html.Label(classes="vtkweb-input-box mt-1"):
+                    html.Span("Component", classes="vtkweb-control-label")
+                    html.Input(
+                        type="number",
+                        min="0",
+                        step="1",
+                        value=("representation.properties.scalar_component ?? 0",),
+                        classes="vtkweb-range-input",
+                        change=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'scalar_component',Number($event.target.value)]",
+                        ),
+                    )
+
+                with html.Div(classes="vtkweb-select-box mt-1"):
+                    html.Span("Interpolation", classes="vtkweb-control-label")
+                    v3.VSelect(
+                        classes="vtkweb-compact-select",
+                        model_value=("representation.properties.interpolation",),
+                        items=(
+                            [
+                                {"title": "Linear", "value": "linear"},
+                                {"title": "Nearest", "value": "nearest"},
+                            ],
+                        ),
+                        item_title="title",
+                        item_value="value",
+                        density="compact",
+                        variant="plain",
+                        hide_details=True,
+                        update_modelValue=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'interpolation',$event]",
+                        ),
+                    )
+
+                with html.Div(classes="vtkweb-select-box mt-1"):
+                    html.Span("Blend", classes="vtkweb-control-label")
+                    v3.VSelect(
+                        classes="vtkweb-compact-select",
+                        model_value=("representation.properties.blend_mode",),
+                        items=(
+                            [
+                                {"title": "Composite", "value": "composite"},
+                                {"title": "Maximum intensity", "value": "maximum"},
+                                {"title": "Minimum intensity", "value": "minimum"},
+                            ],
+                        ),
+                        item_title="title",
+                        item_value="value",
+                        density="compact",
+                        variant="plain",
+                        hide_details=True,
+                        update_modelValue=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'blend_mode',$event]",
+                        ),
+                    )
+
+                with html.Label(classes="vtkweb-bool-row mt-1"):
+                    html.Span("Shading", classes="vtkweb-control-label")
+                    html.Input(
+                        type="checkbox",
+                        checked=("Boolean(representation.properties.shade)",),
+                        change=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'shade',$event.target.checked]",
+                        ),
+                    )
+
+                for label, key, step, minimum, maximum in (
+                    ("Ambient", "ambient", "0.05", "0", "1"),
+                    ("Diffuse", "diffuse", "0.05", "0", "1"),
+                    ("Specular", "specular", "0.05", "0", "1"),
+                    ("Specular power", "specular_power", "1", "1", "100"),
+                    (
+                        "Global illumination",
+                        "global_illumination_reach",
+                        "0.05",
+                        "0",
+                        "1",
+                    ),
+                    ("Scattering", "volumetric_scattering_blending", "0.05", "0", "1"),
+                ):
+                    with html.Label(classes="vtkweb-input-box mt-1"):
+                        html.Span(label, classes="vtkweb-control-label")
+                        html.Input(
+                            type="number",
+                            step=step,
+                            min=minimum,
+                            max=maximum,
+                            value=(f"representation.properties.{key}",),
+                            classes="vtkweb-range-input",
+                            change=(
+                                ctrl.set_representation_property,
+                                f"[representation.id,'{key}',Number($event.target.value)]",
+                            ),
+                        )
+
+                with html.Label(classes="vtkweb-bool-row mt-1"):
+                    html.Span("Auto sample distance", classes="vtkweb-control-label")
+                    html.Input(
+                        type="checkbox",
+                        checked=(
+                            "Boolean(representation.properties.auto_adjust_sample_distances)",
+                        ),
+                        change=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'auto_adjust_sample_distances',$event.target.checked]",
+                        ),
+                    )
+
+                with html.Div(
+                    v_if=("!representation.properties.auto_adjust_sample_distances"),
+                    classes="vtkweb-input-box mt-1",
+                ):
+                    html.Span("Sample distance", classes="vtkweb-control-label")
+                    html.Input(
+                        type="number",
+                        min="0.000001",
+                        step="any",
+                        value=("representation.properties.sample_distance",),
+                        classes="vtkweb-range-input",
+                        change=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'sample_distance',Number($event.target.value)]",
                         ),
                     )
 
@@ -306,8 +485,9 @@ def build_representations_tab(
             "surface",
             "wireframe",
             "outline",
+            "volume",
         ):
-            with v3.VCol(cols=4):
+            with v3.VCol(cols=3):
                 v3.VBtn(
                     kind.title(),
                     block=True,
