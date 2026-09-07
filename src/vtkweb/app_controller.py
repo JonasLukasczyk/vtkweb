@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from pathlib import Path
 
 from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
+from vtkweb.execution import PipelineExecutionManager
 from vtkweb.rendering import RenderManager
 from vtkweb.state import export_python_state, load_python_state
 from vtkweb.views import ViewManager
@@ -21,6 +23,8 @@ def initialize_app_controller(
 ) -> None:
     state = server.state
     ctrl = server.controller
+    execution = PipelineExecutionManager(state, pipeline, rendering)
+    execution_task: asyncio.Task | None = None
 
     # -------------------------------------------------------------------------
     # Primitive application commands
@@ -72,9 +76,6 @@ def initialize_app_controller(
             value,
             sync=sync,
         )
-
-        if sync:
-            rendering.refresh_node(node_id)
 
     def set_node_vector_component(
         node_id: str,
@@ -373,13 +374,9 @@ def initialize_app_controller(
                 target_port=0,
             )
 
-        if processor.GetNumberOfOutputPorts() > 0:
-            add_representation(
-                node_id,
-                output_port=0,
-                kind="outline",
-                view_ids={state.active_view_id},
-            )
+        # Representations are intentionally not created at node insertion time.
+        # The execution manager creates an outline for each output port after
+        # the node completes its first successful execution.
 
         ctrl.close_node_browser()
 
@@ -390,7 +387,6 @@ def initialize_app_controller(
         # is first attached.
         pipeline.sync_node_from_runtime(node_id)
         set_active_node(node_id)
-        rendering.reset_camera(state.active_view_id)
 
     def delete_node(
         node_id: str,
@@ -430,19 +426,31 @@ def initialize_app_controller(
         state.active_representation_output_port = 0
 
     def finish_state_load() -> None:
-        """Execute and synchronize processors after reconstruction is complete."""
+        """Finish reconstruction without executing the computational pipeline."""
 
-        # State replay sets properties with sync=False so partially restored
-        # readers/filters are not executed after every individual property.
-        # Once all connections and properties exist, update each processor and
-        # then pull its authoritative metadata into UI state.
         for node_id in pipeline.nodes:
-            processor = pipeline.processor(node_id)
-            processor.Update()
+            pipeline.mark_modified(node_id, include_downstream=False)
             pipeline.sync_node_from_runtime(node_id)
 
-        if rendering.active_view_id is not None:
-            rendering.reset_camera(rendering.active_view_id)
+    def execute_pipeline() -> None:
+        nonlocal execution_task
+        if execution_task is not None and not execution_task.done():
+            return
+
+        execution_task = asyncio.create_task(execution.execute())
+
+        def consume_result(task: asyncio.Task) -> None:
+            nonlocal execution_task
+            execution_task = None
+            try:
+                task.result()
+            except Exception as exc:
+                print(f"Pipeline execution failed: {exc}")
+
+        execution_task.add_done_callback(consume_result)
+
+    def abort_pipeline() -> None:
+        execution.abort()
 
     def export_state_source() -> str:
         return export_python_state(pipeline, rendering, views, workspace)
@@ -519,6 +527,8 @@ def initialize_app_controller(
     ctrl.load_python_state = load_state_source
     ctrl.save_python_state_file = save_python_state_file
     ctrl.open_python_state_file = open_python_state_file
+    ctrl.execute_pipeline = execute_pipeline
+    ctrl.abort_pipeline = abort_pipeline
 
     server.trigger("delete_active_node")(delete_active_node)
 

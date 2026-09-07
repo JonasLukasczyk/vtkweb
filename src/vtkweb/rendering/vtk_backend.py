@@ -84,9 +84,9 @@ class VTKRenderingBackend(RenderingBackend):
 
         keepalive_source.SetPhiResolution(8)
 
+        keepalive_source.Update()
         keepalive_mapper = vtk.vtkPolyDataMapper()
-
-        keepalive_mapper.SetInputConnection(keepalive_source.GetOutputPort())
+        keepalive_mapper.SetInputDataObject(keepalive_source.GetOutputDataObject(0))
 
         keepalive_actor = vtk.vtkActor()
 
@@ -234,6 +234,18 @@ class VTKRenderingBackend(RenderingBackend):
 
         handle = self._representations.get(key)
 
+        if handle is not None:
+            source_data = source.GetOutputDataObject(representation.output_port)
+            if handle.pipeline_filter is not None:
+                if source_data is not None:
+                    handle.pipeline_filter.SetInputDataObject(source_data)
+                    handle.pipeline_filter.Update()
+                    handle.mapper.SetInputDataObject(
+                        handle.pipeline_filter.GetOutputDataObject(0)
+                    )
+            elif source_data is not None:
+                handle.mapper.SetInputDataObject(source_data)
+
         if handle is None:
             self.add_representation(
                 representation,
@@ -331,8 +343,6 @@ class VTKRenderingBackend(RenderingBackend):
             except Exception:
                 pass
 
-        source.Update()
-
         output = source.GetOutputDataObject(output_port)
 
         if output is None:
@@ -356,18 +366,16 @@ class VTKRenderingBackend(RenderingBackend):
         mapper = vtk.vtkDataSetMapper()
 
         pipeline_filter = None
-
-        source_port = source.GetOutputPort(representation.output_port)
+        source_data = source.GetOutputDataObject(representation.output_port)
 
         if representation.kind == "outline":
             pipeline_filter = vtk.vtkOutlineFilter()
-
-            pipeline_filter.SetInputConnection(source_port)
-
-            mapper.SetInputConnection(pipeline_filter.GetOutputPort(0))
-
-        else:
-            mapper.SetInputConnection(source_port)
+            if source_data is not None:
+                pipeline_filter.SetInputDataObject(source_data)
+                pipeline_filter.Update()
+                mapper.SetInputDataObject(pipeline_filter.GetOutputDataObject(0))
+        elif source_data is not None:
+            mapper.SetInputDataObject(source_data)
 
         actor = vtk.vtkActor()
 

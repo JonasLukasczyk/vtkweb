@@ -316,7 +316,9 @@ def build_render_view(
             raw_attrs=['@mousedown="window.__vtkwebStartTileResize(splitter, $event)"'],
         )
 
-    @state.change("pipeline", "representations", "views", "workspace_tiles")
+    @state.change(
+        "pipeline", "representations", "views", "workspace_tiles", "render_revision"
+    )
     def update_render_views(**_):
         for slot_id, widget in vtk_widgets_by_slot.items():
             if state.vtk_slot_layout.get(slot_id) is not None:

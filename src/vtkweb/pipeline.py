@@ -102,6 +102,7 @@ class PipelineGraph:
         }
 
         self.state.active_node_id = None
+        self._modification_versions: dict[str, int] = {}
 
     # -------------------------------------------------------------------------
     # State access
@@ -168,6 +169,7 @@ class PipelineGraph:
         """Clear pipeline state without inspecting or executing processors."""
 
         self._processors.clear()
+        self._modification_versions.clear()
         self.state.pipeline = {
             "nodes": {},
             "edges": [],
@@ -191,6 +193,7 @@ class PipelineGraph:
             raise ValueError(f"Node ID already exists: {node_id}")
 
         self._processors[node_id] = processor
+        self._modification_versions[node_id] = 1
 
         node = {
             "id": node_id,
@@ -200,6 +203,7 @@ class PipelineGraph:
             "output_port_count": (processor.GetNumberOfOutputPorts()),
             "properties": {},
             "input_arrays": {},
+            "execution_state": "modified",
         }
 
         pipeline_state = dict(self.state.pipeline)
@@ -269,10 +273,12 @@ class PipelineGraph:
             node_id,
             None,
         )
+        self._modification_versions.pop(node_id, None)
 
         for target_node_id in affected_targets:
             if target_node_id in nodes:
-                self._sync_inputs(target_node_id)
+                self.mark_modified(target_node_id)
+                self.bind_inputs(target_node_id)
                 self.sync_node_from_runtime(target_node_id)
 
         if self.active_node_id == node_id:
@@ -320,7 +326,8 @@ class PipelineGraph:
 
         self.state.pipeline = pipeline_state
 
-        self._sync_inputs(target_node_id)
+        self.mark_modified(target_node_id)
+        self.bind_inputs(target_node_id)
 
         if sync:
             self.sync_node_from_runtime(target_node_id)
@@ -343,8 +350,8 @@ class PipelineGraph:
 
         self.state.pipeline = pipeline_state
 
-        self._sync_inputs(edge.target_node_id)
-
+        self.mark_modified(edge.target_node_id)
+        self.bind_inputs(edge.target_node_id)
         self.sync_node_from_runtime(edge.target_node_id)
 
     def incoming_edges(
@@ -352,6 +359,57 @@ class PipelineGraph:
         node_id: str,
     ) -> list[PipelineEdge]:
         return [edge for edge in self.edges if edge.target_node_id == node_id]
+
+    def outgoing_edges(
+        self,
+        node_id: str,
+    ) -> list[PipelineEdge]:
+        return [edge for edge in self.edges if edge.source_node_id == node_id]
+
+    def bind_inputs(
+        self,
+        target_node_id: str,
+    ) -> None:
+        """Materialize model edges as concrete VTK data-object inputs.
+
+        This deliberately performs *wiring only*. It never calls ``Update()`` or
+        ``UpdateInformation()``. Connected filters can therefore inspect their
+        current (possibly stale) input data for array metadata, bounds, and
+        similar UI helpers without handing execution back to VTK's executive.
+        """
+
+        target = self.processor(target_node_id)
+
+        for port in range(target.GetNumberOfInputPorts()):
+            target.RemoveAllInputConnections(port)
+
+        by_port: dict[int, list[vtk.vtkDataObject]] = {}
+        for edge in self.incoming_edges(target_node_id):
+            source = self.processor(edge.source_node_id)
+            data = source.GetOutputDataObject(edge.source_port)
+            if data is not None:
+                by_port.setdefault(edge.target_port, []).append(data)
+
+        for port, inputs in by_port.items():
+            if not inputs:
+                continue
+            target.SetInputDataObject(port, inputs[0])
+            for data in inputs[1:]:
+                target.AddInputDataObject(port, data)
+
+        target.Modified()
+
+    def bind_downstream_inputs(
+        self,
+        source_node_id: str,
+    ) -> None:
+        """Rebind targets to the source node's latest output objects."""
+
+        target_ids = {
+            edge.target_node_id for edge in self.outgoing_edges(source_node_id)
+        }
+        for target_node_id in target_ids:
+            self.bind_inputs(target_node_id)
 
     # -------------------------------------------------------------------------
     # Properties / input arrays
@@ -455,8 +513,8 @@ class PipelineGraph:
             value,
         )
 
+        self.mark_modified(node_id)
         if sync:
-            processor.Update()
             self.sync_node_from_runtime(node_id)
 
     def set_vector_component(
@@ -563,29 +621,106 @@ class PipelineGraph:
             value,
         )
 
-        processor.Update()
-
+        self.mark_modified(node_id)
         self.sync_node_from_runtime(node_id)
 
     # -------------------------------------------------------------------------
-    # Runtime VTK connectivity
+    # Execution state / graph traversal
     # -------------------------------------------------------------------------
 
-    def _sync_inputs(
-        self,
-        target_node_id: str,
-    ) -> None:
-        target = self.processor(target_node_id)
+    def execution_state(self, node_id: str) -> str:
+        return self.node_state(node_id).get("execution_state", "modified")
 
-        for port in range(target.GetNumberOfInputPorts()):
-            target.RemoveAllInputConnections(port)
+    def modification_version(self, node_id: str) -> int:
+        return self._modification_versions.get(node_id, 0)
 
-        for edge in self.incoming_edges(target_node_id):
-            source = self.processor(edge.source_node_id)
+    def set_execution_state(self, node_id: str, execution_state: str) -> None:
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
+        node = dict(nodes[node_id])
+        node["execution_state"] = execution_state
+        nodes[node_id] = node
+        pipeline_state["nodes"] = nodes
+        self.state.pipeline = pipeline_state
 
-            target.AddInputConnection(
-                edge.target_port,
-                source.GetOutputPort(edge.source_port),
+    def set_execution_states(self, node_ids, execution_state: str) -> None:
+        node_ids = list(node_ids)
+        if not node_ids:
+            return
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
+        for node_id in node_ids:
+            if node_id not in nodes:
+                continue
+            node = dict(nodes[node_id])
+            node["execution_state"] = execution_state
+            nodes[node_id] = node
+        pipeline_state["nodes"] = nodes
+        self.state.pipeline = pipeline_state
+
+    def mark_modified(self, node_id: str, *, include_downstream: bool = True) -> None:
+        affected = (
+            self.downstream_subgraph(node_id) if include_downstream else {node_id}
+        )
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
+        for affected_id in affected:
+            if affected_id not in nodes:
+                continue
+            self._modification_versions[affected_id] = (
+                self.modification_version(affected_id) + 1
             )
+            node = dict(nodes[affected_id])
+            # Preserve running so the UI keeps showing execution; the version
+            # makes the scheduler return it to modified after Update().
+            if node.get("execution_state") != "running":
+                node["execution_state"] = "modified"
+            nodes[affected_id] = node
+        pipeline_state["nodes"] = nodes
+        self.state.pipeline = pipeline_state
 
-        target.Modified()
+    def modified_node_ids(self) -> list[str]:
+        return [
+            node_id
+            for node_id in self.nodes
+            if self.execution_state(node_id) == "modified"
+        ]
+
+    def downstream_subgraph(self, node_id: str) -> set[str]:
+        result = {node_id}
+        stack = [node_id]
+        edges = self.edges
+        while stack:
+            current = stack.pop()
+            for edge in edges:
+                if edge.source_node_id == current and edge.target_node_id not in result:
+                    result.add(edge.target_node_id)
+                    stack.append(edge.target_node_id)
+        return result
+
+    def topological_order(self) -> list[str]:
+        node_ids = list(self.state.pipeline["nodes"])
+        indegree = {node_id: 0 for node_id in node_ids}
+        outgoing = {node_id: [] for node_id in node_ids}
+        for edge in self.edges:
+            if (
+                edge.source_node_id not in indegree
+                or edge.target_node_id not in indegree
+            ):
+                continue
+            indegree[edge.target_node_id] += 1
+            outgoing[edge.source_node_id].append(edge.target_node_id)
+
+        queue = [node_id for node_id in node_ids if indegree[node_id] == 0]
+        order = []
+        while queue:
+            node_id = queue.pop(0)
+            order.append(node_id)
+            for target in outgoing[node_id]:
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    queue.append(target)
+
+        if len(order) != len(node_ids):
+            raise RuntimeError("Pipeline graph contains a cycle")
+        return order

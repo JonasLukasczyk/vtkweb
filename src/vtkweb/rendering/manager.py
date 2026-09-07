@@ -37,6 +37,10 @@ class RenderManager:
         self.state.views = {}
         self.state.representations = {}
         self.state.active_view_id = None
+        # Monotonic notification used by VtkLocalView adapters. Backend-only
+        # representation refreshes do not otherwise mutate Trame state, so the
+        # client would have no reason to pull the updated render window.
+        self.state.render_revision = 0
 
         # VtkLocalView components are created once when the Trame UI is built.
         # Keep a small pool of backend render windows alive and map logical
@@ -303,21 +307,56 @@ class RenderManager:
         for representation in list(self.get_representations(node_id)):
             self.remove_representation(representation.id)
 
+    def ensure_output_representations(
+        self,
+        node_id: str,
+    ) -> tuple[str, ...]:
+        """Create missing post-execution output representations as outlines.
+
+        Nodes intentionally have no default representations while they are
+        merely configured. After a successful execution, each output port that
+        still has no representation receives exactly one outline representation.
+        If the active view is a VTK view, the new representation is shown there.
+        """
+
+        node = self.pipeline.nodes[node_id]
+        active_view_id = self.active_view_id
+        view_ids: tuple[str, ...] = ()
+        if active_view_id is not None:
+            view = self.state.views.get(active_view_id)
+            if view is not None and view.get("type") == "vtk":
+                view_ids = (active_view_id,)
+
+        created = []
+        for output_port in range(node.processor.GetNumberOfOutputPorts()):
+            if self.get_representations(node_id, output_port):
+                continue
+            representation = self.add_representation(
+                node_id,
+                output_port=output_port,
+                kind="outline",
+                view_ids=view_ids,
+            )
+            created.append(representation.id)
+
+        return tuple(created)
+
     def refresh_node(
         self,
         node_id: str,
     ) -> None:
         """Refresh every render representation backed by *node_id*.
 
-        Pipeline property changes can turn a previously non-renderable source
-        into a valid one (for example after assigning FileName on a VTK XML
-        reader). Refreshing here lets the backend add/remove actors to match the
-        processor's current output without coupling the pipeline model to a
-        rendering backend.
+        This operation changes backend VTK objects without necessarily changing
+        serialized representation state. ``render_revision`` therefore changes
+        after the backend is current so VtkLocalView pushes the new scene to the
+        browser immediately rather than waiting for a camera interaction.
         """
 
         for representation in tuple(self.get_representations(node_id)):
             self._update_representation(representation.id)
+
+        self.state.render_revision = int(self.state.render_revision or 0) + 1
 
     # -------------------------------------------------------------------------
     # View assignment / visibility
@@ -484,8 +523,6 @@ class RenderManager:
         output_port: int,
     ) -> dict[str, list[str]]:
         processor = self.pipeline.processor(node_id)
-        processor.Update()
-
         data = processor.GetOutputDataObject(output_port)
         result = {
             "point": [],
@@ -517,8 +554,6 @@ class RenderManager:
         association: str = "point",
     ) -> tuple[float, float] | None:
         processor = self.pipeline.processor(node_id)
-        processor.Update()
-
         data = processor.GetOutputDataObject(output_port)
         if data is None:
             return None
@@ -560,6 +595,8 @@ class RenderManager:
     ) -> None:
         if view_id is None:
             view_id = self.active_view_id
+        if view_id is None:
+            return
 
         self.backend.reset_camera(self.backend_view_id(view_id))
 

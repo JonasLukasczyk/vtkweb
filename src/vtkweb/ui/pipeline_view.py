@@ -23,7 +23,7 @@ PIPELINE_VIEW_STYLE = """
 
 .vtkweb-pipeline-node {
     position: relative;
-    background: #434343;
+    background-color: #313844 !important;
 
     display: inline-flex;
     align-items: center;
@@ -33,10 +33,78 @@ PIPELINE_VIEW_STYLE = """
 
     min-width: 0;
     width: fit-content;
+
+    /* Keep execution-state styling from changing node geometry. Selection is
+       rendered with an inset shadow rather than a real border. */
+    border: none !important;
+    box-sizing: border-box;
 }
 
+/* Selection is orthogonal to execution state. Using an inset shadow makes it
+   look like a border without changing the node size or handle positions. */
 .vtkweb-pipeline-node-active {
-    background: #125288 !important;
+    box-shadow: inset 0 0 0 3px #58a6ff !important;
+}
+
+/* Modified/dirty nodes keep the normal dark pipeline-node appearance. */
+.vtkweb-pipeline-node-modified {
+    background-color: #313844 !important;
+}
+
+/* Queued/scheduled nodes are intentionally quiet: they are waiting, not
+   actively doing work. */
+.vtkweb-pipeline-node-queued {
+    background-color: #536273 !important;
+    color: #f4f7fb !important;
+}
+
+/* Running is the only animated execution state. The moving gradient lives on
+   the node background itself, so it cannot affect layout or handle geometry. */
+.vtkweb-pipeline-node-running {
+    color: #f7f9fc !important;
+    background-color: #536273 !important;
+    background-image: linear-gradient(
+        110deg,
+        #536273 0%,
+        #536273 32%,
+        #71849a 44%,
+        #91a4b8 50%,
+        #71849a 56%,
+        #536273 68%,
+        #536273 100%
+    ) !important;
+    background-repeat: no-repeat !important;
+    background-size: 220% 100% !important;
+    background-position: 100% 0;
+    animation: vtkweb-running-gradient 1.1s linear infinite !important;
+    will-change: background-position;
+}
+
+.vtkweb-pipeline-node-failed {
+    background-color: #6b3942 !important;
+    color: #fff5f6 !important;
+}
+
+.vtkweb-pipeline-node-success {
+    background-color: #3f554d !important;
+    color: #f4faf7 !important;
+}
+
+@keyframes vtkweb-running-gradient {
+    0% {
+        background-position: 100% 0;
+    }
+    100% {
+        background-position: -100% 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .vtkweb-pipeline-node-running {
+        animation: none;
+        background-color: #607184 !important;
+        background-image: none !important;
+    }
 }
 
 .vue-flow__handle.vtkweb-pipeline-handle {
@@ -145,6 +213,7 @@ def build_pipeline_view(
                         classes=(
                             (
                                 "'pa-1 vtkweb-pipeline-node ' + "
+                                "('vtkweb-pipeline-node-' + node.data.execution_state) + ' ' + "
                                 "("
                                 "node.id === active_node_id "
                                 "? 'vtkweb-pipeline-node-active' "
@@ -249,6 +318,7 @@ def build_pipeline_view(
             "data": {
                 "input_port_count": int(value["input_port_count"]),
                 "output_port_count": int(value["output_port_count"]),
+                "execution_state": value.get("execution_state", "modified"),
             },
             "position": {
                 "x": 100,
@@ -400,9 +470,20 @@ def build_pipeline_view(
             for node_id in known_nodes - current_nodes:
                 node_editor.remove_node(node_id)
 
+            topology_changed = (
+                current_nodes != known_nodes or current_edges != known_edges
+            )
+
             for index, (node_id, value) in enumerate(nodes.items()):
+                serialized = node_data(node_id, value, index)
                 if node_id not in known_nodes:
-                    node_editor.add_node(node_data(node_id, value, index))
+                    node_editor.add_node(serialized)
+                else:
+                    node_editor.update_node(
+                        node_id,
+                        label=serialized["label"],
+                        data=serialized["data"],
+                    )
 
             if current_nodes - known_nodes:
                 await asyncio.sleep(0.05)
@@ -414,9 +495,10 @@ def build_pipeline_view(
             known_nodes = current_nodes
             known_edges = current_edges
 
-            start_positions = current_positions()
-            end_positions = compute_layout_positions()
-            await animate_positions(start_positions, end_positions)
+            if topology_changed:
+                start_positions = current_positions()
+                end_positions = compute_layout_positions()
+                await animate_positions(start_positions, end_positions)
 
         sync_task = asyncio.create_task(sync_view())
 
