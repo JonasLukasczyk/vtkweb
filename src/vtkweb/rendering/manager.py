@@ -43,7 +43,9 @@ class RenderManager:
         # vtk views onto those slots. Logical view IDs remain fully dynamic and
         # serializable while the client-side VTK components stay stable.
         self._slot_ids = tuple(f"vtk_slot_{index}" for index in range(8))
-        self._slot_owners: dict[str, str | None] = {slot: None for slot in self._slot_ids}
+        self._slot_owners: dict[str, str | None] = {
+            slot: None for slot in self._slot_ids
+        }
         for slot_id in self._slot_ids:
             self.backend.add_view(RenderView(id=slot_id, name=slot_id))
 

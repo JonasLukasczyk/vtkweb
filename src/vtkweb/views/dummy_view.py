@@ -12,7 +12,8 @@ def register(registry, state) -> None:
         views[view_id] = {
             "id": view_id,
             "type": "dummy",
-            "name": name or f"Dummy {sum(v.get('type') == 'dummy' for v in views.values()) + 1}",
+            "name": name
+            or f"Dummy {sum(v.get('type') == 'dummy' for v in views.values()) + 1}",
             "message": kwargs.get("message", "Dummy view"),
         }
         state.views = views

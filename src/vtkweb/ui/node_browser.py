@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trame.widgets import client
 from trame.widgets import html
 from trame.widgets import vuetify3 as v3
 
@@ -84,6 +85,12 @@ def initialize_node_browser(
     state.node_browser_query = ""
     state.node_browser_selected = 0
 
+    # Incremented on every open request.
+    #
+    # This gives the client a reliable event for focusing the search input,
+    # independent of whether the dialog's boolean state changed.
+    state.node_browser_focus_epoch = 0
+
     # -------------------------------------------------------------------------
     # Events
     # -------------------------------------------------------------------------
@@ -93,10 +100,17 @@ def initialize_node_browser(
             state.node_browser_query = ""
             state.node_browser_items = state.node_catalog_items
             state.node_browser_selected = 0
+
+            state.node_browser_focus_epoch += 1
             state.node_browser_open = True
 
     def close_node_browser() -> None:
         state.node_browser_open = False
+
+    def set_node_browser_open(
+        value: bool,
+    ) -> None:
+        state.node_browser_open = bool(value)
 
     def set_node_browser_query(
         query: str,
@@ -152,13 +166,11 @@ def initialize_node_browser(
     # -------------------------------------------------------------------------
 
     ctrl.open_node_browser = open_node_browser
-
     ctrl.close_node_browser = close_node_browser
 
+    ctrl.set_node_browser_open = set_node_browser_open
     ctrl.set_node_browser_query = set_node_browser_query
-
     ctrl.set_node_browser_selected = set_node_browser_selected
-
     ctrl.node_browser_keydown = node_browser_keydown
 
     server.trigger("open_node_browser")(open_node_browser)
@@ -168,10 +180,27 @@ def build_node_browser(
     state,
     ctrl,
 ) -> None:
+    client.ClientStateChange(
+        value="node_browser_focus_epoch",
+        change="""
+            $nextTick(() => {
+                const input =
+                    window.document.getElementById(
+                        'vtkweb-node-search'
+                    );
+
+                input?.focus();
+            });
+        """,
+    )
+
     with v3.VDialog(
         model_value=("node_browser_open",),
         width=600,
-        update_modelValue="node_browser_open = $event",
+        update_modelValue=(
+            ctrl.set_node_browser_open,
+            "[$event]",
+        ),
     ):
         with v3.VCard(
             classes="pa-3",
@@ -179,7 +208,6 @@ def build_node_browser(
         ):
             html.Input(
                 id="vtkweb-node-search",
-                autofocus=True,
                 placeholder="Add source or filter...",
                 value=("node_browser_query",),
                 classes="vtkweb-node-search",
@@ -219,11 +247,11 @@ def build_node_browser(
                     ),
                 ):
                     html.Div(
-                        "{{ item.title }}",
+                        "{{ item.class_name }}",
                         classes="vtkweb-node-title",
                     )
 
-                    html.Div(
-                        ("{{ item.category }} · {{ item.class_name }}"),
-                        classes="vtkweb-node-class",
-                    )
+                    # html.Div(
+                    #     "{{ item.category }} · {{ item.class_name }}",
+                    #     classes="vtkweb-node-class",
+                    # )

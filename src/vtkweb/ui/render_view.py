@@ -237,9 +237,7 @@ def build_render_view(
             with html.Div(
                 classes="vtkweb-vtk-slot",
                 v_show=(f"vtk_slot_layout['{slot_id}'] !== null",),
-                style=(
-                    f"(vtk_slot_layout['{slot_id}']?.style || '') + 'z-index:10;'",
-                ),
+                style=(f"(vtk_slot_layout['{slot_id}']?.style || '') + 'z-index:10;'",),
                 click=(
                     ctrl.set_active_view,
                     f"[vtk_slot_layout['{slot_id}'].view_id]",
@@ -300,9 +298,7 @@ def build_render_view(
             v_for=("splitter in workspace_splitters", "splitter.id"),
             classes=("['vtkweb-tile-splitter', splitter.orientation]",),
             style=("splitter.style",),
-            raw_attrs=[
-                '@mousedown="window.__vtkwebStartTileResize(splitter, $event)"'
-            ],
+            raw_attrs=['@mousedown="window.__vtkwebStartTileResize(splitter, $event)"'],
         )
 
     @state.change("pipeline", "representations", "views", "workspace_tiles")

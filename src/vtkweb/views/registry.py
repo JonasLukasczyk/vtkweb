@@ -14,7 +14,9 @@ class ViewRegistry:
     def __init__(self) -> None:
         self._types: dict[str, ViewType] = {}
 
-    def register(self, name: str, *, create: Callable[..., str], remove: Callable[[str], None]) -> None:
+    def register(
+        self, name: str, *, create: Callable[..., str], remove: Callable[[str], None]
+    ) -> None:
         if name in self._types:
             raise ValueError(f"View type already registered: {name}")
         self._types[name] = ViewType(create=create, remove=remove)
@@ -24,7 +26,9 @@ class ViewRegistry:
             view_type = self._types[type_name]
         except KeyError as exc:
             available = ", ".join(sorted(self._types))
-            raise ValueError(f"Unknown view type '{type_name}'. Available: {available}") from exc
+            raise ValueError(
+                f"Unknown view type '{type_name}'. Available: {available}"
+            ) from exc
         return view_type.create(**kwargs)
 
     def remove(self, name: str, view_id: str) -> None:

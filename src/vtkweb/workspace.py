@@ -139,8 +139,18 @@ class WorkspaceManager:
         if orientation == "vertical":
             first_width = width * ratio
             second_width = width - first_width
-            self._walk_geometry(node["first"], x, y, first_width, height, tiles, splitters)
-            self._walk_geometry(node["second"], x + first_width, y, second_width, height, tiles, splitters)
+            self._walk_geometry(
+                node["first"], x, y, first_width, height, tiles, splitters
+            )
+            self._walk_geometry(
+                node["second"],
+                x + first_width,
+                y,
+                second_width,
+                height,
+                tiles,
+                splitters,
+            )
             splitters.append(
                 {
                     "id": node_id,
@@ -159,8 +169,18 @@ class WorkspaceManager:
         else:
             first_height = height * ratio
             second_height = height - first_height
-            self._walk_geometry(node["first"], x, y, width, first_height, tiles, splitters)
-            self._walk_geometry(node["second"], x, y + first_height, width, second_height, tiles, splitters)
+            self._walk_geometry(
+                node["first"], x, y, width, first_height, tiles, splitters
+            )
+            self._walk_geometry(
+                node["second"],
+                x,
+                y + first_height,
+                width,
+                second_height,
+                tiles,
+                splitters,
+            )
             splitters.append(
                 {
                     "id": node_id,
