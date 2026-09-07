@@ -138,11 +138,6 @@ def initialize_app_controller(
             value,
         )
 
-    def sync_node_from_runtime(
-        node_id: str,
-    ) -> None:
-        pipeline.sync_node_from_runtime(node_id)
-
     def add_representation(
         node_id: str,
         output_port: int = 0,
@@ -379,12 +374,6 @@ def initialize_app_controller(
 
         ctrl.close_node_browser()
 
-        # Pull editable properties into UI state without eagerly executing the
-        # processor. File-backed readers such as vtkXMLImageDataReader are not
-        # valid until their filename has been configured. Rendering likewise
-        # avoids executing an unconfigured file source when its representation
-        # is first attached.
-        pipeline.sync_node_from_runtime(node_id)
         set_active_node(node_id)
 
     def delete_node(
@@ -429,7 +418,7 @@ def initialize_app_controller(
 
         for node_id in pipeline.nodes:
             pipeline.mark_modified(node_id, include_downstream=False)
-            pipeline.sync_node_from_runtime(node_id)
+            pipeline.refresh_runtime_metadata(node_id)
 
     def execute_pipeline() -> None:
         nonlocal execution_task
@@ -459,12 +448,11 @@ def initialize_app_controller(
         *,
         filename: str = "<vtkweb-state>",
     ) -> None:
-        with pipeline.deferred_runtime_sync():
-            load_python_state(
-                source,
-                ctrl,
-                filename=filename,
-            )
+        load_python_state(
+            source,
+            ctrl,
+            filename=filename,
+        )
 
     def save_python_state_file(filename: str) -> str:
         """Save the current state to an explicit server-side path."""
@@ -498,7 +486,6 @@ def initialize_app_controller(
     ctrl.add_node_list_value = add_node_list_value
     ctrl.remove_node_list_value = remove_node_list_value
     ctrl.set_node_input_array = set_node_input_array
-    ctrl.sync_node_from_runtime = sync_node_from_runtime
     ctrl.add_representation = add_representation
     ctrl.remove_representation = remove_representation
     ctrl.set_representation_kind = set_representation_kind

@@ -144,11 +144,9 @@ class PipelineExecutionManager:
                     if final_state == "success":
                         self.pipeline.bind_downstream_inputs(node_id)
 
-                    # Refresh UI metadata and visual representations from the
-                    # already-computed output. These calls must not execute the
-                    # computational pipeline. Missing output representations are
+                    # Refresh visual representations from the already-computed
+                    # output. Missing output representations are
                     # created only after the node has succeeded at least once.
-                    self.pipeline.sync_node_from_runtime(node_id)
                     if final_state == "success":
                         self.rendering.ensure_output_representations(node_id)
                     self.rendering.refresh_node(node_id)

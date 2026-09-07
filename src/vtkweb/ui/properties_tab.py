@@ -43,10 +43,8 @@ def initialize_properties_tab(
         else:
             low, high = (cx, cy, zmin), (cx, cy, zmax)
 
-        processor.SetLowPoint(*low)
-        processor.SetHighPoint(*high)
-        pipeline.mark_modified(node_id)
-        pipeline.sync_node_from_runtime(node_id)
+        pipeline.set_property(node_id, "LowPoint", low)
+        pipeline.set_property(node_id, "HighPoint", high)
 
     ctrl.set_elevation_axis = set_elevation_axis
 

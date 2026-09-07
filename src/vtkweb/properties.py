@@ -106,43 +106,54 @@ def inspect_properties(
     )
 
 
-def set_property(
-    algorithm: vtk.vtkAlgorithm,
+def normalize_property_value(
     descriptor: PropertyDescriptor,
     value,
-) -> None:
-    if descriptor.setter is not None:
-        descriptor.setter(value)
-        return
+):
+    """Normalize a user/model value to the descriptor's application type.
 
-    setter = getattr(
-        algorithm,
-        f"Set{descriptor.name}",
-    )
+    This is intentionally independent of any value a VTK setter may later
+    clamp or otherwise reinterpret. The returned value is the value stored in
+    vtkweb's model.
+    """
 
     if descriptor.kind == "bool":
-        setter(bool(value))
-
-    elif descriptor.kind == "int":
-        setter(int(value))
-
-    elif descriptor.kind == "float":
-        setter(float(value))
-
-    elif descriptor.kind == "str":
-        # VTK string setters accept None as a null string. Preserve that
-        # instead of turning it into the literal text "None".
-        setter(None if value is None else str(value))
-
-    elif descriptor.kind == "vector":
+        return bool(value)
+    if descriptor.kind == "int":
+        return int(value)
+    if descriptor.kind == "float":
+        return float(value)
+    if descriptor.kind == "str":
+        return None if value is None else str(value)
+    if descriptor.kind == "scalar_list":
+        return [float(item) for item in value]
+    if descriptor.kind == "vector":
         converted = []
         for component, current in zip(value, descriptor.value):
             if isinstance(current, int) and not isinstance(current, bool):
                 converted.append(int(component))
             else:
                 converted.append(float(component))
+        return tuple(converted) if isinstance(descriptor.value, tuple) else converted
+    return value
 
-        setter(*converted)
+
+def set_property(
+    algorithm: vtk.vtkAlgorithm,
+    descriptor: PropertyDescriptor,
+    value,
+) -> None:
+    value = normalize_property_value(descriptor, value)
+
+    if descriptor.setter is not None:
+        descriptor.setter(value)
+        return
+
+    setter = getattr(algorithm, f"Set{descriptor.name}")
+    if descriptor.kind == "vector":
+        setter(*value)
+    else:
+        setter(value)
 
 
 def _inspect_contour_values(

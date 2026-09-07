@@ -24,13 +24,10 @@ def inspect_input_arrays(
     if algorithm.GetNumberOfInputPorts() == 0:
         return []
 
-    # Do not call UpdateInformation() here. Under vtkweb's explicit
-    # scheduler, model edges are intentionally not materialized as VTK
-    # inputs until execution begins. Asking VTK to update information on a
-    # newly-created required-input filter would therefore validate an
-    # intentionally incomplete VTK pipeline and emit errors before the user
-    # presses Execute. The input-array specification APIs below are local
-    # algorithm metadata and do not require pipeline execution.
+    # Do not call UpdateInformation() here. vtkweb materializes model edges as
+    # concrete data-object inputs without executing the computational pipeline.
+    # Input-array inspection must remain a metadata-only operation so creating
+    # or connecting a required-input filter cannot trigger VTK execution.
     count = algorithm.GetNumberOfInputArraySpecifications()
 
     # vtkContourFilter and similar filters expose

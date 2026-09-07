@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -12,6 +11,7 @@ from vtkweb.input_arrays import (
 )
 from vtkweb.properties import (
     inspect_properties,
+    normalize_property_value,
     set_property,
 )
 
@@ -104,7 +104,7 @@ class PipelineGraph:
 
         self.state.active_node_id = None
         self._modification_versions: dict[str, int] = {}
-        self._runtime_sync_defer_depth = 0
+        self._property_descriptors: dict[str, dict[str, object]] = {}
 
     # -------------------------------------------------------------------------
     # State access
@@ -172,6 +172,7 @@ class PipelineGraph:
 
         self._processors.clear()
         self._modification_versions.clear()
+        self._property_descriptors.clear()
         self.state.pipeline = {
             "nodes": {},
             "edges": [],
@@ -197,14 +198,23 @@ class PipelineGraph:
         self._processors[node_id] = processor
         self._modification_versions[node_id] = 1
 
+        descriptors = inspect_properties(processor)
+        self._property_descriptors[node_id] = {
+            descriptor.name: descriptor for descriptor in descriptors
+        }
+        properties = {
+            descriptor.name: self._property_state(descriptor, descriptor.value)
+            for descriptor in descriptors
+        }
+
         node = {
             "id": node_id,
             "name": (name or processor.GetClassName()),
             "class_name": (processor.GetClassName()),
             "input_port_count": (processor.GetNumberOfInputPorts()),
             "output_port_count": (processor.GetNumberOfOutputPorts()),
-            "properties": {},
-            "input_arrays": {},
+            "properties": properties,
+            "input_arrays": self._inspect_input_array_state(processor),
             "execution_state": "modified",
         }
 
@@ -217,19 +227,6 @@ class PipelineGraph:
         pipeline_state["nodes"] = nodes
 
         self.state.pipeline = pipeline_state
-
-        # IMPORTANT:
-        #
-        # Do not call sync_node_from_runtime() here.
-        #
-        # A newly-created filter may have required input ports that have not
-        # been connected yet. sync_node_from_runtime() inspects input arrays,
-        # which can cause VTK to call UpdateInformation() on an incomplete
-        # pipeline and produce errors such as:
-        #
-        #   Input port 0 ... has 0 connections but is not optional.
-        #
-        # Runtime synchronization happens after the node is connected.
 
         if self.active_node_id is None:
             self.state.active_node_id = node_id
@@ -276,12 +273,13 @@ class PipelineGraph:
             None,
         )
         self._modification_versions.pop(node_id, None)
+        self._property_descriptors.pop(node_id, None)
 
         for target_node_id in affected_targets:
             if target_node_id in nodes:
                 self.mark_modified(target_node_id)
                 self.bind_inputs(target_node_id)
-                self.sync_node_from_runtime(target_node_id)
+                self.refresh_runtime_metadata(target_node_id)
 
         if self.active_node_id == node_id:
             self.state.active_node_id = next(
@@ -330,7 +328,7 @@ class PipelineGraph:
         self.mark_modified(target_node_id)
         self.bind_inputs(target_node_id)
 
-        self._sync_node_from_runtime_if_enabled(target_node_id)
+        self.refresh_runtime_metadata(target_node_id)
 
         return edge
 
@@ -352,7 +350,7 @@ class PipelineGraph:
 
         self.mark_modified(edge.target_node_id)
         self.bind_inputs(edge.target_node_id)
-        self.sync_node_from_runtime(edge.target_node_id)
+        self.refresh_runtime_metadata(edge.target_node_id)
 
     def incoming_edges(
         self,
@@ -410,93 +408,68 @@ class PipelineGraph:
         }
         for target_node_id in target_ids:
             self.bind_inputs(target_node_id)
+            self.refresh_runtime_metadata(target_node_id)
 
     # -------------------------------------------------------------------------
     # Properties / input arrays
     # -------------------------------------------------------------------------
 
-    def sync_node_from_runtime(
-        self,
-        node_id: str,
-    ) -> None:
-        """Pull processor metadata/properties into authoritative UI state.
-
-        Normal vtkweb mutations should go through the methods below, which
-        automatically keep state synchronized. This explicit method also gives
-        callers a supported escape hatch after intentionally mutating a raw VTK
-        processor directly.
-
-        Future optimization: consider a targeted variant that refreshes only one
-        property/getter instead of re-inspecting the entire processor. Be careful:
-        a VTK setter may internally affect multiple other properties, so refreshing
-        only the property that the UI changed could leave related UI state stale.
-        Any targeted synchronization API must account for those side effects.
-        """
-
-        processor = self.processor(node_id)
-
-        properties = {
-            descriptor.name: {
-                "name": descriptor.name,
-                "label": descriptor.label,
-                "kind": descriptor.kind,
-                "value": descriptor.value,
-                "size": descriptor.size,
-            }
-            for descriptor in inspect_properties(processor)
+    def _property_state(self, descriptor, value) -> dict:
+        return {
+            "name": descriptor.name,
+            "label": descriptor.label,
+            "kind": descriptor.kind,
+            "value": value,
+            "size": descriptor.size,
         }
 
-        input_arrays = {
-            str(descriptor.index): {
+    def _inspect_input_array_state(
+        self,
+        processor: vtk.vtkAlgorithm,
+        existing: dict | None = None,
+    ) -> dict:
+        """Read input-derived metadata while preserving model-owned selections."""
+
+        existing = existing or {}
+        result = {}
+        for descriptor in inspect_input_arrays(processor):
+            key = str(descriptor.index)
+            previous = existing.get(key, {})
+            result[key] = {
                 "index": descriptor.index,
                 "label": descriptor.label,
                 "port": descriptor.port,
-                "connection": (descriptor.connection),
-                "value": descriptor.value,
+                "connection": descriptor.connection,
+                "value": previous.get("value", descriptor.value),
                 "items": descriptor.items,
             }
-            for descriptor in inspect_input_arrays(processor)
-        }
+        return result
 
+    def refresh_runtime_metadata(self, node_id: str) -> None:
+        """Refresh only metadata that is genuinely derived from live VTK data.
+
+        Processor property values are intentionally *not* read back here. vtkweb's
+        model owns the user-requested property values; VTK is a consumer of that
+        configuration. Runtime refresh is limited to information such as available
+        input arrays and port counts that the model cannot know on its own.
+        """
+
+        processor = self.processor(node_id)
         pipeline_state = dict(self.state.pipeline)
-
         nodes = dict(pipeline_state["nodes"])
-
         node = dict(nodes[node_id])
-
         node.update(
             {
-                "name": node.get(
-                    "name",
-                    processor.GetClassName(),
+                "input_port_count": processor.GetNumberOfInputPorts(),
+                "output_port_count": processor.GetNumberOfOutputPorts(),
+                "input_arrays": self._inspect_input_array_state(
+                    processor, node.get("input_arrays", {})
                 ),
-                "class_name": (processor.GetClassName()),
-                "input_port_count": (processor.GetNumberOfInputPorts()),
-                "output_port_count": (processor.GetNumberOfOutputPorts()),
-                "properties": properties,
-                "input_arrays": input_arrays,
             }
         )
-
         nodes[node_id] = node
-
         pipeline_state["nodes"] = nodes
-
         self.state.pipeline = pipeline_state
-
-    def _sync_node_from_runtime_if_enabled(self, node_id: str) -> None:
-        if self._runtime_sync_defer_depth == 0:
-            self.sync_node_from_runtime(node_id)
-
-    @contextmanager
-    def deferred_runtime_sync(self):
-        """Temporarily defer automatic runtime-to-state metadata refreshes."""
-
-        self._runtime_sync_defer_depth += 1
-        try:
-            yield
-        finally:
-            self._runtime_sync_defer_depth -= 1
 
     def set_property(
         self,
@@ -504,35 +477,39 @@ class PipelineGraph:
         name: str,
         value,
     ) -> None:
-        processor = self.processor(node_id)
-
-        descriptor = next(
-            (
-                descriptor
-                for descriptor in inspect_properties(processor)
-                if descriptor.name == name
-            ),
-            None,
-        )
-
-        # Older state files may contain nullable properties that were
-        # incorrectly classified as strings (for example Stream on some VTK
-        # builds). A null value carries no useful state, so tolerate it.
+        descriptor = self._property_descriptors.get(node_id, {}).get(name)
         if descriptor is None:
             if value is None:
                 return
+            processor = self.processor(node_id)
             raise KeyError(
                 f"Property {name!r} is not editable on {processor.GetClassName()}"
             )
 
-        set_property(
-            processor,
-            descriptor,
-            value,
-        )
+        value = normalize_property_value(descriptor, value)
+
+        # Model first: preserve the user's requested value even if a backend
+        # clamps or otherwise interprets it differently. Deliberately do not
+        # read other VTK getters back after the setter: some hand-written VTK
+        # setters may affect coupled properties, but reflecting those side
+        # effects would make backend behavior overwrite application intent. If
+        # such coupling matters for a specific property, model it explicitly.
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
+        node = dict(nodes[node_id])
+        properties = dict(node.get("properties", {}))
+        property_state = dict(properties[name])
+        property_state["value"] = value
+        if property_state.get("kind") == "scalar_list":
+            property_state["size"] = len(value)
+        properties[name] = property_state
+        node["properties"] = properties
+        nodes[node_id] = node
+        pipeline_state["nodes"] = nodes
+        self.state.pipeline = pipeline_state
 
         self.mark_modified(node_id)
-        self._sync_node_from_runtime_if_enabled(node_id)
+        set_property(self.processor(node_id), descriptor, value)
 
     def set_vector_component(
         self,
@@ -625,21 +602,36 @@ class PipelineGraph:
             return
 
         processor = self.processor(node_id)
-
         descriptor = next(
             descriptor
             for descriptor in inspect_input_arrays(processor)
             if descriptor.index == int(index)
         )
 
-        set_input_array(
-            processor,
-            descriptor,
-            value,
+        pipeline_state = dict(self.state.pipeline)
+        nodes = dict(pipeline_state["nodes"])
+        node = dict(nodes[node_id])
+        input_arrays = dict(node.get("input_arrays", {}))
+        key = str(int(index))
+        input_state = dict(input_arrays.get(key, {}))
+        input_state.update(
+            {
+                "index": descriptor.index,
+                "label": descriptor.label,
+                "port": descriptor.port,
+                "connection": descriptor.connection,
+                "value": value,
+                "items": descriptor.items,
+            }
         )
+        input_arrays[key] = input_state
+        node["input_arrays"] = input_arrays
+        nodes[node_id] = node
+        pipeline_state["nodes"] = nodes
+        self.state.pipeline = pipeline_state
 
         self.mark_modified(node_id)
-        self.sync_node_from_runtime(node_id)
+        set_input_array(processor, descriptor, value)
 
     # -------------------------------------------------------------------------
     # Execution state / graph traversal
