@@ -425,14 +425,29 @@ class PipelineGraph:
         node_id: str,
         name: str,
         value,
+        *,
+        sync: bool = True,
     ) -> None:
         processor = self.processor(node_id)
 
         descriptor = next(
-            descriptor
-            for descriptor in inspect_properties(processor)
-            if descriptor.name == name
+            (
+                descriptor
+                for descriptor in inspect_properties(processor)
+                if descriptor.name == name
+            ),
+            None,
         )
+
+        # Older state files may contain nullable properties that were
+        # incorrectly classified as strings (for example Stream on some VTK
+        # builds). A null value carries no useful state, so tolerate it.
+        if descriptor is None:
+            if value is None:
+                return
+            raise KeyError(
+                f"Property {name!r} is not editable on {processor.GetClassName()}"
+            )
 
         set_property(
             processor,
@@ -440,9 +455,9 @@ class PipelineGraph:
             value,
         )
 
-        processor.Update()
-
-        self.sync_node_from_runtime(node_id)
+        if sync:
+            processor.Update()
+            self.sync_node_from_runtime(node_id)
 
     def set_vector_component(
         self,

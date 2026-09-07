@@ -63,8 +63,18 @@ def initialize_app_controller(
         node_id: str,
         name: str,
         value,
+        *,
+        sync: bool = True,
     ) -> None:
-        pipeline.set_property(node_id, name, value)
+        pipeline.set_property(
+            node_id,
+            name,
+            value,
+            sync=sync,
+        )
+
+        if sync:
+            rendering.refresh_node(node_id)
 
     def set_node_vector_component(
         node_id: str,
@@ -373,8 +383,11 @@ def initialize_app_controller(
 
         ctrl.close_node_browser()
 
-        # Required automatic inputs are connected before processor inspection.
-        processor.Update()
+        # Pull editable properties into UI state without eagerly executing the
+        # processor. File-backed readers such as vtkXMLImageDataReader are not
+        # valid until their filename has been configured. Rendering likewise
+        # avoids executing an unconfigured file source when its representation
+        # is first attached.
         pipeline.sync_node_from_runtime(node_id)
         set_active_node(node_id)
         rendering.reset_camera(state.active_view_id)
@@ -417,9 +430,15 @@ def initialize_app_controller(
         state.active_representation_output_port = 0
 
     def finish_state_load() -> None:
-        """Synchronize runtime metadata after reconstruction is complete."""
+        """Execute and synchronize processors after reconstruction is complete."""
 
+        # State replay sets properties with sync=False so partially restored
+        # readers/filters are not executed after every individual property.
+        # Once all connections and properties exist, update each processor and
+        # then pull its authoritative metadata into UI state.
         for node_id in pipeline.nodes:
+            processor = pipeline.processor(node_id)
+            processor.Update()
             pipeline.sync_node_from_runtime(node_id)
 
         if rendering.active_view_id is not None:
@@ -439,28 +458,20 @@ def initialize_app_controller(
             filename=filename,
         )
 
-    def save_python_state() -> str | None:
-        """Save the current state to a server-side Python file."""
+    def save_python_state_file(filename: str) -> str:
+        """Save the current state to an explicit server-side path."""
 
-        filename = _ask_save_state_filename()
-        if filename is None:
-            return None
-
-        path = Path(filename)
+        path = Path(filename).expanduser().resolve()
         path.write_text(
             export_state_source(),
             encoding="utf-8",
         )
         return str(path)
 
-    def open_python_state() -> str | None:
-        """Load a trusted Python state file from the server filesystem."""
+    def open_python_state_file(filename: str) -> str:
+        """Load a trusted Python state file from an explicit server path."""
 
-        filename = _ask_open_state_filename()
-        if filename is None:
-            return None
-
-        path = Path(filename)
+        path = Path(filename).expanduser().resolve()
         load_state_source(
             path.read_text(encoding="utf-8"),
             filename=str(path),
@@ -506,54 +517,10 @@ def initialize_app_controller(
     ctrl.finish_state_load = finish_state_load
     ctrl.export_python_state = export_state_source
     ctrl.load_python_state = load_state_source
-    ctrl.save_python_state = save_python_state
-    ctrl.open_python_state = open_python_state
+    ctrl.save_python_state_file = save_python_state_file
+    ctrl.open_python_state_file = open_python_state_file
 
     server.trigger("delete_active_node")(delete_active_node)
-
-
-def _ask_save_state_filename() -> str | None:
-    """Open a server-side save-file dialog for a Python state file."""
-
-    from tkinter import Tk, filedialog
-
-    root = Tk()
-    root.withdraw()
-    try:
-        filename = filedialog.asksaveasfilename(
-            title="Save vtkweb State",
-            defaultextension=".py",
-            filetypes=[
-                ("Python state files", "*.py"),
-                ("All files", "*"),
-            ],
-            initialfile="vtkweb_state.py",
-        )
-    finally:
-        root.destroy()
-
-    return filename or None
-
-
-def _ask_open_state_filename() -> str | None:
-    """Open a server-side file dialog for a trusted Python state file."""
-
-    from tkinter import Tk, filedialog
-
-    root = Tk()
-    root.withdraw()
-    try:
-        filename = filedialog.askopenfilename(
-            title="Open vtkweb State",
-            filetypes=[
-                ("Python state files", "*.py"),
-                ("All files", "*"),
-            ],
-        )
-    finally:
-        root.destroy()
-
-    return filename or None
 
 
 def _hex_to_rgb(

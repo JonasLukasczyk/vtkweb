@@ -318,6 +318,19 @@ class VTKRenderingBackend(RenderingBackend):
         source: vtk.vtkAlgorithm,
         output_port: int,
     ) -> bool:
+        # Do not execute an unconfigured file-backed source merely because a
+        # representation was created for it. Many VTK readers expose
+        # GetFileName() and emit pipeline errors when Update() is called before
+        # a filename is assigned. Once FileName changes, RenderManager.refresh_node
+        # calls back into this method and the source is executed normally.
+        get_file_name = getattr(source, "GetFileName", None)
+        if source.GetNumberOfInputPorts() == 0 and callable(get_file_name):
+            try:
+                if not get_file_name():
+                    return False
+            except Exception:
+                pass
+
         source.Update()
 
         output = source.GetOutputDataObject(output_port)

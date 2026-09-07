@@ -147,11 +147,7 @@ def build_properties_tab(
                 )
 
             with html.Label(
-                v_if=(
-                    "property.kind === 'int' || "
-                    "property.kind === 'float' || "
-                    "property.kind === 'str'"
-                ),
+                v_if=("property.kind === 'int' || property.kind === 'float'"),
                 classes="vtkweb-input-box",
             ):
                 html.Span(
@@ -159,14 +155,62 @@ def build_properties_tab(
                     classes="vtkweb-control-label",
                 )
                 html.Input(
-                    type=("property.kind === 'str' ? 'text' : 'number'",),
+                    type="number",
                     step=("property.kind === 'int' ? 1 : 'any'",),
                     value=("property.value",),
                     change=(
                         ctrl.set_node_property,
-                        ("[active_node_id,property.name,$event.target.value]"),
+                        "[active_node_id,property.name,$event.target.value]",
                     ),
                 )
+
+            # -----------------------------------------------------------------
+            # String properties
+            # -----------------------------------------------------------------
+
+            with html.Div(
+                v_if="property.kind === 'str'",
+                classes="vtkweb-string-box",
+            ):
+                html.Span(
+                    "{{ property.label }}",
+                    classes="vtkweb-control-label vtkweb-string-label",
+                )
+
+                v3.VTextarea(
+                    classes="vtkweb-string-input",
+                    model_value=("property.value ?? ''",),
+                    auto_grow=True,
+                    rows=1,
+                    max_rows=8,
+                    density="compact",
+                    variant="plain",
+                    hide_details=True,
+                    update_modelValue=(
+                        ctrl.set_node_property,
+                        "[active_node_id,property.name,$event]",
+                    ),
+                )
+
+                with v3.VBtn(
+                    v_if=(
+                        "property.name.toLowerCase().includes('file') || "
+                        "property.name.toLowerCase().includes('path')"
+                    ),
+                    icon=True,
+                    size="x-small",
+                    variant="text",
+                    classes="vtkweb-file-picker-button",
+                    title="Browse server filesystem",
+                    click=(
+                        ctrl.open_file_browser,
+                        "[active_node_id,property.name]",
+                    ),
+                ):
+                    v3.VIcon(
+                        "mdi-folder-open-outline",
+                        size="small",
+                    )
 
             with html.Div(
                 v_if="property.kind === 'vector'",

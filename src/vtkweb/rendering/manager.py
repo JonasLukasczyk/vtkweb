@@ -303,6 +303,22 @@ class RenderManager:
         for representation in list(self.get_representations(node_id)):
             self.remove_representation(representation.id)
 
+    def refresh_node(
+        self,
+        node_id: str,
+    ) -> None:
+        """Refresh every render representation backed by *node_id*.
+
+        Pipeline property changes can turn a previously non-renderable source
+        into a valid one (for example after assigning FileName on a VTK XML
+        reader). Refreshing here lets the backend add/remove actors to match the
+        processor's current output without coupling the pipeline model to a
+        rendering backend.
+        """
+
+        for representation in tuple(self.get_representations(node_id)):
+            self._update_representation(representation.id)
+
     # -------------------------------------------------------------------------
     # View assignment / visibility
     # -------------------------------------------------------------------------

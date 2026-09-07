@@ -22,12 +22,19 @@ WORKSPACE_STYLE = """
     position: absolute;
     box-sizing: border-box;
     overflow: hidden;
+    border-radius: 6px;
 }
 
 .vtkweb-workspace-tile {
     pointer-events: none;
     border: 1px solid rgba(128, 128, 128, 0.2);
     z-index: 20;
+}
+
+.vtkweb-workspace-tile-active {
+    border: 2px solid #2196f3;
+    border-radius: 6px;
+    box-shadow: inset 0 0 0 1px rgba(33, 150, 243, 0.25);
 }
 
 .vtkweb-tile-toolbar {
@@ -248,6 +255,10 @@ def build_render_view(
                     ref=f"render_view_{slot_id}",
                     tabindex=0,
                     style="height:100%;width:100%;outline:none;",
+                    focus=(
+                        ctrl.set_active_view,
+                        f"[vtk_slot_layout['{slot_id}'].view_id]",
+                    ),
                     raw_attrs=[
                         f"@keydown.space.exact.prevent=\"trigger('render_view_reset', [vtk_slot_layout['{slot_id}'].view_id])\""
                     ],
@@ -258,7 +269,11 @@ def build_render_view(
         # backend slots.
         with html.Div(
             v_for=("tile in workspace_tiles", "tile.container_id"),
-            classes="vtkweb-workspace-tile",
+            classes=(
+                "['vtkweb-workspace-tile', "
+                "tile.view_id === active_view_id && views[tile.view_id]?.type === 'vtk' "
+                "? 'vtkweb-workspace-tile-active' : '']",
+            ),
             style=("tile.style",),
         ):
             with html.Div(

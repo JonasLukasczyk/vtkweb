@@ -207,7 +207,17 @@ class WorkspaceManager:
 
     @staticmethod
     def _rect_style(x: float, y: float, width: float, height: float) -> str:
-        return f"left:{x}%;top:{y}%;width:{width}%;height:{height}%;"
+        # Inset every leaf by 2 px. Adjacent leaves therefore have a 4 px
+        # visual gap while the logical split geometry (and splitter hit area)
+        # remains unchanged. The same style drives both the tile overlay and
+        # any VTK backend slot assigned to that tile.
+        inset = 2
+        return (
+            f"left:calc({x}% + {inset}px);"
+            f"top:calc({y}% + {inset}px);"
+            f"width:calc({width}% - {inset * 2}px);"
+            f"height:calc({height}% - {inset * 2}px);"
+        )
 
     @staticmethod
     def _clamp_ratio(value: float) -> float:

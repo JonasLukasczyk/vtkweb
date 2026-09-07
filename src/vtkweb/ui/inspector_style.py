@@ -89,6 +89,71 @@ INSPECTOR_STYLE = """
     -moz-appearance: textfield;
 }
 
+.vtkweb-string-box {
+    display: flex;
+    align-items: flex-start;
+    width: 100%;
+    min-width: 0;
+    min-height: 28px;
+    border: 1px solid rgba(128,128,128,0.5);
+    border-radius: 4px;
+    background: rgba(128,128,128,0.08);
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.vtkweb-string-box:hover {
+    border-color: rgba(128,128,128,0.8);
+}
+
+.vtkweb-string-box:focus-within {
+    border-color: #4f7df3;
+    background: rgba(79,125,243,0.06);
+}
+
+.vtkweb-string-label {
+    padding-top: 1px;
+}
+
+.vtkweb-string-input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.vtkweb-string-input .v-input__control,
+.vtkweb-string-input .v-field,
+.vtkweb-string-input .v-field__field {
+    min-height: 26px;
+}
+
+.vtkweb-string-input .v-field {
+    padding: 0;
+    background: transparent;
+}
+
+.vtkweb-string-input .v-field__input {
+    min-height: 26px;
+    padding: 4px 6px;
+    font-size: 12px;
+    line-height: 18px;
+    text-align: left;
+}
+
+.vtkweb-string-input .v-field__outline,
+.vtkweb-string-input .v-field__overlay {
+    display: none;
+}
+
+.vtkweb-file-picker-button {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    min-width: 28px !important;
+    width: 28px;
+    height: 28px !important;
+    margin: 0;
+    border-radius: 0;
+}
+
 .vtkweb-vector-box {
     display: flex;
     align-items: center;

@@ -145,12 +145,22 @@ def export_python_state(
 
         for property_name in sorted(node_state.get("properties", {})):
             property_state = node_state["properties"][property_name]
+            value = property_state.get("value")
+
+            # None is the default/unset value for many VTK pointer/string
+            # properties and does not carry reconstructable state. Skipping it
+            # also keeps state files portable across VTK versions whose
+            # introspection exposes different nullable object properties.
+            if value is None:
+                continue
+
             property_lines.extend(
                 [
                     "    ctrl.set_node_property(",
                     f"        {node_vars[node_id]},",
                     f"        {property_name!r},",
-                    f"        {property_state.get('value')!r},",
+                    f"        {value!r},",
+                    "        sync=False,",
                     "    )",
                 ]
             )

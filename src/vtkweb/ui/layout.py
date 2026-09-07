@@ -25,6 +25,11 @@ from vtkweb.ui.node_browser import (
     build_node_browser,
     initialize_node_browser,
 )
+from vtkweb.ui.file_browser import (
+    FILE_BROWSER_STYLE,
+    build_file_browser,
+    initialize_file_browser,
+)
 from vtkweb.ui.inspector_style import (
     INSPECTOR_STYLE,
 )
@@ -182,6 +187,12 @@ def build_ui(
         catalog,
     )
 
+    initialize_file_browser(
+        state,
+        ctrl,
+        pipeline,
+    )
+
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
@@ -208,6 +219,8 @@ def build_ui(
             client.Style(INSPECTOR_STYLE)
 
             client.Style(NODE_BROWSER_STYLE)
+
+            client.Style(FILE_BROWSER_STYLE)
 
             client.Style(PIPELINE_VIEW_STYLE)
 
@@ -449,6 +462,11 @@ def build_ui(
             # -----------------------------------------------------------------
 
             build_node_browser(
+                state,
+                ctrl,
+            )
+
+            build_file_browser(
                 state,
                 ctrl,
             )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Callable
 
 import vtk
@@ -129,7 +130,9 @@ def set_property(
         setter(float(value))
 
     elif descriptor.kind == "str":
-        setter(str(value))
+        # VTK string setters accept None as a null string. Preserve that
+        # instead of turning it into the literal text "None".
+        setter(None if value is None else str(value))
 
     elif descriptor.kind == "vector":
         converted = []
@@ -211,6 +214,29 @@ def _property_kind(
 
     if isinstance(value, str):
         return "str"
+
+    # VTK string properties commonly return None until a value has been
+    # assigned. FileName on vtkXMLImageDataReader is one example. Infer the
+    # type from the wrapped setter signature so those properties still appear
+    # before their first value has been set. Match an actual Python ``str``
+    # annotation (rather than the substring "str", which can occur in VTK
+    # object type names such as *Stream*) or the corresponding C++ char*.
+    if value is None:
+        setter = getattr(algorithm, f"Set{name}", None)
+        doc = getattr(setter, "__doc__", "") or ""
+        first_line = doc.splitlines()[0] if doc else ""
+
+        python_string_arg = re.search(
+            r"\([^\n]*:\s*str\s*(?:[,)]|$)",
+            first_line,
+        )
+        cpp_string_arg = re.search(
+            r"\bconst\s+char\s*\*",
+            doc,
+        )
+
+        if python_string_arg or cpp_string_arg:
+            return "str"
 
     if (
         isinstance(value, tuple)
