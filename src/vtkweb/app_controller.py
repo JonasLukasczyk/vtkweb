@@ -223,6 +223,16 @@ def initialize_app_controller(
             **kwargs,
         )
 
+    def create_view_in_container(container_id: str, view_type: str) -> str:
+        """Create a selected view backend in an empty workspace tile."""
+        if workspace.state.workspace_nodes[container_id].get("view_id") is not None:
+            raise ValueError(f"Container already has a view: {container_id}")
+        view_id = create_view(view_type)
+        assign_view_to_container(container_id, view_id)
+        set_active_view(view_id)
+        reset_camera(view_id)
+        return view_id
+
     def remove_view(view_id: str) -> None:
         workspace.unassign_view(view_id)
         views.remove_view(view_id)
@@ -280,14 +290,8 @@ def initialize_app_controller(
         container_id: str,
         orientation: str,
     ) -> tuple[str, str]:
-        """UI workflow: split a leaf and populate the new leaf with the same view type."""
-        current_view_id = workspace.state.workspace_nodes[container_id].get("view_id")
-        first_id, second_id = split_container(container_id, orientation)
-        if current_view_id is not None:
-            view_type = views.get(current_view_id)["type"]
-            new_view_id = create_view(view_type)
-            assign_view_to_container(second_id, new_view_id)
-        return first_id, second_id
+        """Split a leaf; the new leaf stays empty until a backend is selected."""
+        return split_container(container_id, orientation)
 
     def restore_view(
         *,
@@ -494,6 +498,7 @@ def initialize_app_controller(
     ctrl.set_representation_property = set_representation_property
     ctrl.reset_volume_transfer_function = reset_volume_transfer_function
     ctrl.create_view = create_view
+    ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
     ctrl.create_workspace = create_workspace
     ctrl.split_container = split_container
