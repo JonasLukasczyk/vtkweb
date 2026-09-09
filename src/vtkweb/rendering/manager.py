@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from vtkweb.rendering.base import (
 from vtkweb.rendering.vtk_backend import (
     VTKRenderingBackend,
 )
+from vtkweb.transfer_functions import TransferFunctionManager
 
 
 DEFAULT_REPRESENTATION_PROPERTIES = {
@@ -32,21 +34,6 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
     "sample_distance": 1.0,
 }
 
-LEGACY_PROPERTY_NAMES = {
-    "color": "color",
-    "volume_interpolation": "interpolation",
-    "volume_blend_mode": "blend_mode",
-    "volume_shade": "shade",
-    "volume_ambient": "ambient",
-    "volume_diffuse": "diffuse",
-    "volume_specular": "specular",
-    "volume_specular_power": "specular_power",
-    "volume_global_illumination_reach": "global_illumination_reach",
-    "volume_scattering_blending": "volumetric_scattering_blending",
-    "volume_auto_adjust_sample_distances": "auto_adjust_sample_distances",
-    "volume_sample_distance": "sample_distance",
-}
-
 
 class RenderManager:
     """Rendering service backed by serializable trame state.
@@ -61,14 +48,21 @@ class RenderManager:
         state,
         pipeline: PipelineGraph,
         backend: RenderingBackend | None = None,
+        frame_transport=None,
     ) -> None:
         self.state = state
         self.pipeline = pipeline
-        self.backend = backend or VTKRenderingBackend(state)
+        self.frame_transport = frame_transport
+        self.transfer_functions = TransferFunctionManager(state, self)
+        self.backend = backend or VTKRenderingBackend(self.transfer_functions.get)
+        self._backends: dict[str, RenderingBackend] = {"vtk": self.backend}
+        self._mitsuba_render_tasks: dict[str, asyncio.Task] = {}
+        self._mitsuba_frame_sequence: dict[str, int] = {}
 
         self.state.views = {}
         self.state.representations = {}
         self.state.active_view_id = None
+
         # Monotonic notification used by VtkLocalView adapters. Backend-only
         # representation refreshes do not otherwise mutate Trame state, so the
         # client would have no reason to pull the updated render window.
@@ -96,7 +90,7 @@ class RenderManager:
         return tuple(
             self.get_view(view_id)
             for view_id, value in self.state.views.items()
-            if value.get("type") == "vtk"
+            if value.get("type") in {"vtk", "mitsuba"}
         )
 
     @property
@@ -122,23 +116,31 @@ class RenderManager:
         view_id: str,
     ) -> RenderView:
         value = self.state.views[view_id]
-        if value.get("type") != "vtk":
-            raise ValueError(f"View is not a VTK view: {view_id}")
+        if value.get("type") not in {"vtk", "mitsuba"}:
+            raise ValueError(f"View is not a render view: {view_id}")
         return RenderView(
             id=value["id"],
             name=value["name"],
             settings=ViewSettings(
-                background_color=_hex_to_rgb(value["background_color"])
+                background_color=_hex_to_rgb(value["background_color"]),
+                world_ambient_color=_hex_to_rgb(
+                    value.get("world_ambient_color", "#ffffff")
+                ),
+                world_ambient_intensity=float(
+                    value.get("world_ambient_intensity", 1.0)
+                ),
             ),
         )
 
     def backend_view_id(self, view_id: str) -> str:
         value = self.state.views[view_id]
-        if value.get("type") != "vtk":
-            raise ValueError(f"View is not a VTK view: {view_id}")
+        if value.get("type") not in {"vtk", "mitsuba"}:
+            raise ValueError(f"View is not a render view: {view_id}")
         return value["backend_id"]
 
     def get_render_window(self, view_id: str):
+        if self.state.views[view_id].get("type") != "vtk":
+            raise ValueError(f"View is not a VTK view: {view_id}")
         return self.backend.get_render_window(self.backend_view_id(view_id))
 
     def add_view(
@@ -146,7 +148,10 @@ class RenderManager:
         name: str | None = None,
         *,
         view_id: str | None = None,
+        view_type: str = "vtk",
     ) -> RenderView:
+        if view_type not in {"vtk", "mitsuba"}:
+            raise ValueError(f"Unknown render view type: {view_type}")
         if name is None:
             name = f"View {len(self.views) + 1}"
 
@@ -154,28 +159,45 @@ class RenderManager:
         if view_id in self.state.views:
             raise ValueError(f"View ID already exists: {view_id}")
 
-        backend_id = next(
-            (slot for slot, owner in self._slot_owners.items() if owner is None),
-            None,
-        )
-        if backend_id is None:
-            raise RuntimeError(
-                f"Maximum number of VTK views reached ({len(self._slot_ids)})"
+        if view_type == "vtk":
+            backend_id = next(
+                (slot for slot, owner in self._slot_owners.items() if owner is None),
+                None,
             )
+            if backend_id is None:
+                raise RuntimeError(
+                    f"Maximum number of VTK views reached ({len(self._slot_ids)})"
+                )
+        else:
+            backend_id = view_id
 
         value = {
             "id": view_id,
-            "type": "vtk",
+            "type": view_type,
             "name": name,
             "background_color": "#1a1a1a",
+            "world_ambient_color": "#ffffff",
+            "world_ambient_intensity": 1.0,
             "backend_id": backend_id,
         }
 
         views = dict(self.state.views)
         views[view_id] = value
         self.state.views = views
-        self._slot_owners[backend_id] = view_id
-        self.backend.set_view_settings(self._backend_view(view_id))
+        if view_type == "vtk":
+            self._slot_owners[backend_id] = view_id
+        else:
+            self._backend_for_type(view_type).add_view(self._backend_view(view_id))
+        self._backend_for_view(view_id).set_view_settings(self._backend_view(view_id))
+        if view_type == "mitsuba":
+            backend = self._backend_for_type("mitsuba")
+            backend.reset_camera(self.backend_view_id(view_id))
+            value = dict(self.state.views[view_id])
+            value["camera"] = backend.get_camera_state(self.backend_view_id(view_id))
+            views = dict(self.state.views)
+            views[view_id] = value
+            self.state.views = views
+            self._ensure_mitsuba_render_loop(view_id)
         self._notify_render()
         return self.get_view(view_id)
 
@@ -189,12 +211,21 @@ class RenderManager:
             if view_id in representation.view_ids:
                 self.unassign_representation(representation.id, view_id, notify=False)
 
+        view_type = self.state.views[view_id]["type"]
         backend_id = self.backend_view_id(view_id)
-        self._slot_owners[backend_id] = None
+        if view_type == "vtk":
+            self._slot_owners[backend_id] = None
+        else:
+            task = self._mitsuba_render_tasks.pop(view_id, None)
+            if task is not None and not task.done():
+                task.cancel()
+            self._backend_for_view(view_id).remove_view(backend_id)
 
         views = dict(self.state.views)
         del views[view_id]
         self.state.views = views
+
+        self._mitsuba_frame_sequence.pop(view_id, None)
 
         if self.active_view_id == view_id:
             self.state.active_view_id = next(
@@ -231,31 +262,6 @@ class RenderManager:
         value = self.state.representations[representation_id]
         properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
         properties.update(value.get("properties", {}))
-
-        # Backward compatibility for state created before representation
-        # properties were collected under the abstract properties mapping.
-        for legacy_name, property_name in LEGACY_PROPERTY_NAMES.items():
-            if legacy_name in value and property_name not in value.get(
-                "properties", {}
-            ):
-                properties[property_name] = value[legacy_name]
-
-        # Migrate older scalar-selection state into the compound color_by field.
-        if properties.get("color_by") is None:
-            old = value.get("properties", {})
-            array_name = old.get("scalar_array", value.get("array_name"))
-            association = old.get(
-                "scalar_association", value.get("association", "point")
-            )
-            if array_name is not None:
-                properties["color_by"] = [array_name, association]
-        for obsolete in (
-            "scalar_array",
-            "scalar_association",
-            "scalar_range",
-            "scalar_component",
-        ):
-            properties.pop(obsolete, None)
 
         return Representation(
             id=value["id"],
@@ -318,6 +324,19 @@ class RenderManager:
             "view_ids": [],
         }
 
+        if kind == "volume":
+            arrays = self.get_arrays(node_id, int(output_port))
+            association = "point" if arrays["point"] else "cell"
+            names = arrays[association]
+            if names:
+                properties["color_by"] = [names[0], association]
+                self.transfer_functions.ensure(
+                    names[0],
+                    self.get_array_range(
+                        node_id, int(output_port), names[0], association
+                    ),
+                )
+
         representations = dict(self.state.representations)
         representations[representation_id] = value
         self.state.representations = representations
@@ -378,7 +397,7 @@ class RenderManager:
         view_ids: tuple[str, ...] = ()
         if active_view_id is not None:
             view = self.state.views.get(active_view_id)
-            if view is not None and view.get("type") == "vtk":
+            if view is not None and view.get("type") in {"vtk", "mitsuba"}:
                 view_ids = (active_view_id,)
 
         created = []
@@ -439,11 +458,19 @@ class RenderManager:
         view = self.get_view(view_id)
         node = self.pipeline.nodes[representation.node_id]
 
-        self.backend.add_representation(
+        self._backend_for_view(view_id).add_representation(
             representation,
             self._backend_view(view_id),
             node.processor,
         )
+        if self.state.views[view_id].get("type") == "mitsuba":
+            backend = self._backend_for_view(view_id)
+            value = dict(self.state.views[view_id])
+            value["camera"] = backend.get_camera_state(self.backend_view_id(view_id))
+            views = dict(self.state.views)
+            views[view_id] = value
+            self.state.views = views
+            self._ensure_mitsuba_render_loop(view_id)
 
         value = dict(self.state.representations[representation_id])
         value["view_ids"] = [
@@ -472,7 +499,7 @@ class RenderManager:
         if view_id not in representation.view_ids:
             return
 
-        self.backend.remove_representation(
+        self._backend_for_view(view_id).remove_representation(
             representation.id,
             self.backend_view_id(view_id),
         )
@@ -509,6 +536,22 @@ class RenderManager:
         value["kind"] = kind
         properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
         properties.update(value.get("properties", {}))
+        if kind == "volume" and properties.get("color_by") is None:
+            representation = self.get_representation(representation_id)
+            arrays = self.get_arrays(representation.node_id, representation.output_port)
+            association = "point" if arrays["point"] else "cell"
+            names = arrays[association]
+            if names:
+                properties["color_by"] = [names[0], association]
+                self.transfer_functions.ensure(
+                    names[0],
+                    self.get_array_range(
+                        representation.node_id,
+                        representation.output_port,
+                        names[0],
+                        association,
+                    ),
+                )
         value["properties"] = properties
         self._set_representation_state(
             representation_id,
@@ -543,15 +586,28 @@ class RenderManager:
         array_name: str | None,
         association: str = "point",
     ) -> None:
-        """Set compound color selection as [array_name, association]."""
+        """Set renderer-independent ``color_by`` selection for a representation."""
         if association not in {"point", "cell"}:
-            raise ValueError("association must be 'point' or 'cell'")
+            raise ValueError(f"Unknown array association: {association}")
+
+        representation = self.get_representation(representation_id)
+        color_by = None
+        if array_name is not None:
+            color_by = [str(array_name), association]
+            self.transfer_functions.ensure(
+                str(array_name),
+                self.get_array_range(
+                    representation.node_id,
+                    representation.output_port,
+                    str(array_name),
+                    association,
+                ),
+            )
+
         state_value = dict(self.state.representations[representation_id])
         properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
         properties.update(state_value.get("properties", {}))
-        properties["color_by"] = (
-            None if array_name is None else [str(array_name), association]
-        )
+        properties["color_by"] = color_by
         state_value["properties"] = properties
         self._set_representation_state(representation_id, state_value)
         self._update_representation(representation_id)
@@ -560,6 +616,9 @@ class RenderManager:
     def refresh_representation(self, representation_id: str) -> None:
         self._update_representation(representation_id)
         self._notify_render()
+
+    def discover_transfer_functions(self, node_id: str) -> None:
+        self.transfer_functions.discover_node_outputs(node_id)
 
     # -------------------------------------------------------------------------
     # Output data
@@ -600,7 +659,6 @@ class RenderManager:
         output_port: int,
         array_name: str,
         association: str = "point",
-        component: int | None = None,
     ) -> tuple[float, float] | None:
         processor = self.pipeline.processor(node_id)
         data = processor.GetOutputDataObject(output_port)
@@ -614,18 +672,37 @@ class RenderManager:
         if array is None:
             return None
 
-        if component is None:
-            # color_by has no component selector. Multi-component arrays are
-            # represented by their vector magnitude in every backend.
-            range_component = -1 if array.GetNumberOfComponents() > 1 else 0
-            minimum, maximum = array.GetRange(range_component)
-        else:
-            component = max(0, min(int(component), array.GetNumberOfComponents() - 1))
-            minimum, maximum = array.GetRange(component)
-        return (
-            float(minimum),
-            float(maximum),
-        )
+        component = -1 if array.GetNumberOfComponents() > 1 else 0
+        minimum, maximum = array.GetRange(component)
+        return (float(minimum), float(maximum))
+
+    def get_global_array_range(self, array_name: str) -> tuple[float, float] | None:
+        minimum = None
+        maximum = None
+        for node_id, node in self.pipeline.nodes.items():
+            for output_port in range(node.processor.GetNumberOfOutputPorts()):
+                arrays = self.get_arrays(node_id, output_port)
+                for association in ("point", "cell"):
+                    if array_name not in arrays[association]:
+                        continue
+                    data_range = self.get_array_range(
+                        node_id, output_port, array_name, association
+                    )
+                    if data_range is None:
+                        continue
+                    minimum = (
+                        data_range[0]
+                        if minimum is None
+                        else min(minimum, data_range[0])
+                    )
+                    maximum = (
+                        data_range[1]
+                        if maximum is None
+                        else max(maximum, data_range[1])
+                    )
+        if minimum is None or maximum is None:
+            return None
+        return (float(minimum), float(maximum))
 
     # -------------------------------------------------------------------------
     # View properties
@@ -643,7 +720,37 @@ class RenderManager:
         views[view_id] = value
         self.state.views = views
 
-        self.backend.set_view_settings(self._backend_view(view_id))
+        self._backend_for_view(view_id).set_view_settings(self._backend_view(view_id))
+        self._notify_render()
+
+    def set_world_ambient_color(
+        self,
+        view_id: str,
+        color: tuple[float, float, float],
+    ) -> None:
+        value = dict(self.state.views[view_id])
+        value["world_ambient_color"] = _rgb_to_hex(color)
+
+        views = dict(self.state.views)
+        views[view_id] = value
+        self.state.views = views
+
+        self._backend_for_view(view_id).set_view_settings(self._backend_view(view_id))
+        self._notify_render()
+
+    def set_world_ambient_intensity(
+        self,
+        view_id: str,
+        intensity: float,
+    ) -> None:
+        value = dict(self.state.views[view_id])
+        value["world_ambient_intensity"] = max(0.0, float(intensity))
+
+        views = dict(self.state.views)
+        views[view_id] = value
+        self.state.views = views
+
+        self._backend_for_view(view_id).set_view_settings(self._backend_view(view_id))
         self._notify_render()
 
     def reset_camera(
@@ -655,8 +762,42 @@ class RenderManager:
         if view_id is None:
             return
 
-        self.backend.reset_camera(self.backend_view_id(view_id))
+        backend = self._backend_for_view(view_id)
+        backend.reset_camera(self.backend_view_id(view_id))
+        if self.state.views[view_id].get("type") == "mitsuba":
+            value = dict(self.state.views[view_id])
+            value["camera"] = backend.get_camera_state(self.backend_view_id(view_id))
+            views = dict(self.state.views)
+            views[view_id] = value
+            self.state.views = views
+            self._ensure_mitsuba_render_loop(view_id)
         self._notify_render()
+
+    def set_mitsuba_camera_state(self, view_id: str, camera: dict) -> None:
+        value = self.state.views.get(view_id)
+        if value is None or value.get("type") != "mitsuba":
+            return
+        backend = self._backend_for_type("mitsuba")
+        backend.set_camera_state(self.backend_view_id(view_id), camera)
+        value = dict(value)
+        value["camera"] = backend.get_camera_state(self.backend_view_id(view_id))
+        views = dict(self.state.views)
+        views[view_id] = value
+        self.state.views = views
+        self._ensure_mitsuba_render_loop(view_id)
+
+    def set_mitsuba_render_size(self, view_id: str, width: int, height: int) -> None:
+        """Update transient Mitsuba film dimensions from the client viewport."""
+        value = self.state.views.get(view_id)
+        if value is None or value.get("type") != "mitsuba":
+            return
+        backend = self._backend_for_type("mitsuba")
+        if backend.set_render_size(
+            self.backend_view_id(view_id),
+            width,
+            height,
+        ):
+            self._ensure_mitsuba_render_loop(view_id)
 
     # -------------------------------------------------------------------------
     # Internal
@@ -687,7 +828,7 @@ class RenderManager:
         node = self.pipeline.nodes[representation.node_id]
 
         for view_id in tuple(representation.view_ids):
-            self.backend.update_representation(
+            self._backend_for_view(view_id).update_representation(
                 representation,
                 self._backend_view(view_id),
                 node.processor,
@@ -696,6 +837,107 @@ class RenderManager:
     def _notify_render(self) -> None:
         """Notify client render views after an atomic backend scene change."""
         self.state.render_revision = int(self.state.render_revision or 0) + 1
+        for view_id, value in self.state.views.items():
+            if value.get("type") == "mitsuba":
+                self._ensure_mitsuba_render_loop(view_id)
+
+    def _ensure_mitsuba_render_loop(self, view_id: str) -> None:
+        task = self._mitsuba_render_tasks.get(view_id)
+        if task is None or task.done():
+            self._mitsuba_render_tasks[view_id] = asyncio.create_task(
+                self._mitsuba_render_loop(view_id)
+            )
+
+    async def _mitsuba_render_loop(self, view_id: str) -> None:
+        backend = self._backend_for_type("mitsuba")
+        backend_id = self.backend_view_id(view_id)
+        try:
+            while view_id in self.state.views:
+                if not backend.has_renderable_scene(backend_id):
+                    await asyncio.sleep(0.05)
+                    continue
+
+                revision, camera = backend.camera_snapshot(backend_id)
+
+                # The accumulation buffer belongs to exactly one camera
+                # revision. If the camera changed between passes, clear before
+                # rendering the next camera so samples can never be mixed.
+                if backend.accumulation_revision(backend_id) != revision:
+                    backend.clear_accumulation(backend_id, revision)
+
+                sample = await asyncio.to_thread(
+                    backend.render_pass,
+                    backend_id,
+                    camera,
+                    spp=1,
+                )
+
+                current_revision, _ = backend.camera_snapshot(backend_id)
+                if current_revision != revision:
+                    # The camera changed while this pass was rendering. Show the
+                    # completed pass anyway, but do not mix it into progressive
+                    # accumulation. The next iteration snapshots the newest
+                    # absolute camera state and starts from a cleared buffer.
+                    backend.clear_accumulation(backend_id, current_revision)
+                    frame = await asyncio.to_thread(
+                        backend.encoded_frame,
+                        sample,
+                    )
+                else:
+                    # The camera stayed fixed for the whole pass, so this sample
+                    # belongs to the current progressive framebuffer.
+                    backend.accumulate_pass(
+                        backend_id,
+                        sample,
+                        spp=1,
+                        revision=revision,
+                    )
+                    frame = await asyncio.to_thread(
+                        backend.encoded_accumulated_frame,
+                        backend_id,
+                    )
+
+                # Progressive image bytes are transport data, not application
+                # state. Publish them on the dedicated latest-frame-wins binary
+                # websocket stream so rendering never flushes reactive state.
+                if frame is not None and self.frame_transport is not None:
+                    sequence = self._mitsuba_frame_sequence.get(view_id, 0) + 1
+                    self._mitsuba_frame_sequence[view_id] = sequence
+                    await self.frame_transport.publish(
+                        view_id,
+                        frame,
+                        generation=revision,
+                        sequence=sequence,
+                    )
+
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(
+                f"Mitsuba backend: progressive render loop failed for {view_id}: {exc}"
+            )
+        finally:
+            current = asyncio.current_task()
+            if self._mitsuba_render_tasks.get(view_id) is current:
+                self._mitsuba_render_tasks.pop(view_id, None)
+
+    def _backend_for_type(self, view_type: str) -> RenderingBackend:
+        backend = self._backends.get(view_type)
+        if backend is not None:
+            return backend
+
+        if view_type == "mitsuba":
+            from vtkweb.rendering.mitsuba_backend import MitsubaRenderingBackend
+
+            backend = MitsubaRenderingBackend(self.transfer_functions.get)
+            self._backends[view_type] = backend
+            return backend
+
+        raise ValueError(f"Unknown rendering backend: {view_type}")
+
+    def _backend_for_view(self, view_id: str) -> RenderingBackend:
+        return self._backend_for_type(self.state.views[view_id]["type"])
 
 
 def _rgb_to_hex(

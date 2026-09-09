@@ -16,11 +16,9 @@ REPRESENTATION_KINDS = (
 
 @dataclass
 class ViewSettings:
-    background_color: tuple[
-        float,
-        float,
-        float,
-    ] = (0.1, 0.1, 0.1)
+    background_color: tuple[float, float, float] = (0.1, 0.1, 0.1)
+    world_ambient_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    world_ambient_intensity: float = 1.0
 
 
 @dataclass

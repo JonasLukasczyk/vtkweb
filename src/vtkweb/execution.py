@@ -148,6 +148,7 @@ class PipelineExecutionManager:
                     # output. Missing output representations are
                     # created only after the node has succeeded at least once.
                     if final_state == "success":
+                        self.rendering.discover_transfer_functions(node_id)
                         self.rendering.ensure_output_representations(node_id)
                     self.rendering.refresh_node(node_id)
                     self._flush_state()

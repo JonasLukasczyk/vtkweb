@@ -8,7 +8,6 @@ from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
-from vtkweb.transfer_functions import TransferFunctionManager
 
 
 _IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z_]+")
@@ -19,7 +18,6 @@ def export_python_state(
     rendering: RenderManager,
     views: ViewManager,
     workspace: WorkspaceManager,
-    transfer_functions: TransferFunctionManager | None = None,
 ) -> str:
     """Return the current application state as executable Python source."""
 
@@ -60,7 +58,7 @@ def export_python_state(
             ]
         )
 
-        if value.get("type") == "vtk":
+        if value.get("type") in {"vtk", "mitsuba"}:
             background = value.get("background_color")
             if background is not None:
                 lines.extend(
@@ -68,6 +66,28 @@ def export_python_state(
                         "    ctrl.set_view_background_color(",
                         f"        {variable},",
                         f"        {background!r},",
+                        "    )",
+                    ]
+                )
+
+            ambient_color = value.get("world_ambient_color")
+            if ambient_color is not None:
+                lines.extend(
+                    [
+                        "    ctrl.set_view_world_ambient_color(",
+                        f"        {variable},",
+                        f"        {ambient_color!r},",
+                        "    )",
+                    ]
+                )
+
+            ambient_intensity = value.get("world_ambient_intensity")
+            if ambient_intensity is not None:
+                lines.extend(
+                    [
+                        "    ctrl.set_view_world_ambient_intensity(",
+                        f"        {variable},",
+                        f"        {float(ambient_intensity)!r},",
                         "    )",
                     ]
                 )
@@ -191,17 +211,16 @@ def export_python_state(
         lines.append("    # Input-array selections")
         lines.extend(input_array_lines)
 
-    if transfer_functions is not None and transfer_functions.state.transfer_functions:
+    transfer_functions = dict(getattr(rendering.state, "transfer_functions", {}) or {})
+    if transfer_functions:
         lines.append("")
         lines.append("    # Transfer functions")
-        for array_name, tf_data in sorted(
-            transfer_functions.state.transfer_functions.items()
-        ):
+        for array_name in sorted(transfer_functions):
             lines.extend(
                 [
                     "    ctrl.set_tf_data(",
                     f"        {array_name!r},",
-                    f"        {tf_data!r},",
+                    f"        {transfer_functions[array_name]!r},",
                     "    )",
                 ]
             )

@@ -131,10 +131,24 @@ WORKSPACE_STYLE = """
 }
 
 .vtkweb-mitsuba-image {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
-    object-fit: contain;
     display: block;
+    pointer-events: none;
+}
+
+.vtkweb-mitsuba-fps {
+    position: absolute;
+    top: 36px;
+    right: 8px;
+    z-index: 25;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font: 12px/16px monospace;
     pointer-events: none;
 }
 
@@ -199,6 +213,11 @@ def build_render_view(
 
     ctrl.trigger("set_mitsuba_camera")(set_mitsuba_camera)
 
+    def set_mitsuba_render_size(view_id: str, width: int, height: int) -> None:
+        rendering.set_mitsuba_render_size(view_id, width, height)
+
+    ctrl.trigger("set_mitsuba_render_size")(set_mitsuba_render_size)
+
     def sync_slot_layout(**_):
         layout = {slot_id: None for slot_id in rendering.backend_slots}
         tiles_by_view = {
@@ -244,8 +263,156 @@ def build_render_view(
 
     ctrl.trigger("render_view_reset")(reset_render_view)
 
+    client.Script(
+        r"""
+(() => {
+    if (window.__vtkwebMitsubaFrameStreamInitialized) return;
+    window.__vtkwebMitsubaFrameStreamInitialized = true;
+
+    window.__vtkwebMitsubaFrameStats = new Map();
+    window.__vtkwebMitsubaLatestFrame = new Map();
+
+    const updateMitsubaFps = () => {
+        const now = performance.now();
+        for (const [viewId, stats] of window.__vtkwebMitsubaFrameStats.entries()) {
+            const elapsed = Math.max(1, now - stats.lastSampleTime);
+            const fps = (stats.framesSinceSample * 1000.0) / elapsed;
+            stats.framesSinceSample = 0;
+            stats.lastSampleTime = now;
+            const label = document.getElementById('vtkweb-mitsuba-fps-' + viewId);
+            if (label) label.textContent = fps.toFixed(1) + ' fps';
+        }
+    };
+    window.__vtkwebMitsubaFpsTimer = window.setInterval(updateMitsubaFps, 500);
+
+    // Render resolution is transient transport/control data, not application
+    // state. Observe the actual CSS viewport on the client and report settled
+    // sizes over the ordinary Trame trigger channel.
+    window.__vtkwebMitsubaResizeTimers = new Map();
+    window.__vtkwebMitsubaObservedElements = new WeakSet();
+
+    const reportMitsubaSize = (element) => {
+        const canvas = element.querySelector('canvas[id^="vtkweb-mitsuba-canvas-"]');
+        if (!canvas) return;
+        const prefix = 'vtkweb-mitsuba-canvas-';
+        const viewId = canvas.id.substring(prefix.length);
+        if (!viewId) return;
+
+        const rect = element.getBoundingClientRect();
+        const width = Math.max(1, Math.round(rect.width));
+        const height = Math.max(1, Math.round(rect.height));
+
+        const existing = window.__vtkwebMitsubaResizeTimers.get(viewId);
+        if (existing !== undefined) window.clearTimeout(existing);
+        const timer = window.setTimeout(() => {
+            window.__vtkwebMitsubaResizeTimers.delete(viewId);
+            const sender = window.__vtkwebSendMitsubaResize;
+            if (typeof sender === 'function') sender(viewId, width, height);
+        }, 150);
+        window.__vtkwebMitsubaResizeTimers.set(viewId, timer);
+    };
+
+    const mitsubaResizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) reportMitsubaSize(entry.target);
+    });
+    window.__vtkwebMitsubaResizeObserver = mitsubaResizeObserver;
+
+    const observeMitsubaViews = () => {
+        const elements = document.querySelectorAll('.vtkweb-mitsuba-view');
+        for (const element of elements) {
+            if (window.__vtkwebMitsubaObservedElements.has(element)) continue;
+            window.__vtkwebMitsubaObservedElements.add(element);
+            mitsubaResizeObserver.observe(element);
+            reportMitsubaSize(element);
+        }
+    };
+
+    const mitsubaDomObserver = new MutationObserver(observeMitsubaViews);
+    window.__vtkwebMitsubaDomObserver = mitsubaDomObserver;
+    if (document.body) {
+        mitsubaDomObserver.observe(document.body, { childList: true, subtree: true });
+    }
+    window.requestAnimationFrame(observeMitsubaViews);
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const frameSocket = new WebSocket(wsProtocol + '//' + window.location.host + '/vtkweb/frame-stream');
+    frameSocket.binaryType = 'arraybuffer';
+    window.__vtkwebMitsubaFrameSocket = frameSocket;
+
+    frameSocket.onmessage = async (event) => {
+        if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 4) return;
+
+        const bytes = new Uint8Array(event.data);
+        const view = new DataView(event.data);
+        const headerLength = view.getUint32(0, false);
+        if (headerLength < 2 || 4 + headerLength > bytes.byteLength) return;
+
+        let header;
+        try {
+            header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + headerLength)));
+        } catch (_error) {
+            return;
+        }
+
+        const viewId = header.view_id;
+        if (!viewId) return;
+
+        let stats = window.__vtkwebMitsubaFrameStats.get(viewId);
+        if (!stats) {
+            stats = { framesSinceSample: 0, lastSampleTime: performance.now() };
+            window.__vtkwebMitsubaFrameStats.set(viewId, stats);
+        }
+        stats.framesSinceSample += 1;
+
+        const generation = Number(header.generation || 0);
+        const sequence = Number(header.sequence || 0);
+        const previous = window.__vtkwebMitsubaLatestFrame.get(viewId);
+        if (previous && (
+            generation < previous.generation ||
+            (generation === previous.generation && sequence <= previous.sequence)
+        )) return;
+        window.__vtkwebMitsubaLatestFrame.set(viewId, { generation, sequence });
+
+        const imageBytes = bytes.slice(4 + headerLength);
+        const blob = new Blob([imageBytes], { type: header.mime_type || 'image/jpeg' });
+
+        let bitmap;
+        try {
+            bitmap = await createImageBitmap(blob);
+        } catch (_error) {
+            return;
+        }
+
+        const latest = window.__vtkwebMitsubaLatestFrame.get(viewId);
+        if (!latest || latest.generation !== generation || latest.sequence !== sequence) {
+            bitmap.close();
+            return;
+        }
+
+        const canvas = document.getElementById('vtkweb-mitsuba-canvas-' + viewId);
+        if (!canvas) {
+            bitmap.close();
+            return;
+        }
+
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+        }
+        const context = canvas.getContext('2d', { alpha: false });
+        context.drawImage(bitmap, 0, 0);
+        bitmap.close();
+    };
+})();
+        """
+    )
+
     client.ClientTriggers(
         mounted="""
+            window.__vtkwebSendMitsubaResize = (viewId, width, height) => {
+                trigger('set_mitsuba_render_size', [viewId, width, height]);
+            };
+
             window.__vtkwebStartTileResize = (splitter, event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -279,8 +446,51 @@ def build_render_view(
                 window.addEventListener('mouseup', up);
             };
 
-            window.__vtkwebStartMitsubaOrbit = (viewId, event) => {
-                if (event.button !== 0) return;
+            window.__vtkwebMitsubaWheelSessions = new Map();
+
+            const mitsubaNormalize = (v) => {
+                const n = Math.hypot(v[0], v[1], v[2]) || 1;
+                return [v[0] / n, v[1] / n, v[2] / n];
+            };
+            const mitsubaCross = (a, b) => [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ];
+            const mitsubaDot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+            const mitsubaRotate = (v, axis, angle) => {
+                axis = mitsubaNormalize(axis);
+                const c = Math.cos(angle);
+                const q = Math.sin(angle);
+                const axv = mitsubaCross(axis, v);
+                const d = mitsubaDot(axis, v) * (1 - c);
+                return [
+                    v[0]*c + axv[0]*q + axis[0]*d,
+                    v[1]*c + axv[1]*q + axis[1]*d,
+                    v[2]*c + axv[2]*q + axis[2]*d,
+                ];
+            };
+            const mitsubaDolly = (camera, delta) => {
+                const target = camera.target;
+                const offset = [
+                    camera.position[0] - target[0],
+                    camera.position[1] - target[1],
+                    camera.position[2] - target[2],
+                ];
+                const distance = Math.hypot(offset[0], offset[1], offset[2]);
+                if (distance < 1e-12) return;
+                const factor = Math.exp(Math.max(-4, Math.min(4, delta)));
+                const nextDistance = Math.max(1e-9, Math.min(1e12, distance * factor));
+                const scale = nextDistance / distance;
+                camera.position = [
+                    target[0] + offset[0] * scale,
+                    target[1] + offset[1] * scale,
+                    target[2] + offset[2] * scale,
+                ];
+            };
+
+            window.__vtkwebStartMitsubaCameraDrag = (viewId, event) => {
+                if (event.button < 0 || event.button > 2) return;
 
                 event.preventDefault();
                 event.stopPropagation();
@@ -290,34 +500,18 @@ def build_render_view(
                 if (!source) return;
 
                 const camera = JSON.parse(JSON.stringify(source));
+                const element = event.currentTarget;
+                const mode = event.button === 2
+                    ? 'zoom'
+                    : (event.button === 1 || (event.button === 0 && event.shiftKey) ? 'pan' : 'orbit');
                 let lastX = event.clientX;
                 let lastY = event.clientY;
                 let pendingDx = 0;
                 let pendingDy = 0;
                 let animationFrame = null;
 
-                const normalize = (v) => {
-                    const n = Math.hypot(v[0], v[1], v[2]) || 1;
-                    return [v[0] / n, v[1] / n, v[2] / n];
-                };
-                const cross = (a, b) => [
-                    a[1] * b[2] - a[2] * b[1],
-                    a[2] * b[0] - a[0] * b[2],
-                    a[0] * b[1] - a[1] * b[0],
-                ];
-                const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
-                const rotate = (v, axis, angle) => {
-                    axis = normalize(axis);
-                    const c = Math.cos(angle);
-                    const q = Math.sin(angle);
-                    const axv = cross(axis, v);
-                    const d = dot(axis, v) * (1 - c);
-                    return [
-                        v[0]*c + axv[0]*q + axis[0]*d,
-                        v[1]*c + axv[1]*q + axis[1]*d,
-                        v[2]*c + axv[2]*q + axis[2]*d,
-                    ];
-                };
+                const previousCursor = element.style.cursor;
+                element.style.cursor = mode === 'pan' ? 'move' : (mode === 'zoom' ? 'ns-resize' : 'grabbing');
 
                 const applyOrbit = (dx, dy) => {
                     const center = camera.center_of_rotation || camera.target;
@@ -326,17 +520,17 @@ def build_render_view(
                         camera.position[1] - center[1],
                         camera.position[2] - center[2],
                     ];
-                    let up = normalize(camera.up);
+                    let up = mitsubaNormalize(camera.up);
                     const radiansPerPixel = 0.35 * Math.PI / 180.0;
 
-                    offset = rotate(offset, up, -dx * radiansPerPixel);
-                    const forward = normalize([-offset[0], -offset[1], -offset[2]]);
-                    let right = cross(forward, up);
+                    offset = mitsubaRotate(offset, up, -dx * radiansPerPixel);
+                    const forward = mitsubaNormalize([-offset[0], -offset[1], -offset[2]]);
+                    let right = mitsubaCross(forward, up);
                     if (Math.hypot(...right) > 1e-12) {
-                        right = normalize(right);
+                        right = mitsubaNormalize(right);
                         const pitch = -dy * radiansPerPixel;
-                        offset = rotate(offset, right, pitch);
-                        up = normalize(rotate(up, right, pitch));
+                        offset = mitsubaRotate(offset, right, pitch);
+                        up = mitsubaNormalize(mitsubaRotate(up, right, pitch));
                     }
 
                     camera.position = [
@@ -349,6 +543,35 @@ def build_render_view(
                     camera.center_of_rotation = [...center];
                 };
 
+                const applyPan = (dx, dy) => {
+                    const forwardVector = [
+                        camera.target[0] - camera.position[0],
+                        camera.target[1] - camera.position[1],
+                        camera.target[2] - camera.position[2],
+                    ];
+                    const distance = Math.max(Math.hypot(...forwardVector), 1e-9);
+                    const forward = mitsubaNormalize(forwardVector);
+                    let right = mitsubaCross(forward, mitsubaNormalize(camera.up));
+                    if (Math.hypot(...right) < 1e-12) return;
+                    right = mitsubaNormalize(right);
+                    const screenUp = mitsubaNormalize(mitsubaCross(right, forward));
+                    const rect = element.getBoundingClientRect();
+                    const viewportHeight = Math.max(rect.height, 1);
+                    const fovRadians = (Number(camera.fov) || 45.0) * Math.PI / 180.0;
+                    const worldPerPixel = 2.0 * distance * Math.tan(0.5 * fovRadians) / viewportHeight;
+                    const shift = [
+                        (-dx * right[0] + dy * screenUp[0]) * worldPerPixel,
+                        (-dx * right[1] + dy * screenUp[1]) * worldPerPixel,
+                        (-dx * right[2] + dy * screenUp[2]) * worldPerPixel,
+                    ];
+                    const translate = (v) => [v[0] + shift[0], v[1] + shift[1], v[2] + shift[2]];
+                    const center = camera.center_of_rotation || camera.target;
+                    camera.position = translate(camera.position);
+                    camera.target = translate(camera.target);
+                    camera.center_of_rotation = translate(center);
+                    camera.up = screenUp;
+                };
+
                 const flush = () => {
                     animationFrame = null;
                     if (pendingDx === 0 && pendingDy === 0) return;
@@ -356,10 +579,13 @@ def build_render_view(
                     const dy = pendingDy;
                     pendingDx = 0;
                     pendingDy = 0;
-                    applyOrbit(dx, dy);
-                    // Send an absolute camera snapshot. Intermediate snapshots
-                    // may be overwritten while the server is rendering; only
-                    // the newest camera state matters.
+                    if (mode === 'pan') {
+                        applyPan(dx, dy);
+                    } else if (mode === 'zoom') {
+                        mitsubaDolly(camera, dy * 0.01);
+                    } else {
+                        applyOrbit(dx, dy);
+                    }
                     trigger('set_mitsuba_camera', [viewId, camera]);
                 };
 
@@ -381,15 +607,65 @@ def build_render_view(
                         animationFrame = null;
                     }
                     flush();
+                    element.style.cursor = previousCursor;
                 };
 
                 window.addEventListener('mousemove', move);
                 window.addEventListener('mouseup', upHandler);
             };
+
+            window.__vtkwebMitsubaWheel = (viewId, event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget?.focus();
+
+                let session = window.__vtkwebMitsubaWheelSessions.get(viewId);
+                if (!session) {
+                    const source = views[viewId]?.camera;
+                    if (!source) return;
+                    session = {
+                        camera: JSON.parse(JSON.stringify(source)),
+                        pending: 0,
+                        animationFrame: null,
+                        idleTimer: null,
+                    };
+                    window.__vtkwebMitsubaWheelSessions.set(viewId, session);
+                }
+
+                let deltaPixels = event.deltaY;
+                if (event.deltaMode === 1) deltaPixels *= 16;
+                if (event.deltaMode === 2) deltaPixels *= Math.max(event.currentTarget?.clientHeight || 1, 1);
+                session.pending += deltaPixels;
+
+                const flush = () => {
+                    session.animationFrame = null;
+                    if (session.pending === 0) return;
+                    const delta = session.pending;
+                    session.pending = 0;
+                    mitsubaDolly(session.camera, delta * 0.0015);
+                    trigger('set_mitsuba_camera', [viewId, session.camera]);
+                };
+
+                if (session.animationFrame === null) {
+                    session.animationFrame = window.requestAnimationFrame(flush);
+                }
+                if (session.idleTimer !== null) window.clearTimeout(session.idleTimer);
+                session.idleTimer = window.setTimeout(() => {
+                    if (session.animationFrame !== null) {
+                        window.cancelAnimationFrame(session.animationFrame);
+                        session.animationFrame = null;
+                    }
+                    flush();
+                    window.__vtkwebMitsubaWheelSessions.delete(viewId);
+                }, 180);
+            };
         """,
         before_unmount="""
+            delete window.__vtkwebSendMitsubaResize;
             delete window.__vtkwebStartTileResize;
-            delete window.__vtkwebStartMitsubaOrbit;
+            delete window.__vtkwebStartMitsubaCameraDrag;
+            delete window.__vtkwebMitsubaWheel;
+            delete window.__vtkwebMitsubaWheelSessions;
         """,
     )
 
@@ -450,14 +726,20 @@ def build_render_view(
                 tabindex=0,
                 click=(ctrl.set_active_view, "[tile.view_id]"),
                 raw_attrs=[
-                    '@mousedown.left="window.__vtkwebStartMitsubaOrbit(tile.view_id, $event)"',
+                    '@mousedown="window.__vtkwebStartMitsubaCameraDrag(tile.view_id, $event)"',
+                    '@wheel.prevent="window.__vtkwebMitsubaWheel(tile.view_id, $event)"',
+                    "@contextmenu.prevent",
                     "@keydown.space.exact.prevent=\"trigger('render_view_reset', [tile.view_id])\"",
                 ],
             ):
-                html.Img(
-                    src=("mitsuba_frames[tile.view_id] || ''",),
+                html.Canvas(
                     classes="vtkweb-mitsuba-image",
-                    draggable="false",
+                    id=("'vtkweb-mitsuba-canvas-' + tile.view_id",),
+                )
+                html.Div(
+                    "0.0 fps",
+                    classes="vtkweb-mitsuba-fps",
+                    id=("'vtkweb-mitsuba-fps-' + tile.view_id",),
                 )
 
             with html.Div(

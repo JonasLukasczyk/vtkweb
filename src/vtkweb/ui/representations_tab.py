@@ -20,22 +20,27 @@ def initialize_representations_tab(
         "active_node_id",
         "active_representation_output_port",
         "pipeline",
+        "transfer_functions",
     )
     def update_color_array_items(**_):
         node_id = pipeline.active_node_id
         if node_id is None or node_id not in pipeline.nodes:
             state.color_array_items = []
             return
+
         node = pipeline.nodes[node_id]
         output_count = node.processor.GetNumberOfOutputPorts()
         output_port = int(state.active_representation_output_port)
+
         if output_count == 0:
             state.active_representation_output_port = 0
             state.color_array_items = []
             return
+
         if output_port < 0 or output_port >= output_count:
             state.active_representation_output_port = 0
             output_port = 0
+
         arrays = rendering.get_arrays(node_id, output_port)
         state.color_array_items = [
             {"title": f"{name} (Point)", "value": f"point:{name}"}
@@ -175,18 +180,11 @@ def build_representations_tab(
                 )
 
             with html.Div(
-                v_if=(
-                    "representation.kind !== 'outline' && representation.kind !== 'volume'"
-                ),
+                v_if=("representation.kind !== 'outline'"),
                 classes="mt-1",
             ):
-                with html.Div(
-                    classes="vtkweb-select-box",
-                ):
-                    html.Span(
-                        "Color by",
-                        classes="vtkweb-control-label",
-                    )
+                with html.Div(classes="vtkweb-select-box"):
+                    html.Span("Color by", classes="vtkweb-control-label")
                     v3.VSelect(
                         classes="vtkweb-compact-select",
                         model_value=(
@@ -208,10 +206,8 @@ def build_representations_tab(
                             ctrl.set_representation_array,
                             (
                                 "[representation.id,"
-                                "$event === 'fixed' "
-                                "? null : $event.split(':')[1],"
-                                "$event === 'fixed' "
-                                "? 'point' : $event.split(':')[0]]"
+                                "$event === 'fixed' ? null : $event.split(':').slice(1).join(':'),"
+                                "$event === 'fixed' ? 'point' : $event.split(':')[0]]"
                             ),
                         ),
                     )
@@ -220,10 +216,7 @@ def build_representations_tab(
                     v_if=("representation.properties.color_by === null"),
                     classes="vtkweb-color-box mt-1",
                 ):
-                    html.Span(
-                        "Color",
-                        classes="vtkweb-control-label",
-                    )
+                    html.Span("Color", classes="vtkweb-control-label")
                     html.Input(
                         type="color",
                         value=("representation.properties.color || '#ffffff'",),
@@ -241,27 +234,6 @@ def build_representations_tab(
                 v_if=("representation.kind === 'volume'"),
                 classes="mt-1",
             ):
-                with html.Div(classes="vtkweb-select-box"):
-                    html.Span("Scalar", classes="vtkweb-control-label")
-                    v3.VSelect(
-                        classes="vtkweb-compact-select",
-                        model_value=(
-                            "representation.properties.color_by === null ? null : "
-                            "representation.properties.color_by[1] + ':' + representation.properties.color_by[0]",
-                        ),
-                        items=("color_array_items",),
-                        item_title="title",
-                        item_value="value",
-                        density="compact",
-                        variant="plain",
-                        hide_details=True,
-                        update_modelValue=(
-                            ctrl.set_representation_array,
-                            "[representation.id,$event?.split(':')[1] ?? null,"
-                            "$event?.split(':')[0] ?? 'point']",
-                        ),
-                    )
-
                 with html.Div(classes="vtkweb-select-box mt-1"):
                     html.Span("Interpolation", classes="vtkweb-control-label")
                     v3.VSelect(

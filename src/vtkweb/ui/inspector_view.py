@@ -12,7 +12,9 @@ from vtkweb.ui.representations_tab import (
 from vtkweb.ui.view_tab import (
     build_view_tab,
 )
-from vtkweb.ui.transfer_tab import build_transfer_tab
+from vtkweb.ui.transfer_tab import (
+    build_transfer_tab,
+)
 
 
 def initialize_inspector(

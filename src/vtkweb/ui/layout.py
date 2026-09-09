@@ -52,11 +52,10 @@ from vtkweb.ui.render_view import (
 from vtkweb.ui.representations_tab import (
     initialize_representations_tab,
 )
+from vtkweb.ui.transfer_tab import initialize_transfer_tab
 from vtkweb.ui.title_bar import (
     build_title_bar_actions,
 )
-from vtkweb.transfer_functions import TransferFunctionManager
-from vtkweb.ui.transfer_tab import initialize_transfer_tab
 
 
 MAIN_LAYOUT_STYLE = """
@@ -151,7 +150,6 @@ def build_ui(
     views: ViewManager,
     workspace: WorkspaceManager,
     catalog: AlgorithmCatalog,
-    transfer_functions: TransferFunctionManager,
 ) -> None:
     state = server.state
     ctrl = server.controller
@@ -167,7 +165,6 @@ def build_ui(
         views,
         workspace,
         catalog,
-        transfer_functions,
     )
 
     initialize_inspector(
@@ -188,7 +185,10 @@ def build_ui(
         rendering,
     )
 
-    initialize_transfer_tab(state, ctrl)
+    initialize_transfer_tab(
+        state,
+        ctrl,
+    )
 
     initialize_node_browser(
         server,

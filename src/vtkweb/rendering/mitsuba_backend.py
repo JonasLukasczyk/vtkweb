@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import math
 import os
 import tempfile
@@ -17,6 +16,8 @@ from vtkweb.rendering.base import RenderView, RenderingBackend, Representation
 @dataclass
 class MitsubaViewHandle:
     background_color: tuple[float, float, float]
+    world_ambient_color: tuple[float, float, float]
+    world_ambient_intensity: float
     width: int = 1024
     height: int = 768
     camera_origin: tuple[float, float, float] = (0.0, 0.0, 5.0)
@@ -26,7 +27,6 @@ class MitsubaViewHandle:
     accumulation: np.ndarray | None = None
     accumulated_spp: int = 0
     next_seed: int = 1
-    frame_data_url: str | None = None
     camera_revision: int = 0
     accumulation_revision: int = -1
 
@@ -48,9 +48,12 @@ class MitsubaRenderingBackend(RenderingBackend):
 
     name = "mitsuba"
 
-    def __init__(self) -> None:
+    def __init__(self, transfer_function_provider=None) -> None:
         import mitsuba as mi
 
+        self._transfer_function_provider = transfer_function_provider or (
+            lambda _name: None
+        )
         self.mi = mi
         if mi.variant() != "cuda_ad_rgb":
             mi.set_variant("cuda_ad_rgb")
@@ -65,6 +68,8 @@ class MitsubaRenderingBackend(RenderingBackend):
     def add_view(self, view: RenderView) -> None:
         self._views[view.id] = MitsubaViewHandle(
             background_color=view.settings.background_color,
+            world_ambient_color=view.settings.world_ambient_color,
+            world_ambient_intensity=view.settings.world_ambient_intensity,
         )
 
     def remove_view(self, view_id: str) -> None:
@@ -91,8 +96,30 @@ class MitsubaRenderingBackend(RenderingBackend):
         self._representations = renamed
 
     def set_view_settings(self, view: RenderView) -> None:
-        self._views[view.id].background_color = view.settings.background_color
-        self.reset_accumulation(view.id)
+        handle = self._views[view.id]
+        handle.background_color = view.settings.background_color
+        handle.world_ambient_color = view.settings.world_ambient_color
+        handle.world_ambient_intensity = view.settings.world_ambient_intensity
+        self.invalidate_accumulation(view.id)
+
+    def set_render_size(self, view_id: str, width: int, height: int) -> bool:
+        """Set the film size for a Mitsuba view without touching app state.
+
+        Returns True when the size changed.  Size changes advance the same
+        render revision used by camera interaction so an in-flight pass from
+        the old resolution can never be accumulated into the new framebuffer.
+        """
+        handle = self._views[view_id]
+        width = max(1, int(width))
+        height = max(1, int(height))
+        if handle.width == width and handle.height == height:
+            return False
+
+        handle.width = width
+        handle.height = height
+        handle.camera_revision += 1
+        self.reset_accumulation(view_id)
+        return True
 
     def reset_accumulation(self, view_id: str) -> None:
         handle = self._views[view_id]
@@ -100,6 +127,18 @@ class MitsubaRenderingBackend(RenderingBackend):
         handle.accumulated_spp = 0
         handle.next_seed = 1
         handle.accumulation_revision = handle.camera_revision
+
+    def invalidate_accumulation(self, view_id: str) -> None:
+        """Invalidate progressive rendering after a scene-level change.
+
+        ``camera_revision`` is the backend's render-generation token.  It must
+        advance for any change that can alter a rendered sample, not only for
+        camera motion.  Otherwise an in-flight pass from the previous scene can
+        be accepted into a freshly cleared accumulation buffer.
+        """
+        handle = self._views[view_id]
+        handle.camera_revision += 1
+        self.reset_accumulation(view_id)
 
     def reset_camera(self, view_id: str) -> None:
         bounds = self._visible_bounds(view_id)
@@ -208,12 +247,12 @@ class MitsubaRenderingBackend(RenderingBackend):
         self._representations[(representation.id, view.id)] = self._create_handle(
             representation, source
         )
-        self.reset_accumulation(view.id)
+        self.invalidate_accumulation(view.id)
 
     def remove_representation(self, representation_id: str, view_id: str) -> None:
         self._representations.pop((representation_id, view_id), None)
         if view_id in self._views:
-            self.reset_accumulation(view_id)
+            self.invalidate_accumulation(view_id)
 
     def _create_handle(
         self,
@@ -251,6 +290,31 @@ class MitsubaRenderingBackend(RenderingBackend):
         connectivity = vtk_to_numpy(polydata.GetPolys().GetConnectivityArray())
         faces = np.asarray(connectivity, dtype=np.uint32).reshape(-1, 3)
 
+        color_by = representation.properties.get("color_by")
+        vertex_colors = None
+        if color_by is not None:
+            array_name = str(color_by[0])
+            association = str(color_by[1])
+            tf = self._transfer_function_provider(array_name)
+            if tf is not None:
+                colors = _polydata_transfer_colors(
+                    polydata,
+                    array_name=array_name,
+                    association=association,
+                    transfer_function=tf,
+                )
+                if colors is not None:
+                    if association == "cell":
+                        # Mitsuba interpolates vertex attributes. Duplicate the
+                        # triangle vertices for cell coloring so all three
+                        # vertices of each face carry the same color and the
+                        # result remains flat, matching VTK cell semantics.
+                        vertices = vertices[faces].reshape(-1, 3)
+                        faces = np.arange(len(vertices), dtype=np.uint32).reshape(-1, 3)
+                        vertex_colors = np.repeat(colors, 3, axis=0)
+                    else:
+                        vertex_colors = colors
+
         # No coordinate conversion here: VTK (1, 2, 3) is Mitsuba (1, 2, 3).
         mesh = self.mi.Mesh(
             f"vtkweb_{representation.id}",
@@ -264,15 +328,26 @@ class MitsubaRenderingBackend(RenderingBackend):
         params["faces"] = faces.reshape(-1)
         params.update()
 
-        # Keep the first material intentionally simple. Scalar coloring can be
-        # layered onto this backend later without changing geometry transport.
-        color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
         try:
+            if vertex_colors is not None:
+                mesh.add_attribute(
+                    "vertex_color",
+                    3,
+                    np.asarray(vertex_colors, dtype=np.float32).reshape(-1),
+                )
+                reflectance = {
+                    "type": "mesh_attribute",
+                    "name": "vertex_color",
+                }
+            else:
+                color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
+                reflectance = {"type": "rgb", "value": list(color)}
+
             mesh.set_bsdf(
                 self.mi.load_dict(
                     {
                         "type": "diffuse",
-                        "reflectance": {"type": "rgb", "value": list(color)},
+                        "reflectance": reflectance,
                     }
                 )
             )
@@ -304,7 +379,14 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         scene_dict: dict[str, Any] = {
             "type": "scene",
-            "integrator": {"type": "path", "max_depth": 4},
+            # The environment is used only for illumination.  The requested
+            # view background is composited after rendering so changing a UI
+            # background color does not also change scene exposure.
+            "integrator": {
+                "type": "path",
+                "max_depth": 4,
+                "hide_emitters": True,
+            },
             "sensor": {
                 "type": "perspective",
                 "fov": float(camera.get("fov", 45.0)),
@@ -317,12 +399,22 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "type": "hdrfilm",
                     "width": handle.width,
                     "height": handle.height,
+                    "pixel_format": "rgba",
                 },
                 "sampler": {"type": "independent", "sample_count": spp},
             },
             "environment": {
                 "type": "constant",
-                "radiance": {"type": "rgb", "value": [0.7, 0.7, 0.7]},
+                "radiance": {
+                    "type": "rgb",
+                    "value": (
+                        np.asarray(
+                            _srgb_to_linear(handle.world_ambient_color),
+                            dtype=np.float32,
+                        )
+                        * float(handle.world_ambient_intensity)
+                    ).tolist(),
+                },
             },
         }
 
@@ -337,7 +429,19 @@ class MitsubaRenderingBackend(RenderingBackend):
         seed = handle.next_seed
         handle.next_seed += 1
         image = self.mi.render(scene, spp=spp, seed=seed)
-        return np.array(self.mi.Bitmap(image), dtype=np.float32, copy=True)[..., :3]
+        rendered = np.array(self.mi.Bitmap(image), dtype=np.float32, copy=True)
+
+        if rendered.shape[-1] >= 4:
+            rgb = rendered[..., :3]
+            alpha = np.clip(rendered[..., 3:4], 0.0, 1.0)
+            background = np.asarray(
+                _srgb_to_linear(handle.background_color), dtype=np.float32
+            ).reshape((1, 1, 3))
+            return rgb * alpha + background * (1.0 - alpha)
+
+        # Fallback for Mitsuba configurations that do not expose alpha even
+        # when an RGBA film is requested.
+        return rendered[..., :3]
 
     def accumulate_pass(
         self,
@@ -357,8 +461,8 @@ class MitsubaRenderingBackend(RenderingBackend):
         handle.accumulation += sample * float(spp)
         handle.accumulated_spp += int(spp)
 
-    def encoded_frame(self, image: np.ndarray) -> str:
-        """Encode one linear RGB image as the base64 JPEG sent to the client."""
+    def encoded_frame(self, image: np.ndarray) -> bytes:
+        """Encode one linear RGB image as JPEG bytes for binary transport."""
         bitmap = self.mi.Bitmap(image).convert(
             self.mi.Bitmap.PixelFormat.RGB,
             self.mi.Struct.Type.UInt8,
@@ -370,33 +474,29 @@ class MitsubaRenderingBackend(RenderingBackend):
                 filename = stream.name
             bitmap.write(filename)
             with open(filename, "rb") as stream:
-                payload = base64.b64encode(stream.read()).decode("ascii")
+                payload = stream.read()
         finally:
             if filename is not None:
                 try:
                     os.unlink(filename)
                 except FileNotFoundError:
                     pass
-        return f"data:image/jpeg;base64,{payload}"
+        return payload
 
-    def encoded_accumulated_frame(self, view_id: str) -> str | None:
+    def encoded_accumulated_frame(self, view_id: str) -> bytes | None:
         handle = self._views[view_id]
         if handle.accumulation is None or handle.accumulated_spp <= 0:
             return None
         averaged = handle.accumulation / float(handle.accumulated_spp)
-        handle.frame_data_url = self.encoded_frame(averaged)
-        return handle.frame_data_url
+        return self.encoded_frame(averaged)
 
-    def render_frame(self, view_id: str, *, spp: int = 1) -> str:
+    def render_frame(self, view_id: str, *, spp: int = 1) -> bytes:
         revision, camera = self.camera_snapshot(view_id)
         if self.accumulation_revision(view_id) != revision:
             self.clear_accumulation(view_id, revision)
         sample = self.render_pass(view_id, camera, spp=spp)
         self.accumulate_pass(view_id, sample, spp=spp, revision=revision)
         return self.encoded_accumulated_frame(view_id) or ""
-
-    def get_frame_data_url(self, view_id: str) -> str | None:
-        return self._views[view_id].frame_data_url
 
     def get_accumulated_spp(self, view_id: str) -> int:
         return self._views[view_id].accumulated_spp
@@ -420,6 +520,95 @@ class MitsubaRenderingBackend(RenderingBackend):
             min(item[4] for item in bounds),
             max(item[5] for item in bounds),
         )
+
+
+def _polydata_transfer_colors(
+    polydata: vtk.vtkPolyData,
+    *,
+    array_name: str,
+    association: str,
+    transfer_function: dict[str, Any],
+) -> np.ndarray | None:
+    """Evaluate a renderer-neutral transfer function on one polydata array.
+
+    Point arrays return one RGB triplet per polydata point. Cell arrays return
+    one RGB triplet per triangle. Multi-component arrays are reduced to vector
+    magnitude before the one-dimensional transfer function is evaluated.
+    """
+
+    if association == "cell":
+        attributes = polydata.GetCellData()
+        expected_count = polydata.GetNumberOfCells()
+    elif association == "point":
+        attributes = polydata.GetPointData()
+        expected_count = polydata.GetNumberOfPoints()
+    else:
+        return None
+
+    array = attributes.GetArray(array_name)
+    if array is None or array.GetNumberOfTuples() != expected_count:
+        return None
+
+    values = np.asarray(vtk_to_numpy(array))
+    component_count = int(array.GetNumberOfComponents())
+    if component_count <= 1:
+        scalars = np.asarray(values, dtype=np.float64).reshape(-1)
+    else:
+        tuples = np.asarray(values, dtype=np.float64).reshape(-1, component_count)
+        scalars = np.linalg.norm(tuples, axis=1)
+
+    return _evaluate_transfer_function(transfer_function, scalars)
+
+
+def _evaluate_transfer_function(
+    transfer_function: dict[str, Any],
+    values: np.ndarray,
+) -> np.ndarray:
+    """Map scalar values to RGB using normalized global TF control points."""
+
+    control_points = transfer_function.get("control_points") or []
+    if not control_points:
+        return np.zeros((len(values), 3), dtype=np.float32)
+
+    points = np.asarray(control_points, dtype=np.float64)
+    order = np.argsort(points[:, 0], kind="stable")
+    points = points[order]
+
+    tf_range = transfer_function.get("range") or [0.0, 1.0]
+    range_min = float(tf_range[0])
+    range_max = float(tf_range[1])
+    width = range_max - range_min
+    if abs(width) < 1.0e-20:
+        normalized = np.zeros(len(values), dtype=np.float64)
+    else:
+        normalized = (np.asarray(values, dtype=np.float64) - range_min) / width
+    normalized = np.clip(normalized, 0.0, 1.0)
+
+    # np.interp also gives the desired endpoint clamping outside the first and
+    # last control point. Opacity intentionally remains renderer-neutral state
+    # for now; Mitsuba surface transparency needs separate BSDF semantics.
+    t = np.clip(points[:, 0], 0.0, 1.0)
+    rgb = np.column_stack(
+        [
+            np.interp(normalized, t, np.clip(points[:, channel], 0.0, 1.0))
+            for channel in (1, 2, 3)
+        ]
+    )
+    return np.asarray(rgb, dtype=np.float32)
+
+
+def _srgb_to_linear(
+    color: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Convert a UI/display sRGB color to linear RGB for Mitsuba radiance."""
+
+    def convert(component: float) -> float:
+        component = max(0.0, min(1.0, float(component)))
+        if component <= 0.04045:
+            return component / 12.92
+        return ((component + 0.055) / 1.055) ** 2.4
+
+    return tuple(convert(component) for component in color)
 
 
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
