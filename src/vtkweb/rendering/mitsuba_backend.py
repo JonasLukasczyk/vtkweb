@@ -56,9 +56,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             mi.set_variant("cuda_ad_rgb")
 
         self._views: dict[str, MitsubaViewHandle] = {}
-        self._representations: dict[
-            tuple[str, str], MitsubaRepresentationHandle
-        ] = {}
+        self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
 
     # ------------------------------------------------------------------
     # Views
@@ -80,11 +78,16 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         self._views[new_view_id] = self._views.pop(view_id)
         renamed = {}
-        for (representation_id, current_view_id), handle in self._representations.items():
-            renamed[(
-                representation_id,
-                new_view_id if current_view_id == view_id else current_view_id,
-            )] = handle
+        for (
+            representation_id,
+            current_view_id,
+        ), handle in self._representations.items():
+            renamed[
+                (
+                    representation_id,
+                    new_view_id if current_view_id == view_id else current_view_id,
+                )
+            ] = handle
         self._representations = renamed
 
     def set_view_settings(self, view: RenderView) -> None:
@@ -120,9 +123,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             ],
             dtype=np.float64,
         )
-        diagonal = np.array(
-            [xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64
-        )
+        diagonal = np.array([xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64)
         radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
 
         # The perspective sensor uses a 45 degree field of view below. Fit a

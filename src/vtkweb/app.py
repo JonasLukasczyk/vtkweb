@@ -4,6 +4,7 @@ from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
 from vtkweb.ui import build_ui
+from vtkweb.transfer_functions import TransferFunctionManager
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
 
@@ -16,6 +17,7 @@ print(f"Discovered {len(catalog.algorithms)} algorithms")
 
 pipeline = PipelineGraph(server.state)
 rendering = RenderManager(server.state, pipeline)
+transfer_functions = TransferFunctionManager(server.state, rendering)
 views = ViewManager(server.state, rendering)
 workspace = WorkspaceManager(server.state)
 
@@ -32,6 +34,7 @@ build_ui(
     views,
     workspace,
     catalog,
+    transfer_functions,
 )
 
 

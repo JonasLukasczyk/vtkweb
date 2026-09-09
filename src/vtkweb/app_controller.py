@@ -9,6 +9,7 @@ from vtkweb.pipeline import PipelineGraph
 from vtkweb.execution import PipelineExecutionManager
 from vtkweb.rendering import RenderManager
 from vtkweb.state import export_python_state, load_python_state
+from vtkweb.transfer_functions import TransferFunctionManager
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
 
@@ -20,6 +21,7 @@ def initialize_app_controller(
     views: ViewManager,
     workspace: WorkspaceManager,
     catalog: AlgorithmCatalog,
+    transfer_functions: TransferFunctionManager,
 ) -> None:
     state = server.state
     ctrl = server.controller
@@ -191,11 +193,17 @@ def initialize_app_controller(
         array_name: str | None,
         association: str = "point",
     ) -> None:
-        rendering.set_array(
-            representation_id,
-            array_name,
-            association,
-        )
+        rendering.set_array(representation_id, array_name, association)
+        if array_name is not None:
+            representation = rendering.get_representation(representation_id)
+            data_range = rendering.get_array_range(
+                representation.node_id,
+                representation.output_port,
+                array_name,
+                association,
+                component=None,
+            )
+            transfer_functions.ensure(array_name, data_range)
 
     def set_representation_property(
         representation_id: str,
@@ -204,10 +212,30 @@ def initialize_app_controller(
     ) -> None:
         rendering.set_representation_property(representation_id, name, value)
 
-    def reset_volume_transfer_function(
-        representation_id: str,
+    def set_tf_data(array_name: str, tf_dict: dict) -> None:
+        transfer_functions.set_data(array_name, tf_dict)
+
+    def apply_tf_preset(array_name: str, preset_name: str) -> None:
+        transfer_functions.apply_preset(array_name, preset_name)
+
+    def set_tf_range(array_name: str, minimum: float, maximum: float) -> None:
+        transfer_functions.set_range(array_name, minimum, maximum)
+
+    def set_tf_control_point(
+        array_name: str, point_index: int, component_index: int, value: float
     ) -> None:
-        rendering.reset_volume_transfer_function(representation_id)
+        transfer_functions.set_control_point_component(
+            array_name, point_index, component_index, value
+        )
+
+    def add_tf_control_point(array_name: str) -> None:
+        transfer_functions.add_control_point(array_name)
+
+    def remove_tf_control_point(array_name: str, point_index: int) -> None:
+        transfer_functions.remove_control_point(array_name, point_index)
+
+    def delete_transfer_function(array_name: str) -> None:
+        transfer_functions.delete(array_name)
 
     def create_view(
         view_type: str,
@@ -222,16 +250,6 @@ def initialize_app_controller(
             view_id=view_id,
             **kwargs,
         )
-
-    def create_view_in_container(container_id: str, view_type: str) -> str:
-        """Create a selected view backend in an empty workspace tile."""
-        if workspace.state.workspace_nodes[container_id].get("view_id") is not None:
-            raise ValueError(f"Container already has a view: {container_id}")
-        view_id = create_view(view_type)
-        assign_view_to_container(container_id, view_id)
-        set_active_view(view_id)
-        reset_camera(view_id)
-        return view_id
 
     def remove_view(view_id: str) -> None:
         workspace.unassign_view(view_id)
@@ -290,8 +308,14 @@ def initialize_app_controller(
         container_id: str,
         orientation: str,
     ) -> tuple[str, str]:
-        """Split a leaf; the new leaf stays empty until a backend is selected."""
-        return split_container(container_id, orientation)
+        """UI workflow: split a leaf and populate the new leaf with the same view type."""
+        current_view_id = workspace.state.workspace_nodes[container_id].get("view_id")
+        first_id, second_id = split_container(container_id, orientation)
+        if current_view_id is not None:
+            view_type = views.get(current_view_id)["type"]
+            new_view_id = create_view(view_type)
+            assign_view_to_container(second_id, new_view_id)
+        return first_id, second_id
 
     def restore_view(
         *,
@@ -414,6 +438,7 @@ def initialize_app_controller(
 
         workspace.clear()
         pipeline.clear()
+        transfer_functions.clear()
         state.active_view_id = None
         state.active_representation_output_port = 0
 
@@ -445,7 +470,9 @@ def initialize_app_controller(
         execution.abort()
 
     def export_state_source() -> str:
-        return export_python_state(pipeline, rendering, views, workspace)
+        return export_python_state(
+            pipeline, rendering, views, workspace, transfer_functions
+        )
 
     def load_state_source(
         source: str | bytes,
@@ -496,9 +523,14 @@ def initialize_app_controller(
     ctrl.toggle_representation_in_view = toggle_representation_in_view
     ctrl.set_representation_array = set_representation_array
     ctrl.set_representation_property = set_representation_property
-    ctrl.reset_volume_transfer_function = reset_volume_transfer_function
+    ctrl.set_tf_data = set_tf_data
+    ctrl.apply_tf_preset = apply_tf_preset
+    ctrl.set_tf_range = set_tf_range
+    ctrl.set_tf_control_point = set_tf_control_point
+    ctrl.add_tf_control_point = add_tf_control_point
+    ctrl.remove_tf_control_point = remove_tf_control_point
+    ctrl.delete_transfer_function = delete_transfer_function
     ctrl.create_view = create_view
-    ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
     ctrl.create_workspace = create_workspace
     ctrl.split_container = split_container

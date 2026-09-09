@@ -3,7 +3,7 @@ from __future__ import annotations
 from trame.widgets import client, html
 from trame.widgets import vtk as vtk_widgets
 
-from vtkweb.rendering import RenderManager
+from vtkweb.rendering import RenderManager, VTKRenderingBackend
 
 
 WORKSPACE_STYLE = """
@@ -18,8 +18,7 @@ WORKSPACE_STYLE = """
 }
 
 .vtkweb-workspace-tile,
-.vtkweb-vtk-slot,
-.vtkweb-mitsuba-view {
+.vtkweb-vtk-slot {
     position: absolute;
     box-sizing: border-box;
     overflow: hidden;
@@ -88,56 +87,6 @@ WORKSPACE_STYLE = """
     background: #181818;
 }
 
-.vtkweb-view-chooser {
-    pointer-events: auto;
-}
-
-.vtkweb-view-chooser-title {
-    color: #aaa;
-    margin-bottom: 6px;
-}
-
-.vtkweb-view-chooser-buttons {
-    display: flex;
-    gap: 8px;
-}
-
-.vtkweb-view-choice-button {
-    min-width: 92px;
-    padding: 8px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.25);
-    border-radius: 4px;
-    color: #ddd;
-    background: #252525;
-    cursor: pointer;
-}
-
-.vtkweb-view-choice-button:hover {
-    background: #303030;
-}
-
-.vtkweb-mitsuba-view {
-    inset: 0;
-    z-index: 5;
-    background: #1a1a1a;
-    pointer-events: auto;
-    outline: none;
-    cursor: grab;
-    user-select: none;
-}
-
-.vtkweb-mitsuba-view:active {
-    cursor: grabbing;
-}
-
-.vtkweb-mitsuba-image {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    display: block;
-    pointer-events: none;
-}
-
 .vtkweb-tile-splitter {
     position: absolute;
     z-index: 40;
@@ -187,17 +136,17 @@ def build_render_view(
     ctrl,
     rendering: RenderManager,
 ) -> None:
-    """Build the heterogeneous tiled rendering workspace."""
+    """Build the generic tiled workspace and the fixed pool of VTK view widgets."""
 
     backend = rendering.backend
+    if not isinstance(backend, VTKRenderingBackend):
+        raise NotImplementedError(
+            f"No render-view adapter for backend '{backend.name}'"
+        )
+
     client.Style(WORKSPACE_STYLE)
 
     vtk_widgets_by_slot = {}
-
-    def set_mitsuba_camera(view_id: str, camera: dict) -> None:
-        rendering.set_mitsuba_camera_state(view_id, camera)
-
-    ctrl.trigger("set_mitsuba_camera")(set_mitsuba_camera)
 
     def sync_slot_layout(**_):
         layout = {slot_id: None for slot_id in rendering.backend_slots}
@@ -230,17 +179,16 @@ def build_render_view(
         if view_id is None or view_id not in state.views:
             return
         value = state.views[view_id]
-        view_type = value.get("type")
-        if view_type == "mitsuba":
-            ctrl.reset_camera(view_id)
+        if value.get("type") != "vtk":
             return
 
-        if view_type == "vtk":
-            # Keyboard camera reset belongs to the focused VtkLocalView.
-            widget = vtk_widgets_by_slot.get(value["backend_id"])
-            if widget is not None:
-                widget.reset_camera()
-                widget.update()
+        # Keyboard camera reset belongs to the focused VtkLocalView.  Reset
+        # the client-side local view directly, matching the pre-tiling
+        # behavior, rather than treating Space as a workspace-level action.
+        widget = vtk_widgets_by_slot.get(value["backend_id"])
+        if widget is not None:
+            widget.reset_camera()
+            widget.update()
 
     ctrl.trigger("render_view_reset")(reset_render_view)
 
@@ -278,118 +226,9 @@ def build_render_view(
                 window.addEventListener('mousemove', move);
                 window.addEventListener('mouseup', up);
             };
-
-            window.__vtkwebStartMitsubaOrbit = (viewId, event) => {
-                if (event.button !== 0) return;
-
-                event.preventDefault();
-                event.stopPropagation();
-                event.currentTarget?.focus();
-
-                const source = views[viewId]?.camera;
-                if (!source) return;
-
-                const camera = JSON.parse(JSON.stringify(source));
-                let lastX = event.clientX;
-                let lastY = event.clientY;
-                let pendingDx = 0;
-                let pendingDy = 0;
-                let animationFrame = null;
-
-                const normalize = (v) => {
-                    const n = Math.hypot(v[0], v[1], v[2]) || 1;
-                    return [v[0] / n, v[1] / n, v[2] / n];
-                };
-                const cross = (a, b) => [
-                    a[1] * b[2] - a[2] * b[1],
-                    a[2] * b[0] - a[0] * b[2],
-                    a[0] * b[1] - a[1] * b[0],
-                ];
-                const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
-                const rotate = (v, axis, angle) => {
-                    axis = normalize(axis);
-                    const c = Math.cos(angle);
-                    const q = Math.sin(angle);
-                    const axv = cross(axis, v);
-                    const d = dot(axis, v) * (1 - c);
-                    return [
-                        v[0]*c + axv[0]*q + axis[0]*d,
-                        v[1]*c + axv[1]*q + axis[1]*d,
-                        v[2]*c + axv[2]*q + axis[2]*d,
-                    ];
-                };
-
-                const applyOrbit = (dx, dy) => {
-                    const center = camera.center_of_rotation || camera.target;
-                    let offset = [
-                        camera.position[0] - center[0],
-                        camera.position[1] - center[1],
-                        camera.position[2] - center[2],
-                    ];
-                    let up = normalize(camera.up);
-                    const radiansPerPixel = 0.35 * Math.PI / 180.0;
-
-                    offset = rotate(offset, up, -dx * radiansPerPixel);
-                    const forward = normalize([-offset[0], -offset[1], -offset[2]]);
-                    let right = cross(forward, up);
-                    if (Math.hypot(...right) > 1e-12) {
-                        right = normalize(right);
-                        const pitch = -dy * radiansPerPixel;
-                        offset = rotate(offset, right, pitch);
-                        up = normalize(rotate(up, right, pitch));
-                    }
-
-                    camera.position = [
-                        center[0] + offset[0],
-                        center[1] + offset[1],
-                        center[2] + offset[2],
-                    ];
-                    camera.target = [...center];
-                    camera.up = up;
-                    camera.center_of_rotation = [...center];
-                };
-
-                const flush = () => {
-                    animationFrame = null;
-                    if (pendingDx === 0 && pendingDy === 0) return;
-                    const dx = pendingDx;
-                    const dy = pendingDy;
-                    pendingDx = 0;
-                    pendingDy = 0;
-                    applyOrbit(dx, dy);
-                    // Send an absolute camera snapshot. Intermediate snapshots
-                    // may be overwritten while the server is rendering; only
-                    // the newest camera state matters.
-                    trigger('set_mitsuba_camera', [viewId, camera]);
-                };
-
-                const move = (moveEvent) => {
-                    pendingDx += moveEvent.clientX - lastX;
-                    pendingDy += moveEvent.clientY - lastY;
-                    lastX = moveEvent.clientX;
-                    lastY = moveEvent.clientY;
-                    if (animationFrame === null) {
-                        animationFrame = window.requestAnimationFrame(flush);
-                    }
-                };
-
-                const upHandler = () => {
-                    window.removeEventListener('mousemove', move);
-                    window.removeEventListener('mouseup', upHandler);
-                    if (animationFrame !== null) {
-                        window.cancelAnimationFrame(animationFrame);
-                        animationFrame = null;
-                    }
-                    flush();
-                };
-
-                window.addEventListener('mousemove', move);
-                window.addEventListener('mouseup', upHandler);
-            };
         """,
         before_unmount="""
             delete window.__vtkwebStartTileResize;
-            delete window.__vtkwebStartMitsubaOrbit;
         """,
     )
 
@@ -432,7 +271,7 @@ def build_render_view(
             v_for=("tile in workspace_geometry.tiles", "tile.container_id"),
             classes=(
                 "['vtkweb-workspace-tile', "
-                "tile.view_id === active_view_id "
+                "tile.view_id === active_view_id && views[tile.view_id]?.type === 'vtk' "
                 "? 'vtkweb-workspace-tile-active' : '']",
             ),
             style=("tile.style",),
@@ -444,53 +283,13 @@ def build_render_view(
                 html.Div("{{ views[tile.view_id]?.name || 'Dummy view' }}")
                 html.Small("{{ views[tile.view_id]?.message || 'Dummy backend' }}")
 
-            with html.Div(
-                v_if=("tile.view_id && views[tile.view_id]?.type === 'mitsuba'",),
-                classes="vtkweb-mitsuba-view",
-                tabindex=0,
-                click=(ctrl.set_active_view, "[tile.view_id]"),
-                raw_attrs=[
-                    '@mousedown.left="window.__vtkwebStartMitsubaOrbit(tile.view_id, $event)"',
-                    '@keydown.space.exact.prevent="trigger(\'render_view_reset\', [tile.view_id])"',
-                ],
-            ):
-                html.Img(
-                    src=("mitsuba_frames[tile.view_id] || ''",),
-                    classes="vtkweb-mitsuba-image",
-                    draggable="false",
-                )
-
-            with html.Div(
+            html.Div(
+                "Empty tile",
                 v_if=("!tile.view_id",),
-                classes="vtkweb-empty-view vtkweb-view-chooser",
-            ):
-                html.Div("Choose view", classes="vtkweb-view-chooser-title")
-                with html.Div(classes="vtkweb-view-chooser-buttons"):
-                    html.Button(
-                        "VTK",
-                        classes="vtkweb-view-choice-button",
-                        click=(
-                            ctrl.create_view_in_container,
-                            "[tile.container_id, 'vtk']",
-                        ),
-                    )
-                    html.Button(
-                        "Mitsuba",
-                        classes="vtkweb-view-choice-button",
-                        click=(
-                            ctrl.create_view_in_container,
-                            "[tile.container_id, 'mitsuba']",
-                        ),
-                    )
+                classes="vtkweb-empty-view",
+            )
 
             with html.Div(classes="vtkweb-tile-toolbar"):
-                html.Button(
-                    "R",
-                    title="Reset camera",
-                    classes="vtkweb-tile-button",
-                    v_if=("tile.view_id && views[tile.view_id]?.type !== 'dummy'",),
-                    click="trigger('render_view_reset', [tile.view_id])",
-                )
                 html.Button(
                     "V",
                     title="Split vertically",

@@ -12,6 +12,7 @@ from vtkweb.ui.representations_tab import (
 from vtkweb.ui.view_tab import (
     build_view_tab,
 )
+from vtkweb.ui.transfer_tab import build_transfer_tab
 
 
 def initialize_inspector(
@@ -74,6 +75,11 @@ def build_inspector_view(
                     v3.VIcon("mdi-cube-scan")
 
                 with v3.VTab(
+                    value="transfer",
+                ):
+                    v3.VIcon("mdi-palette")
+
+                with v3.VTab(
                     value="view",
                 ):
                     v3.VIcon("mdi-monitor-edit")
@@ -94,6 +100,11 @@ def build_inspector_view(
                     v_if=("inspector_tab === 'representations'"),
                 ):
                     build_representations_tab(ctrl)
+
+                with html.Div(
+                    v_if=("inspector_tab === 'transfer'"),
+                ):
+                    build_transfer_tab(ctrl)
 
                 with html.Div(
                     v_if=("inspector_tab === 'view'"),

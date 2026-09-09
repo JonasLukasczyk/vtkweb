@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import math
 
 import vtk
 
@@ -31,12 +32,15 @@ class VTKRepresentationHandle:
     pipeline_filter: vtk.vtkAlgorithm | None = None
     color_function: vtk.vtkColorTransferFunction | None = None
     opacity_function: vtk.vtkPiecewiseFunction | None = None
+    lookup_table: vtk.vtkLookupTable | None = None
+    color_data: Any | None = None
 
 
 class VTKRenderingBackend(RenderingBackend):
     name = "vtk"
 
-    def __init__(self) -> None:
+    def __init__(self, state=None) -> None:
+        self.state = state
         self._views: dict[
             str,
             VTKViewHandle,
@@ -411,12 +415,17 @@ class VTKRenderingBackend(RenderingBackend):
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
+        lookup_table = vtk.vtkLookupTable()
+        lookup_table.SetNumberOfTableValues(256)
+        lookup_table.Build()
+        mapper.SetLookupTable(lookup_table)
 
         return VTKRepresentationHandle(
             mapper=mapper,
             actor=actor,
             kind=representation.kind,
             pipeline_filter=pipeline_filter,
+            lookup_table=lookup_table,
         )
 
     def _apply_representation(
@@ -488,34 +497,41 @@ class VTKRenderingBackend(RenderingBackend):
                     )
                 )
 
-            if properties.get("scalar_array") is not None:
-                if properties.get("scalar_association", "point") == "cell":
+            color_by = properties.get("color_by")
+            tf = self._transfer_function(color_by)
+            if color_by is not None:
+                array_name, association = color_by
+                source_data = mapper.GetInputDataObject(0, 0)
+                color_data, selected_name = self._data_for_coloring(
+                    source_data, array_name, association
+                )
+                if color_data is not None:
+                    handle.color_data = color_data
+                    mapper.SetInputDataObject(color_data)
+                if association == "cell":
                     mapper.SetScalarModeToUseCellFieldData()
                 else:
                     mapper.SetScalarModeToUsePointFieldData()
-                mapper.SelectScalarArray(properties.get("scalar_array"))
-                if hasattr(mapper, "SetVectorMode"):
-                    mapper.SetVectorMode(0)
-                    mapper.SetVectorComponent(
-                        max(0, int(properties.get("scalar_component", 0)))
-                    )
+                mapper.SelectScalarArray(selected_name)
 
-            scalar_range = properties.get("scalar_range") or (0.0, 1.0)
-            minimum, maximum = scalar_range
+            minimum, maximum = tf["range"]
             if maximum <= minimum:
                 maximum = minimum + 1.0
-
             color_function = handle.color_function
             opacity_function = handle.opacity_function
             if color_function is not None:
                 color_function.RemoveAllPoints()
-                color_function.AddRGBPoint(minimum, 0.0, 0.0, 0.0)
-                color_function.AddRGBPoint(maximum, 1.0, 1.0, 1.0)
-                color_function.Modified()
             if opacity_function is not None:
                 opacity_function.RemoveAllPoints()
-                opacity_function.AddPoint(minimum, 0.0)
-                opacity_function.AddPoint(maximum, 1.0)
+            for t, r, g, b, _opacity in tf["control_points"]:
+                x = minimum + float(t) * (maximum - minimum)
+                if color_function is not None:
+                    color_function.AddRGBPoint(x, r, g, b)
+                if opacity_function is not None:
+                    opacity_function.AddPoint(x, 1.0)
+            if color_function is not None:
+                color_function.Modified()
+            if opacity_function is not None:
                 opacity_function.Modified()
 
             mapper.Modified()
@@ -528,9 +544,9 @@ class VTKRenderingBackend(RenderingBackend):
         else:
             prop.SetRepresentationToSurface()
 
-        if representation.kind == "outline" or properties.get("scalar_array") is None:
+        color_by = properties.get("color_by")
+        if representation.kind == "outline" or color_by is None:
             mapper.ScalarVisibilityOff()
-
             if representation.kind != "outline":
                 color = properties.get("color", "#ffffff").lstrip("#")
                 prop.SetColor(
@@ -538,25 +554,99 @@ class VTKRenderingBackend(RenderingBackend):
                     int(color[2:4], 16) / 255.0,
                     int(color[4:6], 16) / 255.0,
                 )
-
             mapper.Modified()
             actor.Modified()
-
             return
 
-        mapper.ScalarVisibilityOn()
+        array_name, association = color_by
+        source_data = mapper.GetInputDataObject(0, 0)
+        color_data, selected_name = self._data_for_coloring(
+            source_data, array_name, association
+        )
+        if color_data is not None:
+            handle.color_data = color_data
+            mapper.SetInputDataObject(color_data)
 
-        if properties.get("scalar_association", "point") == "point":
+        mapper.ScalarVisibilityOn()
+        if association == "point":
             mapper.SetScalarModeToUsePointFieldData()
         else:
             mapper.SetScalarModeToUseCellFieldData()
+        mapper.SelectColorArray(selected_name)
 
-        mapper.SelectColorArray(properties.get("scalar_array"))
-
-        mapper.UseLookupTableScalarRangeOff()
-
-        if properties.get("scalar_range") is not None:
-            mapper.SetScalarRange(*properties.get("scalar_range"))
-
+        tf = self._transfer_function(color_by)
+        minimum, maximum = tf["range"]
+        if maximum <= minimum:
+            maximum = minimum + 1.0
+        lut = handle.lookup_table
+        if lut is not None:
+            lut.SetRange(minimum, maximum)
+            lut.SetNumberOfTableValues(256)
+            for i in range(256):
+                t = i / 255.0
+                r, g, b = self._sample_tf(tf["control_points"], t)
+                lut.SetTableValue(i, r, g, b, 1.0)
+            lut.Build()
+            mapper.SetLookupTable(lut)
+        mapper.UseLookupTableScalarRangeOn()
         mapper.Modified()
         actor.Modified()
+
+    def _transfer_function(self, color_by) -> dict:
+        default = {
+            "control_points": [
+                [0.0, 0.0, 0.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0, 1.0, 1.0],
+            ],
+            "range": [0.0, 1.0],
+        }
+        if color_by is None or self.state is None:
+            return default
+        return self.state.transfer_functions.get(color_by[0], default)
+
+    @staticmethod
+    def _sample_tf(points, t: float) -> tuple[float, float, float]:
+        points = sorted(points, key=lambda p: p[0])
+        if t <= points[0][0]:
+            return tuple(float(v) for v in points[0][1:4])
+        if t >= points[-1][0]:
+            return tuple(float(v) for v in points[-1][1:4])
+        for left, right in zip(points, points[1:]):
+            if left[0] <= t <= right[0]:
+                span = right[0] - left[0]
+                u = 0.0 if span <= 0 else (t - left[0]) / span
+                return tuple(
+                    float(left[i] + u * (right[i] - left[i])) for i in range(1, 4)
+                )
+        return tuple(float(v) for v in points[-1][1:4])
+
+    @staticmethod
+    def _data_for_coloring(data, array_name: str, association: str):
+        """Return data plus scalar name, materializing vector magnitude if needed."""
+        if data is None or not isinstance(data, vtk.vtkDataSet):
+            return data, array_name
+        attributes = (
+            data.GetPointData() if association == "point" else data.GetCellData()
+        )
+        array = attributes.GetArray(array_name)
+        if array is None or array.GetNumberOfComponents() <= 1:
+            return data, array_name
+
+        copied = data.NewInstance()
+        copied.ShallowCopy(data)
+        target = (
+            copied.GetPointData() if association == "point" else copied.GetCellData()
+        )
+        magnitude_name = f"__vtkweb_magnitude_{array_name}"
+        magnitude = vtk.vtkDoubleArray()
+        magnitude.SetName(magnitude_name)
+        magnitude.SetNumberOfComponents(1)
+        magnitude.SetNumberOfTuples(array.GetNumberOfTuples())
+        components = array.GetNumberOfComponents()
+        for i in range(array.GetNumberOfTuples()):
+            value = math.sqrt(
+                sum(float(array.GetComponent(i, c)) ** 2 for c in range(components))
+            )
+            magnitude.SetValue(i, value)
+        target.AddArray(magnitude)
+        return copied, magnitude_name

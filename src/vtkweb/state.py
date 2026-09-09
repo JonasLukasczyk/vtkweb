@@ -8,6 +8,7 @@ from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
+from vtkweb.transfer_functions import TransferFunctionManager
 
 
 _IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z_]+")
@@ -18,6 +19,7 @@ def export_python_state(
     rendering: RenderManager,
     views: ViewManager,
     workspace: WorkspaceManager,
+    transfer_functions: TransferFunctionManager | None = None,
 ) -> str:
     """Return the current application state as executable Python source."""
 
@@ -188,6 +190,21 @@ def export_python_state(
         lines.append("")
         lines.append("    # Input-array selections")
         lines.extend(input_array_lines)
+
+    if transfer_functions is not None and transfer_functions.state.transfer_functions:
+        lines.append("")
+        lines.append("    # Transfer functions")
+        for array_name, tf_data in sorted(
+            transfer_functions.state.transfer_functions.items()
+        ):
+            lines.extend(
+                [
+                    "    ctrl.set_tf_data(",
+                    f"        {array_name!r},",
+                    f"        {tf_data!r},",
+                    "    )",
+                ]
+            )
 
     representation_vars: dict[str, str] = {}
 

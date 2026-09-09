@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from vtkweb.views.registry import ViewRegistry
-from vtkweb.views import dummy_view, mitsuba_view, vtk_view
+from vtkweb.views import dummy_view, vtk_view
 
 
 class ViewManager:
@@ -12,7 +12,6 @@ class ViewManager:
         self.rendering = rendering
         self.registry = ViewRegistry()
         vtk_view.register(self.registry, rendering)
-        mitsuba_view.register(self.registry, rendering)
         dummy_view.register(self.registry, state)
 
     @property

@@ -451,7 +451,7 @@ def build_render_view(
                 click=(ctrl.set_active_view, "[tile.view_id]"),
                 raw_attrs=[
                     '@mousedown.left="window.__vtkwebStartMitsubaOrbit(tile.view_id, $event)"',
-                    '@keydown.space.exact.prevent="trigger(\'render_view_reset\', [tile.view_id])"',
+                    "@keydown.space.exact.prevent=\"trigger('render_view_reset', [tile.view_id])\"",
                 ],
             ):
                 html.Img(

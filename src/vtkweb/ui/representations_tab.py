@@ -26,20 +26,16 @@ def initialize_representations_tab(
         if node_id is None or node_id not in pipeline.nodes:
             state.color_array_items = []
             return
-
         node = pipeline.nodes[node_id]
         output_count = node.processor.GetNumberOfOutputPorts()
         output_port = int(state.active_representation_output_port)
-
         if output_count == 0:
             state.active_representation_output_port = 0
             state.color_array_items = []
             return
-
         if output_port < 0 or output_port >= output_count:
             state.active_representation_output_port = 0
             output_port = 0
-
         arrays = rendering.get_arrays(node_id, output_port)
         state.color_array_items = [
             {"title": f"{name} (Point)", "value": f"point:{name}"}
@@ -48,29 +44,6 @@ def initialize_representations_tab(
             {"title": f"{name} (Cell)", "value": f"cell:{name}"}
             for name in arrays["cell"]
         ]
-
-    def fit_color_range(
-        representation_id: str,
-    ) -> None:
-        representation = rendering.get_representation(representation_id)
-        if representation.properties.get("scalar_array") is None:
-            return
-
-        scalar_range = rendering.get_array_range(
-            representation.node_id,
-            representation.output_port,
-            representation.properties.get("scalar_array"),
-            representation.properties.get("scalar_association", "point"),
-            int(representation.properties.get("scalar_component", 0)),
-        )
-        if scalar_range is not None:
-            rendering.set_representation_property(
-                representation_id,
-                "scalar_range",
-                list(scalar_range),
-            )
-
-    ctrl.fit_color_range = fit_color_range
 
 
 def build_representations_tab(
@@ -217,10 +190,10 @@ def build_representations_tab(
                     v3.VSelect(
                         classes="vtkweb-compact-select",
                         model_value=(
-                            "representation.properties.scalar_array === null "
+                            "representation.properties.color_by === null "
                             "? 'fixed' "
-                            ": representation.properties.scalar_association + ':' + "
-                            "representation.properties.scalar_array",
+                            ": representation.properties.color_by[1] + ':' + "
+                            "representation.properties.color_by[0]",
                         ),
                         items=(
                             "[{ title: 'Fixed', value: 'fixed' }, "
@@ -244,7 +217,7 @@ def build_representations_tab(
                     )
 
                 with html.Label(
-                    v_if=("representation.properties.scalar_array === null"),
+                    v_if=("representation.properties.color_by === null"),
                     classes="vtkweb-color-box mt-1",
                 ):
                     html.Span(
@@ -257,45 +230,6 @@ def build_representations_tab(
                         input=(
                             ctrl.set_representation_property,
                             "[representation.id,'color',$event.target.value]",
-                        ),
-                    )
-
-                with html.Div(
-                    v_if=("representation.properties.scalar_array !== null"),
-                    classes="vtkweb-range-row",
-                ):
-                    html.Input(
-                        type="number",
-                        step="any",
-                        value=("representation.properties.scalar_range?.[0] ?? 0",),
-                        classes="vtkweb-range-input",
-                        change=(
-                            ctrl.set_representation_property,
-                            (
-                                "[representation.id,'scalar_range',[Number($event.target.value),"
-                                "representation.properties.scalar_range[1]]]"
-                            ),
-                        ),
-                    )
-                    html.Input(
-                        type="number",
-                        step="any",
-                        value=("representation.properties.scalar_range?.[1] ?? 1",),
-                        classes="vtkweb-range-input",
-                        change=(
-                            ctrl.set_representation_property,
-                            (
-                                "[representation.id,'scalar_range',[representation.properties.scalar_range[0],"
-                                "Number($event.target.value)]]"
-                            ),
-                        ),
-                    )
-                    v3.VBtn(
-                        "Fit",
-                        size="small",
-                        click=(
-                            ctrl.fit_color_range,
-                            "[representation.id]",
                         ),
                     )
 
@@ -312,8 +246,8 @@ def build_representations_tab(
                     v3.VSelect(
                         classes="vtkweb-compact-select",
                         model_value=(
-                            "representation.properties.scalar_array === null ? null : "
-                            "representation.properties.scalar_association + ':' + representation.properties.scalar_array",
+                            "representation.properties.color_by === null ? null : "
+                            "representation.properties.color_by[1] + ':' + representation.properties.color_by[0]",
                         ),
                         items=("color_array_items",),
                         item_title="title",
@@ -325,36 +259,6 @@ def build_representations_tab(
                             ctrl.set_representation_array,
                             "[representation.id,$event?.split(':')[1] ?? null,"
                             "$event?.split(':')[0] ?? 'point']",
-                        ),
-                    )
-
-                with html.Div(classes="vtkweb-range-row mt-1"):
-                    html.Span(
-                        "{{ representation.properties.scalar_range?.[0] ?? '—' }} → "
-                        "{{ representation.properties.scalar_range?.[1] ?? '—' }}",
-                        classes="vtkweb-control-label",
-                    )
-                    v3.VBtn(
-                        "Reset B/W",
-                        size="small",
-                        title="Recompute black-white color and linear 0-1 opacity from the current scalar range",
-                        click=(
-                            ctrl.reset_volume_transfer_function,
-                            "[representation.id]",
-                        ),
-                    )
-
-                with html.Label(classes="vtkweb-input-box mt-1"):
-                    html.Span("Component", classes="vtkweb-control-label")
-                    html.Input(
-                        type="number",
-                        min="0",
-                        step="1",
-                        value=("representation.properties.scalar_component ?? 0",),
-                        classes="vtkweb-range-input",
-                        change=(
-                            ctrl.set_representation_property,
-                            "[representation.id,'scalar_component',Number($event.target.value)]",
                         ),
                     )
 

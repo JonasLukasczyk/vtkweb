@@ -18,6 +18,7 @@ dependencies = [
     "trame-vtklocal>=0.16,<1",
     "trame-vuetify>=3.2.5",
     "vtk>=9.7.0",
+    "matplotlib>=3.11.1",
 ]
 
 [project.scripts]
