@@ -3,7 +3,7 @@ from trame.app import get_server
 from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
-from vtkweb.rendering.frame_transport import BinaryFrameTransport
+from vtkweb.rendering.frame_transport import WebSocketFrameTransport
 from vtkweb.ui import build_ui
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
@@ -16,7 +16,7 @@ catalog = AlgorithmCatalog()
 print(f"Discovered {len(catalog.algorithms)} algorithms")
 
 pipeline = PipelineGraph(server.state)
-frame_transport = BinaryFrameTransport(server)
+frame_transport = WebSocketFrameTransport(server)
 rendering = RenderManager(server.state, pipeline, frame_transport=frame_transport)
 views = ViewManager(server.state, rendering)
 workspace = WorkspaceManager(server.state)

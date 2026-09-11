@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
+from math import isfinite
 from typing import Any
 
 import numpy as np
@@ -12,17 +14,43 @@ DEFAULT_TRANSFER_FUNCTION = {
         [0.0, 0.0, 0.0, 0.0, 1.0],
         [1.0, 1.0, 1.0, 1.0, 1.0],
     ],
-    "range": [0.0, 1.0],
 }
 
 
-def available_presets() -> list[dict[str, str]]:
-    """Return Matplotlib colormaps suitable for the TF preset selector."""
+def available_presets() -> list[dict[str, Any]]:
+    """Return Matplotlib colormaps with small inline selector previews."""
     names = set(colormaps)
     visible = sorted(
         name for name in names if not (name.endswith("_r") and name[:-2] in names)
     )
-    return [{"title": name, "value": name} for name in visible]
+    return [
+        {
+            "title": name,
+            "value": name,
+            "props": {"appendAvatar": _preset_preview_uri(name)},
+        }
+        for name in visible
+    ]
+
+
+def _preset_preview_uri(name: str, samples: int = 24) -> str:
+    """Create a tiny SVG gradient preview without adding image files/assets."""
+    cmap = colormaps[name]
+    stops = []
+    for index, t in enumerate(np.linspace(0.0, 1.0, max(2, int(samples)))):
+        r, g, b, _ = cmap(float(t))
+        color = f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
+        offset = 100.0 * index / (max(2, int(samples)) - 1)
+        stops.append(f'<stop offset="{offset:.2f}%" stop-color="{color}"/>')
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="16" '
+        'viewBox="0 0 96 16" preserveAspectRatio="none">'
+        '<defs><linearGradient id="g">'
+        + "".join(stops)
+        + '</linearGradient></defs><rect width="96" height="16" fill="url(#g)"/></svg>'
+    )
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
 
 
 def transfer_function_from_colormap(
@@ -30,16 +58,23 @@ def transfer_function_from_colormap(
     data_range: tuple[float, float] | list[float] = (0.0, 1.0),
     samples: int = 16,
 ) -> dict[str, Any]:
-    """Sample a Matplotlib colormap into vtkweb's normalized TF format."""
+    """Sample a Matplotlib colormap directly into scalar-space TF points."""
+    minimum, maximum = map(float, data_range)
+    width = maximum - minimum
     cmap = colormaps[name]
     points = []
     for t in np.linspace(0.0, 1.0, max(2, int(samples))):
         r, g, b, _ = cmap(float(t))
-        points.append([float(t), float(r), float(g), float(b), 1.0])
-    return {
-        "control_points": points,
-        "range": [float(data_range[0]), float(data_range[1])],
-    }
+        points.append(
+            [
+                minimum + float(t) * width,
+                float(r),
+                float(g),
+                float(b),
+                1.0,
+            ]
+        )
+    return {"control_points": points}
 
 
 class TransferFunctionManager:
@@ -67,9 +102,16 @@ class TransferFunctionManager:
         if current is not None:
             return deepcopy(current)
 
-        value = deepcopy(DEFAULT_TRANSFER_FUNCTION)
-        if data_range is not None:
-            value["range"] = [float(data_range[0]), float(data_range[1])]
+        if data_range is None:
+            value = deepcopy(DEFAULT_TRANSFER_FUNCTION)
+        else:
+            minimum, maximum = map(float, data_range)
+            value = {
+                "control_points": [
+                    [minimum, 0.0, 0.0, 0.0, 1.0],
+                    [maximum, 1.0, 1.0, 1.0, 1.0],
+                ]
+            }
         self.set_data(array_name, value)
         return self.get(array_name) or deepcopy(value)
 
@@ -84,15 +126,29 @@ class TransferFunctionManager:
         current = self.ensure(array_name)
         self.set_data(
             array_name,
-            transfer_function_from_colormap(
-                preset_name,
-                data_range=current["range"],
-            ),
+            transfer_function_from_colormap(preset_name, _point_range(current)),
         )
 
     def set_range(self, array_name: str, minimum: float, maximum: float) -> None:
         current = self.ensure(array_name)
-        current["range"] = [float(minimum), float(maximum)]
+        points = [list(point) for point in current["control_points"]]
+        old_minimum, old_maximum = _point_range(current)
+        minimum = float(minimum)
+        maximum = float(maximum)
+        old_width = old_maximum - old_minimum
+        new_width = maximum - minimum
+
+        if abs(old_width) < 1.0e-20:
+            count = len(points) - 1
+            for index, point in enumerate(points):
+                t = index / count if count else 0.0
+                point[0] = minimum + t * new_width
+        else:
+            for point in points:
+                t = (float(point[0]) - old_minimum) / old_width
+                point[0] = minimum + t * new_width
+
+        current["control_points"] = points
         self.set_data(array_name, current)
 
     def rescale(self, array_name: str) -> None:
@@ -115,7 +171,9 @@ class TransferFunctionManager:
             return
         if not (0 <= component_index <= 4):
             return
-        points[point_index][component_index] = _clamp01(value)
+        points[point_index][component_index] = (
+            _finite_float(value) if component_index == 0 else _clamp01(value)
+        )
         points.sort(key=lambda point: point[0])
         current["control_points"] = points
         self.set_data(array_name, current)
@@ -167,19 +225,18 @@ class TransferFunctionManager:
                         self.ensure(array_name, data_range)
 
     def _refresh(self, array_name: str) -> None:
-        # A global TF edit is immediately reflected by every representation
-        # that references the array, regardless of which node owns it.
         for representation in tuple(self.rendering.representations):
             color_by = representation.properties.get("color_by")
             if color_by and color_by[0] == array_name:
                 self.rendering.refresh_representation(representation.id)
 
 
-def _normalize_tf(value: dict[str, Any]) -> dict[str, Any]:
-    data_range = value.get("range", [0.0, 1.0])
-    if len(data_range) != 2:
-        raise ValueError("transfer-function range must contain two values")
+def _point_range(value: dict[str, Any]) -> tuple[float, float]:
+    points = value["control_points"]
+    return float(points[0][0]), float(points[-1][0])
 
+
+def _normalize_tf(value: dict[str, Any]) -> dict[str, Any]:
     raw_points = value.get("control_points", [])
     if len(raw_points) < 2:
         raise ValueError("transfer function requires at least two control points")
@@ -187,14 +244,25 @@ def _normalize_tf(value: dict[str, Any]) -> dict[str, Any]:
     points = []
     for raw_point in raw_points:
         if len(raw_point) != 5:
-            raise ValueError("control points must have format [t, r, g, b, o]")
-        points.append([_clamp01(component) for component in raw_point])
+            raise ValueError("control points must have format [value, r, g, b, o]")
+        points.append(
+            [
+                _finite_float(raw_point[0]),
+                _clamp01(raw_point[1]),
+                _clamp01(raw_point[2]),
+                _clamp01(raw_point[3]),
+                _clamp01(raw_point[4]),
+            ]
+        )
     points.sort(key=lambda point: point[0])
+    return {"control_points": points}
 
-    return {
-        "control_points": points,
-        "range": [float(data_range[0]), float(data_range[1])],
-    }
+
+def _finite_float(value: float) -> float:
+    result = float(value)
+    if not isfinite(result):
+        raise ValueError("transfer-function scalar positions must be finite")
+    return result
 
 
 def _clamp01(value: float) -> float:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 
@@ -107,3 +107,32 @@ class RenderingBackend(ABC):
         view_id: str,
     ) -> None:
         pass
+
+
+@runtime_checkable
+class ProgressiveRenderingBackend(Protocol):
+    """Runtime capabilities required by the progressive render scheduler."""
+
+    def set_render_size(self, view_id: str, width: int, height: int) -> bool: ...
+    def interact_camera(
+        self, view_id: str, mode: str, dx: float, dy: float, viewport_height: float
+    ) -> int: ...
+    def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]: ...
+    def has_renderable_scene(self, view_id: str) -> bool: ...
+    def clear_accumulation(
+        self, view_id: str, generation: int | None = None
+    ) -> None: ...
+    def accumulation_generation(self, view_id: str) -> int: ...
+    def render_pass(
+        self, view_id: str, camera: dict[str, Any], *, spp: int = 1
+    ) -> Any: ...
+    def accumulate_pass(
+        self,
+        view_id: str,
+        sample: Any,
+        *,
+        spp: int,
+        generation: int,
+    ) -> None: ...
+    def encoded_frame(self, image: Any) -> bytes: ...
+    def encoded_accumulated_frame(self, view_id: str) -> bytes | None: ...

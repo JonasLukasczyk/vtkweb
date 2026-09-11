@@ -27,8 +27,8 @@ class MitsubaViewHandle:
     accumulation: np.ndarray | None = None
     accumulated_spp: int = 0
     next_seed: int = 1
-    camera_revision: int = 0
-    accumulation_revision: int = -1
+    scene_generation: int = 0
+    accumulation_generation: int = -1
 
 
 @dataclass
@@ -39,11 +39,27 @@ class MitsubaRepresentationHandle:
 
 
 class MitsubaRenderingBackend(RenderingBackend):
+    @staticmethod
+    def _srgb_to_linear(
+        color: tuple[float, float, float],
+    ) -> tuple[float, float, float]:
+        """Convert normalized display/sRGB values to linear-light RGB."""
+
+        def convert(channel: float) -> float:
+            value = max(0.0, min(1.0, float(channel)))
+            if value <= 0.04045:
+                return value / 12.92
+            return ((value + 0.055) / 1.055) ** 2.4
+
+        return tuple(convert(channel) for channel in color)
+
     """Minimal server-side Mitsuba backend.
 
-    This first implementation deliberately supports only surface
-    representations. VTK world-space coordinates are copied directly into the
-    Mitsuba mesh without normalization, centering, scaling, or axis changes.
+    Surface representations are converted to Mitsuba triangle meshes.
+    Wireframe and outline representations are generated with VTK as world-space
+    tubes, then converted to the same Mitsuba triangle-mesh representation.
+    No coordinate normalization, centering, scaling, or axis conversion is
+    performed.
     """
 
     name = "mitsuba"
@@ -100,15 +116,10 @@ class MitsubaRenderingBackend(RenderingBackend):
         handle.background_color = view.settings.background_color
         handle.world_ambient_color = view.settings.world_ambient_color
         handle.world_ambient_intensity = view.settings.world_ambient_intensity
-        self.invalidate_accumulation(view.id)
+        self.invalidate_scene(view.id)
 
     def set_render_size(self, view_id: str, width: int, height: int) -> bool:
-        """Set the film size for a Mitsuba view without touching app state.
-
-        Returns True when the size changed.  Size changes advance the same
-        render revision used by camera interaction so an in-flight pass from
-        the old resolution can never be accumulated into the new framebuffer.
-        """
+        """Update transient film dimensions and invalidate the scene."""
         handle = self._views[view_id]
         width = max(1, int(width))
         height = max(1, int(height))
@@ -117,28 +128,15 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         handle.width = width
         handle.height = height
-        handle.camera_revision += 1
-        self.reset_accumulation(view_id)
+        self.invalidate_scene(view_id)
         return True
 
-    def reset_accumulation(self, view_id: str) -> None:
+    def invalidate_scene(self, view_id: str) -> int:
+        """Advance the render generation and clear progressive accumulation."""
         handle = self._views[view_id]
-        handle.accumulation = None
-        handle.accumulated_spp = 0
-        handle.next_seed = 1
-        handle.accumulation_revision = handle.camera_revision
-
-    def invalidate_accumulation(self, view_id: str) -> None:
-        """Invalidate progressive rendering after a scene-level change.
-
-        ``camera_revision`` is the backend's render-generation token.  It must
-        advance for any change that can alter a rendered sample, not only for
-        camera motion.  Otherwise an in-flight pass from the previous scene can
-        be accepted into a freshly cleared accumulation buffer.
-        """
-        handle = self._views[view_id]
-        handle.camera_revision += 1
-        self.reset_accumulation(view_id)
+        handle.scene_generation += 1
+        self.clear_accumulation(view_id, handle.scene_generation)
+        return handle.scene_generation
 
     def reset_camera(self, view_id: str) -> None:
         bounds = self._visible_bounds(view_id)
@@ -149,8 +147,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             handle.camera_target = (0.0, 0.0, 0.0)
             handle.camera_up = (0.0, 1.0, 0.0)
             handle.center_of_rotation = (0.0, 0.0, 0.0)
-            handle.camera_revision += 1
-            self.reset_accumulation(view_id)
+            self.invalidate_scene(view_id)
             return
 
         xmin, xmax, ymin, ymax, zmin, zmax = bounds
@@ -165,8 +162,6 @@ class MitsubaRenderingBackend(RenderingBackend):
         diagonal = np.array([xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64)
         radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
 
-        # The perspective sensor uses a 45 degree field of view below. Fit a
-        # conservative bounding sphere so the entire VTK dataset is visible.
         half_fov = math.radians(45.0) * 0.5
         distance = 1.15 * radius / math.sin(half_fov)
 
@@ -175,8 +170,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         handle.camera_target = tuple(float(v) for v in center)
         handle.camera_up = (0.0, 1.0, 0.0)
         handle.center_of_rotation = tuple(float(v) for v in center)
-        handle.camera_revision += 1
-        self.reset_accumulation(view_id)
+        self.invalidate_scene(view_id)
 
     def get_camera_state(self, view_id: str) -> dict[str, Any]:
         handle = self._views[view_id]
@@ -188,19 +182,75 @@ class MitsubaRenderingBackend(RenderingBackend):
             "fov": 45.0,
         }
 
-    def set_camera_state(self, view_id: str, camera: dict[str, Any]) -> int:
+    def interact_camera(
+        self,
+        view_id: str,
+        mode: str,
+        dx: float,
+        dy: float,
+        viewport_height: float,
+    ) -> int:
+        """Apply an orbit, pan, or dolly delta to the runtime camera."""
         handle = self._views[view_id]
-        handle.camera_origin = tuple(float(v) for v in camera["position"])
-        handle.camera_target = tuple(float(v) for v in camera["target"])
-        handle.camera_up = tuple(float(v) for v in camera["up"])
-        center = camera.get("center_of_rotation", camera["target"])
-        handle.center_of_rotation = tuple(float(v) for v in center)
-        handle.camera_revision += 1
-        return handle.camera_revision
+        dx = float(dx)
+        dy = float(dy)
 
-    def camera_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]:
+        position = np.asarray(handle.camera_origin, dtype=np.float64)
+        target = np.asarray(handle.camera_target, dtype=np.float64)
+        up = _normalized(np.asarray(handle.camera_up, dtype=np.float64))
+        center = np.asarray(handle.center_of_rotation, dtype=np.float64)
+
+        if mode == "orbit":
+            offset = position - center
+            radians_per_pixel = math.radians(0.35)
+            offset = _rotate_vector(offset, up, -dx * radians_per_pixel)
+            forward = _normalized(-offset)
+            right = np.cross(forward, up)
+            if np.linalg.norm(right) > 1.0e-12:
+                right = _normalized(right)
+                pitch = -dy * radians_per_pixel
+                offset = _rotate_vector(offset, right, pitch)
+                up = _normalized(_rotate_vector(up, right, pitch))
+            position = center + offset
+            target = center.copy()
+
+        elif mode == "pan":
+            forward_vector = target - position
+            distance = max(float(np.linalg.norm(forward_vector)), 1.0e-9)
+            forward = _normalized(forward_vector)
+            right = np.cross(forward, up)
+            if np.linalg.norm(right) > 1.0e-12:
+                right = _normalized(right)
+                screen_up = _normalized(np.cross(right, forward))
+                height = max(float(viewport_height), 1.0)
+                world_per_pixel = (
+                    2.0 * distance * math.tan(0.5 * math.radians(45.0)) / height
+                )
+                shift = (-dx * right + dy * screen_up) * world_per_pixel
+                position += shift
+                target += shift
+                center += shift
+                up = screen_up
+
+        elif mode == "zoom":
+            offset = position - target
+            distance = float(np.linalg.norm(offset))
+            if distance > 1.0e-12:
+                factor = math.exp(max(-4.0, min(4.0, dy * 0.01)))
+                next_distance = max(1.0e-9, min(1.0e12, distance * factor))
+                position = target + offset * (next_distance / distance)
+        else:
+            raise ValueError(f"Unknown camera interaction mode: {mode}")
+
+        handle.camera_origin = tuple(float(v) for v in position)
+        handle.camera_target = tuple(float(v) for v in target)
+        handle.camera_up = tuple(float(v) for v in up)
+        handle.center_of_rotation = tuple(float(v) for v in center)
+        return self.invalidate_scene(view_id)
+
+    def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]:
         handle = self._views[view_id]
-        return handle.camera_revision, self.get_camera_state(view_id)
+        return handle.scene_generation, self.get_camera_state(view_id)
 
     def has_renderable_scene(self, view_id: str) -> bool:
         return any(
@@ -208,16 +258,17 @@ class MitsubaRenderingBackend(RenderingBackend):
             for (_, current_view_id), rep in self._representations.items()
         )
 
-    def clear_accumulation(self, view_id: str, revision: int | None = None) -> None:
+    def clear_accumulation(self, view_id: str, generation: int | None = None) -> None:
         handle = self._views[view_id]
         handle.accumulation = None
         handle.accumulated_spp = 0
-        handle.accumulation_revision = (
-            handle.camera_revision if revision is None else int(revision)
+        handle.next_seed = 1
+        handle.accumulation_generation = (
+            handle.scene_generation if generation is None else int(generation)
         )
 
-    def accumulation_revision(self, view_id: str) -> int:
-        return self._views[view_id].accumulation_revision
+    def accumulation_generation(self, view_id: str) -> int:
+        return self._views[view_id].accumulation_generation
 
     # ------------------------------------------------------------------
     # Representations
@@ -233,10 +284,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         if key in self._representations:
             return
         self._representations[key] = self._create_handle(representation, source)
-
-        # Make first display useful without requiring an extra explicit reset.
-        if representation.kind == "surface":
-            self.reset_camera(view.id)
+        self.invalidate_scene(view.id)
 
     def update_representation(
         self,
@@ -247,25 +295,36 @@ class MitsubaRenderingBackend(RenderingBackend):
         self._representations[(representation.id, view.id)] = self._create_handle(
             representation, source
         )
-        self.invalidate_accumulation(view.id)
+        self.invalidate_scene(view.id)
 
     def remove_representation(self, representation_id: str, view_id: str) -> None:
         self._representations.pop((representation_id, view_id), None)
         if view_id in self._views:
-            self.invalidate_accumulation(view_id)
+            self.invalidate_scene(view_id)
 
     def _create_handle(
         self,
         representation: Representation,
         source: Any,
     ) -> MitsubaRepresentationHandle:
-        if representation.kind != "surface":
-            print(
-                "Mitsuba backend: representation kind "
-                f"'{representation.kind}' is not implemented"
-            )
-            return MitsubaRepresentationHandle(kind=representation.kind)
+        if representation.kind == "surface":
+            return self._create_surface_handle(representation, source)
+        if representation.kind == "wireframe":
+            return self._create_wireframe_handle(representation, source)
+        if representation.kind == "outline":
+            return self._create_outline_handle(representation, source)
 
+        print(
+            "Mitsuba backend: representation kind "
+            f"'{representation.kind}' is not implemented"
+        )
+        return MitsubaRepresentationHandle(kind=representation.kind)
+
+    def _create_surface_handle(
+        self,
+        representation: Representation,
+        source: Any,
+    ) -> MitsubaRepresentationHandle:
         data = source.GetOutputDataObject(representation.output_port)
         if data is None:
             return MitsubaRepresentationHandle(kind="surface")
@@ -280,9 +339,93 @@ class MitsubaRenderingBackend(RenderingBackend):
         triangles.PassVertsOff()
         triangles.Update()
 
-        polydata = triangles.GetOutput()
+        return self._create_polydata_mesh_handle(
+            "surface", representation, triangles.GetOutput()
+        )
+
+    def _create_wireframe_handle(
+        self,
+        representation: Representation,
+        source: Any,
+    ) -> MitsubaRepresentationHandle:
+        data = source.GetOutputDataObject(representation.output_port)
+        if data is None:
+            return MitsubaRepresentationHandle(kind="wireframe")
+
+        # Extract edges before triangulation so polygon diagonals are not added.
+        surface = vtk.vtkDataSetSurfaceFilter()
+        surface.SetInputDataObject(data)
+
+        edges = vtk.vtkExtractEdges()
+        edges.SetInputConnection(surface.GetOutputPort())
+        edges.Update()
+
+        return self._create_tube_handle(
+            "wireframe", representation, edges.GetOutput(), data.GetBounds()
+        )
+
+    def _create_outline_handle(
+        self,
+        representation: Representation,
+        source: Any,
+    ) -> MitsubaRepresentationHandle:
+        data = source.GetOutputDataObject(representation.output_port)
+        if data is None:
+            return MitsubaRepresentationHandle(kind="outline")
+
+        outline = vtk.vtkOutlineFilter()
+        outline.SetInputDataObject(data)
+        outline.Update()
+
+        return self._create_tube_handle(
+            "outline", representation, outline.GetOutput(), data.GetBounds()
+        )
+
+    def _create_tube_handle(
+        self,
+        kind: str,
+        representation: Representation,
+        lines: vtk.vtkPolyData,
+        source_bounds,
+    ) -> MitsubaRepresentationHandle:
+        # Surface normals propagated onto lines are not valid tube-frame normals.
+        # Preserve scalar arrays, but let vtkTubeFilter build its own line frame.
+        line_data = vtk.vtkPolyData()
+        line_data.ShallowCopy(lines)
+        line_data.GetPointData().SetNormals(None)
+
+        radius = max(0.0, float(representation.properties.get("line_width", 0.01)))
+        if radius <= 0.0 or line_data.GetNumberOfLines() == 0:
+            return MitsubaRepresentationHandle(
+                kind=kind,
+                bounds=tuple(float(v) for v in source_bounds),
+            )
+
+        sides = max(3, int(representation.properties.get("tube_sides", 3)))
+        tube = vtk.vtkTubeFilter()
+        tube.SetInputData(line_data)
+        tube.SetRadius(radius)
+        tube.SetNumberOfSides(sides)
+        tube.CappingOn()
+
+        triangles = vtk.vtkTriangleFilter()
+        triangles.SetInputConnection(tube.GetOutputPort())
+        triangles.PassLinesOff()
+        triangles.PassVertsOff()
+        triangles.Update()
+
+        return self._create_polydata_mesh_handle(
+            kind, representation, triangles.GetOutput()
+        )
+
+    def _create_polydata_mesh_handle(
+        self,
+        kind: str,
+        representation: Representation,
+        polydata: vtk.vtkPolyData,
+    ) -> MitsubaRepresentationHandle:
         if polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
-            return MitsubaRepresentationHandle(kind="surface")
+            return MitsubaRepresentationHandle(kind=kind)
 
         vertices = np.asarray(
             vtk_to_numpy(polydata.GetPoints().GetData()), dtype=np.float32
@@ -305,19 +448,14 @@ class MitsubaRenderingBackend(RenderingBackend):
                 )
                 if colors is not None:
                     if association == "cell":
-                        # Mitsuba interpolates vertex attributes. Duplicate the
-                        # triangle vertices for cell coloring so all three
-                        # vertices of each face carry the same color and the
-                        # result remains flat, matching VTK cell semantics.
                         vertices = vertices[faces].reshape(-1, 3)
                         faces = np.arange(len(vertices), dtype=np.uint32).reshape(-1, 3)
                         vertex_colors = np.repeat(colors, 3, axis=0)
                     else:
                         vertex_colors = colors
 
-        # No coordinate conversion here: VTK (1, 2, 3) is Mitsuba (1, 2, 3).
         mesh = self.mi.Mesh(
-            f"vtkweb_{representation.id}",
+            f"vtkweb_{representation.id}_{kind}",
             vertex_count=len(vertices),
             face_count=len(faces),
             has_vertex_normals=False,
@@ -352,13 +490,11 @@ class MitsubaRenderingBackend(RenderingBackend):
                 )
             )
         except Exception as exc:
-            # A bare Mitsuba mesh is still renderable; don't make the prototype
-            # depend on material assignment details of a particular version.
-            print(f"Mitsuba backend: could not set surface color: {exc}")
+            print(f"Mitsuba backend: could not set {kind} color: {exc}")
 
         bounds = polydata.GetBounds()
         return MitsubaRepresentationHandle(
-            kind="surface",
+            kind=kind,
             mesh=mesh,
             bounds=tuple(float(v) for v in bounds),
         )
@@ -409,7 +545,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "type": "rgb",
                     "value": (
                         np.asarray(
-                            _srgb_to_linear(handle.world_ambient_color),
+                            self._srgb_to_linear(handle.world_ambient_color),
                             dtype=np.float32,
                         )
                         * float(handle.world_ambient_intensity)
@@ -418,12 +554,13 @@ class MitsubaRenderingBackend(RenderingBackend):
             },
         }
 
-        surface_index = 0
+        shape_index = 0
         for (representation_id, current_view_id), rep in self._representations.items():
-            if current_view_id != view_id or rep.mesh is None:
+            if current_view_id != view_id:
                 continue
-            scene_dict[f"surface_{surface_index}_{representation_id}"] = rep.mesh
-            surface_index += 1
+            if rep.mesh is not None:
+                scene_dict[f"shape_{shape_index}_{representation_id}"] = rep.mesh
+                shape_index += 1
 
         scene = self.mi.load_dict(scene_dict)
         seed = handle.next_seed
@@ -435,7 +572,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             rgb = rendered[..., :3]
             alpha = np.clip(rendered[..., 3:4], 0.0, 1.0)
             background = np.asarray(
-                _srgb_to_linear(handle.background_color), dtype=np.float32
+                self._srgb_to_linear(handle.background_color), dtype=np.float32
             ).reshape((1, 1, 3))
             return rgb * alpha + background * (1.0 - alpha)
 
@@ -449,15 +586,15 @@ class MitsubaRenderingBackend(RenderingBackend):
         sample: np.ndarray,
         *,
         spp: int,
-        revision: int,
+        generation: int,
     ) -> None:
         handle = self._views[view_id]
-        if handle.accumulation_revision != revision:
-            self.clear_accumulation(view_id, revision)
+        if handle.accumulation_generation != generation:
+            self.clear_accumulation(view_id, generation)
         if handle.accumulation is None or handle.accumulation.shape != sample.shape:
             handle.accumulation = np.zeros_like(sample, dtype=np.float32)
             handle.accumulated_spp = 0
-            handle.accumulation_revision = revision
+            handle.accumulation_generation = generation
         handle.accumulation += sample * float(spp)
         handle.accumulated_spp += int(spp)
 
@@ -491,12 +628,12 @@ class MitsubaRenderingBackend(RenderingBackend):
         return self.encoded_frame(averaged)
 
     def render_frame(self, view_id: str, *, spp: int = 1) -> bytes:
-        revision, camera = self.camera_snapshot(view_id)
-        if self.accumulation_revision(view_id) != revision:
-            self.clear_accumulation(view_id, revision)
+        generation, camera = self.render_snapshot(view_id)
+        if self.accumulation_generation(view_id) != generation:
+            self.clear_accumulation(view_id, generation)
         sample = self.render_pass(view_id, camera, spp=spp)
-        self.accumulate_pass(view_id, sample, spp=spp, revision=revision)
-        return self.encoded_accumulated_frame(view_id) or ""
+        self.accumulate_pass(view_id, sample, spp=spp, generation=generation)
+        return self.encoded_accumulated_frame(view_id) or b""
 
     def get_accumulated_spp(self, view_id: str) -> int:
         return self._views[view_id].accumulated_spp
@@ -564,7 +701,7 @@ def _evaluate_transfer_function(
     transfer_function: dict[str, Any],
     values: np.ndarray,
 ) -> np.ndarray:
-    """Map scalar values to RGB using normalized global TF control points."""
+    """Map scalar values to RGB using scalar-space global TF control points."""
 
     control_points = transfer_function.get("control_points") or []
     if not control_points:
@@ -574,41 +711,17 @@ def _evaluate_transfer_function(
     order = np.argsort(points[:, 0], kind="stable")
     points = points[order]
 
-    tf_range = transfer_function.get("range") or [0.0, 1.0]
-    range_min = float(tf_range[0])
-    range_max = float(tf_range[1])
-    width = range_max - range_min
-    if abs(width) < 1.0e-20:
-        normalized = np.zeros(len(values), dtype=np.float64)
-    else:
-        normalized = (np.asarray(values, dtype=np.float64) - range_min) / width
-    normalized = np.clip(normalized, 0.0, 1.0)
-
-    # np.interp also gives the desired endpoint clamping outside the first and
-    # last control point. Opacity intentionally remains renderer-neutral state
-    # for now; Mitsuba surface transparency needs separate BSDF semantics.
-    t = np.clip(points[:, 0], 0.0, 1.0)
+    # Control-point positions are stored directly in scalar data space.
+    # np.interp clamps values outside the first/last point to the endpoints.
+    scalars = np.asarray(values, dtype=np.float64)
+    positions = points[:, 0]
     rgb = np.column_stack(
         [
-            np.interp(normalized, t, np.clip(points[:, channel], 0.0, 1.0))
+            np.interp(scalars, positions, np.clip(points[:, channel], 0.0, 1.0))
             for channel in (1, 2, 3)
         ]
     )
     return np.asarray(rgb, dtype=np.float32)
-
-
-def _srgb_to_linear(
-    color: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    """Convert a UI/display sRGB color to linear RGB for Mitsuba radiance."""
-
-    def convert(component: float) -> float:
-        component = max(0.0, min(1.0, float(component)))
-        if component <= 0.04045:
-            return component / 12.92
-        return ((component + 0.055) / 1.055) ** 2.4
-
-    return tuple(convert(component) for component in color)
 
 
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:

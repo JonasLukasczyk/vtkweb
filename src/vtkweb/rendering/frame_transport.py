@@ -4,7 +4,7 @@ import asyncio
 import json
 import struct
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Protocol
 
 from aiohttp import WSMsgType, web
 
@@ -18,7 +18,21 @@ class _Client:
     sender_task: asyncio.Task | None = None
 
 
-class BinaryFrameTransport:
+class FrameTransport(Protocol):
+    """Transport interface for encoded progressive frames."""
+
+    async def publish(
+        self,
+        view_id: str,
+        image: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+        generation: int = 0,
+        sequence: int = 0,
+    ) -> None: ...
+
+
+class WebSocketFrameTransport:
     """Out-of-state binary frame stream for progressive render backends.
 
     A frame packet is one websocket binary message:
@@ -27,7 +41,9 @@ class BinaryFrameTransport:
 
     Each client owns a single-element queue. If rendering outruns the network,
     the pending frame is replaced so progressive rendering is always
-    latest-frame-wins rather than building latency.
+    latest-frame-wins rather than building latency. Frames are intentionally
+    broadcast to all clients; per-session subscriptions can be added here if
+    vtkweb later hosts independent users on one server process.
     """
 
     route = "/vtkweb/frame-stream"
@@ -119,3 +135,7 @@ class BinaryFrameTransport:
                 client.queue.put_nowait(packet)
             except asyncio.QueueFull:
                 pass
+
+
+# Backward-compatible name for older imports.
+BinaryFrameTransport = WebSocketFrameTransport

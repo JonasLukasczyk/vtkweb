@@ -226,6 +226,38 @@ def build_representations_tab(
                         ),
                     )
 
+            with html.Div(
+                v_if=(
+                    "representation.kind === 'wireframe' || "
+                    "representation.kind === 'outline'"
+                ),
+                classes="mt-1",
+            ):
+                with html.Div(classes="vtkweb-select-box"):
+                    html.Span("Line width", classes="vtkweb-control-label")
+                    html.Input(
+                        type="number",
+                        min="0",
+                        step="0.001",
+                        value=("representation.properties.line_width ?? 0.01",),
+                        change=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'line_width',Number($event.target.value)]",
+                        ),
+                    )
+                with html.Div(classes="vtkweb-select-box mt-1"):
+                    html.Span("Tube sides", classes="vtkweb-control-label")
+                    html.Input(
+                        type="number",
+                        min="3",
+                        step="1",
+                        value=("representation.properties.tube_sides ?? 3",),
+                        change=(
+                            ctrl.set_representation_property,
+                            "[representation.id,'tube_sides',Math.max(3,Math.round(Number($event.target.value)))]",
+                        ),
+                    )
+
             # -------------------------------------------------------------
             # Volume controls
             # -------------------------------------------------------------
@@ -373,7 +405,7 @@ def build_representations_tab(
                         (
                             "[active_node_id, "
                             "active_representation_output_port, "
-                            f"'{kind}', [active_view_id]]"
+                            f"'{kind}', [active_view_id], 1]"
                         ),
                     ),
                 )

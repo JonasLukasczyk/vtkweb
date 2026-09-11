@@ -208,16 +208,6 @@ def build_render_view(
 
     vtk_widgets_by_slot = {}
 
-    def set_mitsuba_camera(view_id: str, camera: dict) -> None:
-        rendering.set_mitsuba_camera_state(view_id, camera)
-
-    ctrl.trigger("set_mitsuba_camera")(set_mitsuba_camera)
-
-    def set_mitsuba_render_size(view_id: str, width: int, height: int) -> None:
-        rendering.set_mitsuba_render_size(view_id, width, height)
-
-    ctrl.trigger("set_mitsuba_render_size")(set_mitsuba_render_size)
-
     def sync_slot_layout(**_):
         layout = {slot_id: None for slot_id in rendering.backend_slots}
         tiles_by_view = {
@@ -448,47 +438,6 @@ def build_render_view(
 
             window.__vtkwebMitsubaWheelSessions = new Map();
 
-            const mitsubaNormalize = (v) => {
-                const n = Math.hypot(v[0], v[1], v[2]) || 1;
-                return [v[0] / n, v[1] / n, v[2] / n];
-            };
-            const mitsubaCross = (a, b) => [
-                a[1] * b[2] - a[2] * b[1],
-                a[2] * b[0] - a[0] * b[2],
-                a[0] * b[1] - a[1] * b[0],
-            ];
-            const mitsubaDot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
-            const mitsubaRotate = (v, axis, angle) => {
-                axis = mitsubaNormalize(axis);
-                const c = Math.cos(angle);
-                const q = Math.sin(angle);
-                const axv = mitsubaCross(axis, v);
-                const d = mitsubaDot(axis, v) * (1 - c);
-                return [
-                    v[0]*c + axv[0]*q + axis[0]*d,
-                    v[1]*c + axv[1]*q + axis[1]*d,
-                    v[2]*c + axv[2]*q + axis[2]*d,
-                ];
-            };
-            const mitsubaDolly = (camera, delta) => {
-                const target = camera.target;
-                const offset = [
-                    camera.position[0] - target[0],
-                    camera.position[1] - target[1],
-                    camera.position[2] - target[2],
-                ];
-                const distance = Math.hypot(offset[0], offset[1], offset[2]);
-                if (distance < 1e-12) return;
-                const factor = Math.exp(Math.max(-4, Math.min(4, delta)));
-                const nextDistance = Math.max(1e-9, Math.min(1e12, distance * factor));
-                const scale = nextDistance / distance;
-                camera.position = [
-                    target[0] + offset[0] * scale,
-                    target[1] + offset[1] * scale,
-                    target[2] + offset[2] * scale,
-                ];
-            };
-
             window.__vtkwebStartMitsubaCameraDrag = (viewId, event) => {
                 if (event.button < 0 || event.button > 2) return;
 
@@ -496,10 +445,6 @@ def build_render_view(
                 event.stopPropagation();
                 event.currentTarget?.focus();
 
-                const source = views[viewId]?.camera;
-                if (!source) return;
-
-                const camera = JSON.parse(JSON.stringify(source));
                 const element = event.currentTarget;
                 const mode = event.button === 2
                     ? 'zoom'
@@ -513,65 +458,6 @@ def build_render_view(
                 const previousCursor = element.style.cursor;
                 element.style.cursor = mode === 'pan' ? 'move' : (mode === 'zoom' ? 'ns-resize' : 'grabbing');
 
-                const applyOrbit = (dx, dy) => {
-                    const center = camera.center_of_rotation || camera.target;
-                    let offset = [
-                        camera.position[0] - center[0],
-                        camera.position[1] - center[1],
-                        camera.position[2] - center[2],
-                    ];
-                    let up = mitsubaNormalize(camera.up);
-                    const radiansPerPixel = 0.35 * Math.PI / 180.0;
-
-                    offset = mitsubaRotate(offset, up, -dx * radiansPerPixel);
-                    const forward = mitsubaNormalize([-offset[0], -offset[1], -offset[2]]);
-                    let right = mitsubaCross(forward, up);
-                    if (Math.hypot(...right) > 1e-12) {
-                        right = mitsubaNormalize(right);
-                        const pitch = -dy * radiansPerPixel;
-                        offset = mitsubaRotate(offset, right, pitch);
-                        up = mitsubaNormalize(mitsubaRotate(up, right, pitch));
-                    }
-
-                    camera.position = [
-                        center[0] + offset[0],
-                        center[1] + offset[1],
-                        center[2] + offset[2],
-                    ];
-                    camera.target = [...center];
-                    camera.up = up;
-                    camera.center_of_rotation = [...center];
-                };
-
-                const applyPan = (dx, dy) => {
-                    const forwardVector = [
-                        camera.target[0] - camera.position[0],
-                        camera.target[1] - camera.position[1],
-                        camera.target[2] - camera.position[2],
-                    ];
-                    const distance = Math.max(Math.hypot(...forwardVector), 1e-9);
-                    const forward = mitsubaNormalize(forwardVector);
-                    let right = mitsubaCross(forward, mitsubaNormalize(camera.up));
-                    if (Math.hypot(...right) < 1e-12) return;
-                    right = mitsubaNormalize(right);
-                    const screenUp = mitsubaNormalize(mitsubaCross(right, forward));
-                    const rect = element.getBoundingClientRect();
-                    const viewportHeight = Math.max(rect.height, 1);
-                    const fovRadians = (Number(camera.fov) || 45.0) * Math.PI / 180.0;
-                    const worldPerPixel = 2.0 * distance * Math.tan(0.5 * fovRadians) / viewportHeight;
-                    const shift = [
-                        (-dx * right[0] + dy * screenUp[0]) * worldPerPixel,
-                        (-dx * right[1] + dy * screenUp[1]) * worldPerPixel,
-                        (-dx * right[2] + dy * screenUp[2]) * worldPerPixel,
-                    ];
-                    const translate = (v) => [v[0] + shift[0], v[1] + shift[1], v[2] + shift[2]];
-                    const center = camera.center_of_rotation || camera.target;
-                    camera.position = translate(camera.position);
-                    camera.target = translate(camera.target);
-                    camera.center_of_rotation = translate(center);
-                    camera.up = screenUp;
-                };
-
                 const flush = () => {
                     animationFrame = null;
                     if (pendingDx === 0 && pendingDy === 0) return;
@@ -579,14 +465,8 @@ def build_render_view(
                     const dy = pendingDy;
                     pendingDx = 0;
                     pendingDy = 0;
-                    if (mode === 'pan') {
-                        applyPan(dx, dy);
-                    } else if (mode === 'zoom') {
-                        mitsubaDolly(camera, dy * 0.01);
-                    } else {
-                        applyOrbit(dx, dy);
-                    }
-                    trigger('set_mitsuba_camera', [viewId, camera]);
+                    const height = Math.max(element.getBoundingClientRect().height, 1);
+                    trigger('interact_mitsuba_camera', [viewId, mode, dx, dy, height]);
                 };
 
                 const move = (moveEvent) => {
@@ -621,20 +501,15 @@ def build_render_view(
 
                 let session = window.__vtkwebMitsubaWheelSessions.get(viewId);
                 if (!session) {
-                    const source = views[viewId]?.camera;
-                    if (!source) return;
-                    session = {
-                        camera: JSON.parse(JSON.stringify(source)),
-                        pending: 0,
-                        animationFrame: null,
-                        idleTimer: null,
-                    };
+                    session = { pending: 0, animationFrame: null, idleTimer: null };
                     window.__vtkwebMitsubaWheelSessions.set(viewId, session);
                 }
 
                 let deltaPixels = event.deltaY;
                 if (event.deltaMode === 1) deltaPixels *= 16;
-                if (event.deltaMode === 2) deltaPixels *= Math.max(event.currentTarget?.clientHeight || 1, 1);
+                if (event.deltaMode === 2) {
+                    deltaPixels *= Math.max(event.currentTarget?.clientHeight || 1, 1);
+                }
                 session.pending += deltaPixels;
 
                 const flush = () => {
@@ -642,8 +517,10 @@ def build_render_view(
                     if (session.pending === 0) return;
                     const delta = session.pending;
                     session.pending = 0;
-                    mitsubaDolly(session.camera, delta * 0.0015);
-                    trigger('set_mitsuba_camera', [viewId, session.camera]);
+                    const height = Math.max(event.currentTarget?.clientHeight || 1, 1);
+                    // Match drag-dolly sensitivity while retaining the smoother
+                    // wheel/trackpad scale from the previous implementation.
+                    trigger('interact_mitsuba_camera', [viewId, 'zoom', 0, delta * 0.15, height]);
                 };
 
                 if (session.animationFrame === null) {
@@ -667,11 +544,6 @@ def build_render_view(
             delete window.__vtkwebMitsubaWheel;
             delete window.__vtkwebMitsubaWheelSessions;
         """,
-    )
-
-    # Front-end trigger used by the splitter drag handler.
-    ctrl.trigger("set_split_ratio")(
-        lambda container_id, ratio: ctrl.set_split_ratio(container_id, ratio)
     )
 
     with html.Div(classes="vtkweb-workspace"):
@@ -772,6 +644,13 @@ def build_render_view(
                     classes="vtkweb-tile-button",
                     v_if=("tile.view_id && views[tile.view_id]?.type !== 'dummy'",),
                     click="trigger('render_view_reset', [tile.view_id])",
+                )
+                html.Button(
+                    "×",
+                    title="Close view",
+                    classes="vtkweb-tile-button",
+                    v_if=("tile.view_id",),
+                    click=(ctrl.remove_view, "[tile.view_id]"),
                 )
                 html.Button(
                     "V",

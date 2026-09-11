@@ -70,6 +70,7 @@ def build_transfer_tab(ctrl) -> None:
                 items=("tf_preset_items",),
                 item_title="title",
                 item_value="value",
+                item_props=True,
                 density="compact",
                 variant="plain",
                 hide_details=True,
@@ -85,26 +86,26 @@ def build_transfer_tab(ctrl) -> None:
                 type="number",
                 step="any",
                 value=(
-                    "transfer_functions[active_transfer_function]?.range?.[0] ?? 0",
+                    "transfer_functions[active_transfer_function]?.control_points?.[0]?.[0] ?? 0",
                 ),
                 classes="vtkweb-range-input",
                 change=(
                     ctrl.set_tf_range,
                     "[active_transfer_function,Number($event.target.value),"
-                    "transfer_functions[active_transfer_function].range[1]]",
+                    "transfer_functions[active_transfer_function].control_points[transfer_functions[active_transfer_function].control_points.length - 1][0]]",
                 ),
             )
             html.Input(
                 type="number",
                 step="any",
                 value=(
-                    "transfer_functions[active_transfer_function]?.range?.[1] ?? 1",
+                    "transfer_functions[active_transfer_function]?.control_points?.[transfer_functions[active_transfer_function]?.control_points?.length - 1]?.[0] ?? 1",
                 ),
                 classes="vtkweb-range-input",
                 change=(
                     ctrl.set_tf_range,
                     "[active_transfer_function,"
-                    "transfer_functions[active_transfer_function].range[0],"
+                    "transfer_functions[active_transfer_function].control_points[0][0],"
                     "Number($event.target.value)]",
                 ),
             )
@@ -120,7 +121,7 @@ def build_transfer_tab(ctrl) -> None:
         ):
             with html.Thead():
                 with html.Tr():
-                    for label in ("t", "R", "G", "B", "O", ""):
+                    for label in ("Value", "R", "G", "B", "O", ""):
                         html.Th(label, style="padding:2px;text-align:left;")
             with html.Tbody():
                 with html.Tr(
@@ -132,9 +133,7 @@ def build_transfer_tab(ctrl) -> None:
                     with html.Td(style="padding:2px;"):
                         html.Input(
                             type="number",
-                            min="0",
-                            max="1",
-                            step="0.01",
+                            step="any",
                             value=("point[0]",),
                             classes="vtkweb-range-input",
                             change=(

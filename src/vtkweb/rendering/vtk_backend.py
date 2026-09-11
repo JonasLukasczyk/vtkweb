@@ -33,7 +33,7 @@ class VTKRepresentationHandle:
     pipeline_filter: vtk.vtkAlgorithm | None = None
     color_function: vtk.vtkColorTransferFunction | None = None
     opacity_function: vtk.vtkPiecewiseFunction | None = None
-    lookup_table: vtk.vtkLookupTable | None = None
+    lookup_table: Any = None
     coloring_data: vtk.vtkDataObject | None = None
 
 
@@ -573,9 +573,13 @@ class VTKRenderingBackend(RenderingBackend):
             mapper.SetScalarModeToUseCellFieldData()
         mapper.SelectColorArray(selected_array_name)
 
-        lookup_table = _build_lookup_table(tf)
-        handle.lookup_table = lookup_table
-        mapper.SetLookupTable(lookup_table)
+        color_map = _build_surface_color_map(tf)
+        handle.lookup_table = color_map
+        mapper.SetLookupTable(color_map)
+        mapper.SetScalarRange(
+            float(tf["control_points"][0][0]), float(tf["control_points"][-1][0])
+        )
+        mapper.SetColorModeToMapScalars()
         mapper.UseLookupTableScalarRangeOn()
 
         mapper.Modified()
@@ -620,38 +624,15 @@ def _data_for_coloring(
     return copied, magnitude_name
 
 
-def _tf_value(data_range: list[float] | tuple[float, float], t: float) -> float:
-    minimum = float(data_range[0])
-    maximum = float(data_range[1])
-    return minimum + float(t) * (maximum - minimum)
-
-
-def _build_lookup_table(tf: dict[str, Any], samples: int = 256) -> vtk.vtkLookupTable:
-    data_range = tf["range"]
-    control_points = sorted(tf["control_points"], key=lambda point: point[0])
-    positions = np.asarray([point[0] for point in control_points], dtype=float)
-    channels = [
-        np.asarray([point[index] for point in control_points], dtype=float)
-        for index in range(1, 5)
-    ]
-    sample_positions = np.linspace(0.0, 1.0, max(2, int(samples)))
-
-    lookup_table = vtk.vtkLookupTable()
-    lookup_table.SetNumberOfTableValues(len(sample_positions))
-    lookup_table.SetRange(float(data_range[0]), float(data_range[1]))
-    lookup_table.Build()
-
-    sampled = [np.interp(sample_positions, positions, channel) for channel in channels]
-    for index in range(len(sample_positions)):
-        lookup_table.SetTableValue(
-            index,
-            float(sampled[0][index]),
-            float(sampled[1][index]),
-            float(sampled[2][index]),
-            float(sampled[3][index]),
-        )
-    lookup_table.Modified()
-    return lookup_table
+def _build_surface_color_map(tf: dict[str, Any]) -> vtk.vtkColorTransferFunction:
+    """Create the VTK/vtk.js surface color map directly from global TF state."""
+    color_map = vtk.vtkColorTransferFunction()
+    color_map.SetColorSpaceToRGB()
+    color_map.SetClamping(True)
+    for value, r, g, b, _opacity in tf["control_points"]:
+        color_map.AddRGBPoint(float(value), float(r), float(g), float(b))
+    color_map.Modified()
+    return color_map
 
 
 def _apply_volume_transfer_function(
@@ -659,21 +640,18 @@ def _apply_volume_transfer_function(
     opacity_function: vtk.vtkPiecewiseFunction | None,
     tf: dict[str, Any],
 ) -> None:
-    data_range = tf["range"]
-    control_points = sorted(tf["control_points"], key=lambda point: point[0])
+    control_points = tf["control_points"]
 
     if color_function is not None:
         color_function.RemoveAllPoints()
-        for t, r, g, b, _opacity in control_points:
-            color_function.AddRGBPoint(
-                _tf_value(data_range, t), float(r), float(g), float(b)
-            )
+        for value, r, g, b, _opacity in control_points:
+            color_function.AddRGBPoint(float(value), float(r), float(g), float(b))
         color_function.Modified()
 
     if opacity_function is not None:
         opacity_function.RemoveAllPoints()
-        for t, _r, _g, _b, opacity in control_points:
-            opacity_function.AddPoint(_tf_value(data_range, t), float(opacity))
+        for value, _r, _g, _b, opacity in control_points:
+            opacity_function.AddPoint(float(value), float(opacity))
         opacity_function.Modified()
 
 

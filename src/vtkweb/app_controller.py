@@ -143,6 +143,7 @@ def initialize_app_controller(
         output_port: int = 0,
         kind: str = "surface",
         view_ids: Iterable[str] = (),
+        camera_reset_mode: int = 0,
         representation_id: str | None = None,
     ) -> str:
         representation = rendering.add_representation(
@@ -150,6 +151,7 @@ def initialize_app_controller(
             output_port=int(output_port),
             kind=kind,
             view_ids=view_ids,
+            camera_reset_mode=int(camera_reset_mode),
             representation_id=representation_id,
         )
         return representation.id
@@ -259,6 +261,15 @@ def initialize_app_controller(
     def remove_view(view_id: str) -> None:
         workspace.unassign_view(view_id)
         views.remove_view(view_id)
+        if state.active_view_id == view_id:
+            state.active_view_id = next(
+                (
+                    item["id"]
+                    for item in state.views.values()
+                    if item.get("type") in {"vtk", "mitsuba"}
+                ),
+                None,
+            )
 
     def set_active_view(
         view_id: str,
@@ -296,6 +307,24 @@ def initialize_app_controller(
         view_id: str,
     ) -> None:
         rendering.reset_camera(view_id)
+
+    def interact_mitsuba_camera(
+        view_id: str,
+        mode: str,
+        dx: float,
+        dy: float,
+        viewport_height: float,
+    ) -> None:
+        rendering.interact_mitsuba_camera(
+            view_id, mode, float(dx), float(dy), float(viewport_height)
+        )
+
+    def set_mitsuba_render_size(
+        view_id: str,
+        width: int,
+        height: int,
+    ) -> None:
+        rendering.set_mitsuba_render_size(view_id, int(width), int(height))
 
     def create_workspace(*, container_id: str | None = None) -> str:
         return workspace.create_workspace(container_id=container_id)
@@ -558,6 +587,8 @@ def initialize_app_controller(
     ctrl.set_view_world_ambient_color = set_view_world_ambient_color
     ctrl.set_view_world_ambient_intensity = set_view_world_ambient_intensity
     ctrl.reset_camera = reset_camera
+    ctrl.interact_mitsuba_camera = interact_mitsuba_camera
+    ctrl.set_mitsuba_render_size = set_mitsuba_render_size
     ctrl.restore_view = restore_view
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
@@ -571,6 +602,12 @@ def initialize_app_controller(
     ctrl.open_python_state_file = open_python_state_file
     ctrl.execute_pipeline = execute_pipeline
     ctrl.abort_pipeline = abort_pipeline
+
+    # Client-to-server render/workspace RPCs. UI code emits these events but
+    # application/controller ownership stays here.
+    ctrl.trigger("interact_mitsuba_camera")(interact_mitsuba_camera)
+    ctrl.trigger("set_mitsuba_render_size")(set_mitsuba_render_size)
+    ctrl.trigger("set_split_ratio")(set_split_ratio)
 
     server.trigger("delete_active_node")(delete_active_node)
     server.trigger("execute_pipeline")(execute_pipeline)
