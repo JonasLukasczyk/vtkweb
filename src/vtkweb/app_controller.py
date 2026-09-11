@@ -139,36 +139,14 @@ def initialize_app_controller(
         )
 
     def add_representation(
-        node_id: str,
-        output_port: int = 0,
-        kind: str = "surface",
-        view_ids: Iterable[str] = (),
-        camera_reset_mode: int = 0,
+        node_id: str, output_port: int = 0, kind: str = "surface",
+        view_ids: Iterable[str] = (), camera_reset_mode: int = 0,
         representation_id: str | None = None,
     ) -> str:
-        representation = rendering.add_representation(
-            node_id,
-            output_port=int(output_port),
-            kind=kind,
-            view_ids=view_ids,
-            camera_reset_mode=int(camera_reset_mode),
-            representation_id=representation_id,
-        )
-        return representation.id
-
-    def remove_representation(
-        representation_id: str,
-    ) -> None:
-        rendering.remove_representation(representation_id)
-
-    def set_representation_kind(
-        representation_id: str,
-        kind: str,
-    ) -> None:
-        rendering.set_representation_kind(
-            representation_id,
-            kind,
-        )
+        return rendering.add_representation(
+            node_id, output_port=int(output_port), kind=kind, view_ids=view_ids,
+            camera_reset_mode=int(camera_reset_mode), representation_id=representation_id,
+        ).id
 
     def toggle_representation_in_view(
         representation_id: str,
@@ -187,52 +165,6 @@ def initialize_app_controller(
                 representation_id,
                 view_id,
             )
-
-    def set_representation_array(
-        representation_id: str,
-        array_name: str | None,
-        association: str = "point",
-    ) -> None:
-        rendering.set_array(
-            representation_id,
-            array_name,
-            association,
-        )
-
-    def set_representation_property(
-        representation_id: str,
-        name: str,
-        value,
-    ) -> None:
-        rendering.set_representation_property(representation_id, name, value)
-
-    def set_tf_data(array_name: str, tf_dict: dict) -> None:
-        rendering.transfer_functions.set_data(array_name, tf_dict)
-
-    def apply_tf_preset(array_name: str, preset_name: str) -> None:
-        rendering.transfer_functions.apply_preset(array_name, preset_name)
-
-    def set_tf_range(array_name: str, minimum: float, maximum: float) -> None:
-        rendering.transfer_functions.set_range(array_name, minimum, maximum)
-
-    def rescale_tf(array_name: str) -> None:
-        rendering.transfer_functions.rescale(array_name)
-
-    def set_tf_control_point_component(
-        array_name: str,
-        point_index: int,
-        component_index: int,
-        value: float,
-    ) -> None:
-        rendering.transfer_functions.set_control_point_component(
-            array_name, point_index, component_index, value
-        )
-
-    def add_tf_control_point(array_name: str) -> None:
-        rendering.transfer_functions.add_control_point(array_name)
-
-    def remove_tf_control_point(array_name: str, point_index: int) -> None:
-        rendering.transfer_functions.remove_control_point(array_name, point_index)
 
     def create_view(
         view_type: str,
@@ -254,12 +186,11 @@ def initialize_app_controller(
             raise ValueError(f"Container already has a view: {container_id}")
         view_id = create_view(view_type)
         assign_view_to_container(container_id, view_id)
-        set_active_view(view_id)
-        reset_camera(view_id)
+        rendering.set_active_view(view_id)
         return view_id
 
     def remove_view(view_id: str) -> None:
-        workspace.unassign_view(view_id)
+        workspace.close_view_tile(view_id)
         views.remove_view(view_id)
         if state.active_view_id == view_id:
             state.active_view_id = next(
@@ -270,61 +201,6 @@ def initialize_app_controller(
                 ),
                 None,
             )
-
-    def set_active_view(
-        view_id: str,
-    ) -> None:
-        rendering.set_active_view(view_id)
-
-    def set_view_background_color(
-        view_id: str,
-        value: str,
-    ) -> None:
-        rendering.set_background_color(
-            view_id,
-            _hex_to_rgb(value),
-        )
-
-    def set_view_world_ambient_color(
-        view_id: str,
-        value: str,
-    ) -> None:
-        rendering.set_world_ambient_color(
-            view_id,
-            _hex_to_rgb(value),
-        )
-
-    def set_view_world_ambient_intensity(
-        view_id: str,
-        value: float,
-    ) -> None:
-        rendering.set_world_ambient_intensity(
-            view_id,
-            float(value),
-        )
-
-    def reset_camera(
-        view_id: str,
-    ) -> None:
-        rendering.reset_camera(view_id)
-
-    def interact_mitsuba_camera(
-        view_id: str,
-        mode: str,
-        dx: float,
-        dy: float,
-        viewport_height: float,
-    ) -> None:
-        rendering.interact_mitsuba_camera(
-            view_id, mode, float(dx), float(dy), float(viewport_height)
-        )
-
-    def set_mitsuba_render_size(
-        view_id: str,
-        width: int,
-        height: int,
-    ) -> None:
-        rendering.set_mitsuba_render_size(view_id, int(width), int(height))
 
     def create_workspace(*, container_id: str | None = None) -> str:
         return workspace.create_workspace(container_id=container_id)
@@ -363,14 +239,6 @@ def initialize_app_controller(
         """Split a leaf; the new leaf stays empty until a backend is selected."""
         return split_container(container_id, orientation)
 
-    def restore_view(
-        *,
-        name: str,
-        view_id: str,
-    ) -> str:
-        """Backward-compatible loader for state files from the single-view UI."""
-        return create_view("vtk", name=name, view_id=view_id)
-
     def set_active_node(
         node_id: str,
     ) -> None:
@@ -399,14 +267,12 @@ def initialize_app_controller(
         view_id = state.active_view_id
 
         if not representations:
-            representation_id = add_representation(
+            add_representation(
                 node_id,
                 output_port=output_port,
                 kind="surface",
-            )
-            rendering.assign_representation(
-                representation_id,
-                view_id,
+                view_ids=[view_id],
+                camera_reset_mode=1,
             )
             return
 
@@ -562,34 +428,33 @@ def initialize_app_controller(
     ctrl.remove_node_list_value = remove_node_list_value
     ctrl.set_node_input_array = set_node_input_array
     ctrl.add_representation = add_representation
-    ctrl.remove_representation = remove_representation
-    ctrl.set_representation_kind = set_representation_kind
+    ctrl.remove_representation = rendering.remove_representation
+    ctrl.set_representation_kind = rendering.set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
-    ctrl.set_representation_array = set_representation_array
-    ctrl.set_representation_property = set_representation_property
-    ctrl.set_tf_data = set_tf_data
-    ctrl.apply_tf_preset = apply_tf_preset
-    ctrl.set_tf_range = set_tf_range
-    ctrl.rescale_tf = rescale_tf
-    ctrl.set_tf_control_point_component = set_tf_control_point_component
-    ctrl.add_tf_control_point = add_tf_control_point
-    ctrl.remove_tf_control_point = remove_tf_control_point
+    ctrl.set_representation_array = rendering.set_array
+    ctrl.set_representation_property = rendering.set_representation_property
+    ctrl.set_tf_data = rendering.transfer_functions.set_data
+    ctrl.apply_tf_preset = rendering.transfer_functions.apply_preset
+    ctrl.set_tf_range = rendering.transfer_functions.set_range
+    ctrl.rescale_tf = rendering.transfer_functions.rescale
+    ctrl.set_tf_control_point_component = rendering.transfer_functions.set_control_point_component
+    ctrl.add_tf_control_point = rendering.transfer_functions.add_control_point
+    ctrl.remove_tf_control_point = rendering.transfer_functions.remove_control_point
     ctrl.create_view = create_view
     ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
+    ctrl.switch_view_type = rendering.switch_view_type
     ctrl.create_workspace = create_workspace
     ctrl.split_container = split_container
     ctrl.assign_view_to_container = assign_view_to_container
     ctrl.set_split_ratio = set_split_ratio
     ctrl.split_view_container = split_view_container
-    ctrl.set_active_view = set_active_view
-    ctrl.set_view_background_color = set_view_background_color
-    ctrl.set_view_world_ambient_color = set_view_world_ambient_color
-    ctrl.set_view_world_ambient_intensity = set_view_world_ambient_intensity
-    ctrl.reset_camera = reset_camera
-    ctrl.interact_mitsuba_camera = interact_mitsuba_camera
-    ctrl.set_mitsuba_render_size = set_mitsuba_render_size
-    ctrl.restore_view = restore_view
+    ctrl.set_active_view = rendering.set_active_view
+    ctrl.set_view_property = rendering.set_view_property
+    ctrl.reset_camera = rendering.reset_camera
+    ctrl.sync_vtk_camera = rendering.sync_vtk_camera
+    ctrl.interact_mitsuba_camera = rendering.interact_mitsuba_camera
+    ctrl.set_mitsuba_render_size = rendering.set_mitsuba_render_size
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
     ctrl.insert_node = insert_node
@@ -605,20 +470,9 @@ def initialize_app_controller(
 
     # Client-to-server render/workspace RPCs. UI code emits these events but
     # application/controller ownership stays here.
-    ctrl.trigger("interact_mitsuba_camera")(interact_mitsuba_camera)
-    ctrl.trigger("set_mitsuba_render_size")(set_mitsuba_render_size)
+    ctrl.trigger("interact_mitsuba_camera")(rendering.interact_mitsuba_camera)
+    ctrl.trigger("set_mitsuba_render_size")(rendering.set_mitsuba_render_size)
     ctrl.trigger("set_split_ratio")(set_split_ratio)
 
     server.trigger("delete_active_node")(delete_active_node)
     server.trigger("execute_pipeline")(execute_pipeline)
-
-
-def _hex_to_rgb(
-    value: str,
-) -> tuple[float, float, float]:
-    value = value.lstrip("#")
-    return (
-        int(value[0:2], 16) / 255.0,
-        int(value[2:4], 16) / 255.0,
-        int(value[4:6], 16) / 255.0,
-    )

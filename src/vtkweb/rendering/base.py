@@ -15,16 +15,8 @@ REPRESENTATION_KINDS = (
 
 
 @dataclass
-class ViewSettings:
-    background_color: tuple[float, float, float] = (0.1, 0.1, 0.1)
-    world_ambient_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    world_ambient_intensity: float = 1.0
-
-
-@dataclass
 class RenderView:
     name: str
-    settings: ViewSettings = field(default_factory=ViewSettings)
     id: str = field(default_factory=lambda: uuid4().hex)
 
 
@@ -95,16 +87,28 @@ class RenderingBackend(ABC):
         pass
 
     @abstractmethod
-    def set_view_settings(
-        self,
-        view: RenderView,
-    ) -> None:
+    def set_view_property(self, view_id: str, name: str, value: Any) -> None:
         pass
 
     @abstractmethod
     def reset_camera(
         self,
         view_id: str,
+    ) -> None:
+        pass
+
+    @abstractmethod
+    def get_camera_state(
+        self,
+        view_id: str,
+    ) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
+    def set_camera_state(
+        self,
+        view_id: str,
+        value: dict[str, Any],
     ) -> None:
         pass
 
@@ -119,13 +123,9 @@ class ProgressiveRenderingBackend(Protocol):
     ) -> int: ...
     def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]: ...
     def has_renderable_scene(self, view_id: str) -> bool: ...
-    def clear_accumulation(
-        self, view_id: str, generation: int | None = None
-    ) -> None: ...
+    def clear_accumulation(self, view_id: str, generation: int | None = None) -> None: ...
     def accumulation_generation(self, view_id: str) -> int: ...
-    def render_pass(
-        self, view_id: str, camera: dict[str, Any], *, spp: int = 1
-    ) -> Any: ...
+    def render_pass(self, view_id: str, camera: dict[str, Any], *, spp: int = 1) -> Any: ...
     def accumulate_pass(
         self,
         view_id: str,

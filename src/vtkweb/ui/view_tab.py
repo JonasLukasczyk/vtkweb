@@ -18,8 +18,8 @@ def build_view_tab(
             type="color",
             value=("views[active_view_id]?.background_color || '#1a1a1a'",),
             input=(
-                ctrl.set_view_background_color,
-                "[active_view_id,$event.target.value]",
+                ctrl.set_view_property,
+                "[active_view_id,'background_color',$event.target.value]",
             ),
         )
 
@@ -35,8 +35,8 @@ def build_view_tab(
             type="color",
             value=("views[active_view_id]?.world_ambient_color || '#ffffff'",),
             input=(
-                ctrl.set_view_world_ambient_color,
-                "[active_view_id,$event.target.value]",
+                ctrl.set_view_property,
+                "[active_view_id,'world_ambient_color',$event.target.value]",
             ),
         )
 
@@ -54,7 +54,7 @@ def build_view_tab(
             step="0.1",
             value=("views[active_view_id]?.world_ambient_intensity ?? 1.0",),
             change=(
-                ctrl.set_view_world_ambient_intensity,
-                "[active_view_id,Number($event.target.value)]",
+                ctrl.set_view_property,
+                "[active_view_id,'world_ambient_intensity',Number($event.target.value)]",
             ),
         )

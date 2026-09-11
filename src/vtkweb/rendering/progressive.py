@@ -29,6 +29,7 @@ class ProgressiveRenderManager:
         backend_view_id: str,
     ) -> None:
         self._views[view_id] = _ProgressiveView(backend, backend_view_id)
+        self._frame_sequence[view_id] = 0
         self.ensure(view_id)
 
     def unregister_view(self, view_id: str) -> None:

@@ -96,6 +96,35 @@ class WorkspaceManager:
         if container_id is not None:
             self.assign_view(container_id, None)
 
+    def close_view_tile(self, view_id: str) -> None:
+        """Remove the view's leaf, collapsing its parent; keep the last tile empty."""
+        leaf_id = self.container_for_view(view_id)
+        if leaf_id is None:
+            return
+        nodes = dict(self.state.workspace_nodes)
+        leaves = [node for node in nodes.values() if node.get("kind") == "leaf"]
+        if len(leaves) <= 1:
+            self.assign_view(leaf_id, None)
+            return
+
+        parent_id = next(
+            (node_id for node_id, node in nodes.items()
+             if node.get("kind") == "split" and leaf_id in (node["first"], node["second"])),
+            None,
+        )
+        if parent_id is None:
+            self.assign_view(leaf_id, None)
+            return
+
+        parent = nodes[parent_id]
+        sibling_id = parent["second"] if parent["first"] == leaf_id else parent["first"]
+        sibling = dict(nodes[sibling_id], id=parent_id)
+        nodes[parent_id] = sibling
+        nodes.pop(leaf_id, None)
+        nodes.pop(sibling_id, None)
+        self.state.workspace_nodes = nodes
+        self._sync_geometry()
+
     def _sync_geometry(self) -> None:
         root_id = self.state.workspace_root_id
         nodes = self.state.workspace_nodes

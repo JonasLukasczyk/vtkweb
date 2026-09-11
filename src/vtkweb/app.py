@@ -25,7 +25,6 @@ root_container = workspace.create_workspace(container_id="root")
 default_view = views.create_view("vtk", name="View 1")
 workspace.assign_view(root_container, default_view)
 rendering.set_active_view(default_view)
-rendering.reset_camera(default_view)
 
 build_ui(
     server,

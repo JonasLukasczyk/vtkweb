@@ -4,7 +4,6 @@ from vtkweb.rendering.base import (
     ProgressiveRenderingBackend,
     RenderingBackend,
     Representation,
-    ViewSettings,
 )
 from vtkweb.rendering.frame_transport import FrameTransport, WebSocketFrameTransport
 from vtkweb.rendering.manager import (
@@ -22,7 +21,6 @@ __all__ = [
     "WebSocketFrameTransport",
     "RenderingBackend",
     "Representation",
-    "ViewSettings",
     "RenderManager",
     "VTKRenderingBackend",
 ]

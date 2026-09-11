@@ -640,6 +640,9 @@ class PipelineGraph:
     def execution_state(self, node_id: str) -> str:
         return self.node_state(node_id).get("execution_state", "modified")
 
+    def has_valid_output(self, node_id: str) -> bool:
+        return self.execution_state(node_id) == "success"
+
     def modification_version(self, node_id: str) -> int:
         return self._modification_versions.get(node_id, 0)
 

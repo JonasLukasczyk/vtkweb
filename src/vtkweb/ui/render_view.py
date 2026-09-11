@@ -231,25 +231,24 @@ def build_render_view(
 
     sync_slot_layout()
 
+    previous_slot_views = {}
+
     @state.change("workspace_geometry", "views")
     def _sync_slots(**_):
         sync_slot_layout()
+        for slot_id, item in state.vtk_slot_layout.items():
+            view_id = item and item["view_id"]
+            if view_id == previous_slot_views.get(slot_id):
+                continue
+            previous_slot_views[slot_id] = view_id
+            widget = vtk_widgets_by_slot.get(slot_id)
+            if widget is not None and view_id is not None:
+                widget.update()
+                widget.push_camera()
 
     def reset_render_view(view_id: str | None = None) -> None:
-        if view_id is None or view_id not in state.views:
-            return
-        value = state.views[view_id]
-        view_type = value.get("type")
-        if view_type == "mitsuba":
+        if view_id in state.views:
             ctrl.reset_camera(view_id)
-            return
-
-        if view_type == "vtk":
-            # Keyboard camera reset belongs to the focused VtkLocalView.
-            widget = vtk_widgets_by_slot.get(value["backend_id"])
-            if widget is not None:
-                widget.reset_camera()
-                widget.update()
 
     ctrl.trigger("render_view_reset")(reset_render_view)
 
@@ -312,6 +311,12 @@ def build_render_view(
         for (const element of elements) {
             if (window.__vtkwebMitsubaObservedElements.has(element)) continue;
             window.__vtkwebMitsubaObservedElements.add(element);
+            const canvas = element.querySelector('canvas[id^="vtkweb-mitsuba-canvas-"]');
+            if (canvas) {
+                const viewId = canvas.id.substring('vtkweb-mitsuba-canvas-'.length);
+                window.__vtkwebMitsubaLatestFrame.delete(viewId);
+                window.__vtkwebMitsubaFrameStats.delete(viewId);
+            }
             mitsubaResizeObserver.observe(element);
             reportMitsubaSize(element);
         }
@@ -559,11 +564,17 @@ def build_render_view(
                     f"[vtk_slot_layout['{slot_id}'].view_id]",
                 ),
             ):
+                ref = f"render_view_{slot_id}"
                 widget = vtk_widgets.VtkLocalView(
                     backend.get_render_window(slot_id),
-                    ref=f"render_view_{slot_id}",
+                    ref=ref,
                     tabindex=0,
                     style="height:100%;width:100%;outline:none;",
+                    interactor_events=("['EndInteraction']",),
+                    EndInteraction=(
+                        ctrl.sync_vtk_camera,
+                        f"[vtk_slot_layout['{slot_id}'].view_id, $refs.{ref}.getCamera()]",
+                    ),
                     focus=(
                         ctrl.set_active_view,
                         f"[vtk_slot_layout['{slot_id}'].view_id]",
@@ -600,8 +611,8 @@ def build_render_view(
                 raw_attrs=[
                     '@mousedown="window.__vtkwebStartMitsubaCameraDrag(tile.view_id, $event)"',
                     '@wheel.prevent="window.__vtkwebMitsubaWheel(tile.view_id, $event)"',
-                    "@contextmenu.prevent",
-                    "@keydown.space.exact.prevent=\"trigger('render_view_reset', [tile.view_id])\"",
+                    '@contextmenu.prevent',
+                    '@keydown.space.exact.prevent="trigger(\'render_view_reset\', [tile.view_id])"',
                 ],
             ):
                 html.Canvas(
@@ -646,6 +657,16 @@ def build_render_view(
                     click="trigger('render_view_reset', [tile.view_id])",
                 )
                 html.Button(
+                    "⇄",
+                    title=("views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",),
+                    classes="vtkweb-tile-button",
+                    v_if=("tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",),
+                    click=(
+                        ctrl.switch_view_type,
+                        "[tile.view_id, views[tile.view_id]?.type === 'vtk' ? 'mitsuba' : 'vtk']",
+                    ),
+                )
+                html.Button(
                     "×",
                     title="Close view",
                     classes="vtkweb-tile-button",
@@ -683,3 +704,9 @@ def build_render_view(
         for slot_id, widget in vtk_widgets_by_slot.items():
             if state.vtk_slot_layout.get(slot_id) is not None:
                 widget.update()
+
+    @state.change("camera_revision")
+    def push_vtk_cameras(**_):
+        for slot_id, widget in vtk_widgets_by_slot.items():
+            if state.vtk_slot_layout.get(slot_id) is not None:
+                widget.push_camera()

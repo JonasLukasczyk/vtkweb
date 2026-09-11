@@ -42,12 +42,9 @@ class VTKRenderingBackend(RenderingBackend):
 
     def __init__(
         self,
-        transfer_function_provider: Callable[[str], dict[str, Any] | None]
-        | None = None,
+        transfer_function_provider: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> None:
-        self._transfer_function_provider = transfer_function_provider or (
-            lambda _name: None
-        )
+        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
         self._views: dict[
             str,
             VTKViewHandle,
@@ -122,8 +119,6 @@ class VTKRenderingBackend(RenderingBackend):
             keepalive_actor=keepalive_actor,
         )
 
-        self.set_view_settings(view)
-
     def remove_view(
         self,
         view_id: str,
@@ -171,14 +166,11 @@ class VTKRenderingBackend(RenderingBackend):
     ) -> vtk.vtkRenderWindow:
         return self._views[view_id].render_window
 
-    def set_view_settings(
-        self,
-        view: RenderView,
-    ) -> None:
-        handle = self._views[view.id]
-
-        handle.renderer.SetBackground(*view.settings.background_color)
-
+    def set_view_property(self, view_id: str, name: str, value: Any) -> None:
+        if name != "background_color":
+            return
+        handle = self._views[view_id]
+        handle.renderer.SetBackground(*value)
         handle.renderer.Modified()
         handle.render_window.Modified()
 
@@ -186,11 +178,42 @@ class VTKRenderingBackend(RenderingBackend):
         self,
         view_id: str,
     ) -> None:
+        print(f"[camera] VTK reset_camera(view_id={view_id})", flush=True)
         handle = self._views[view_id]
 
         handle.renderer.ResetCamera()
         handle.renderer.ResetCameraClippingRange()
 
+        handle.renderer.Modified()
+        handle.render_window.Modified()
+
+    def get_camera_state(self, view_id: str) -> dict[str, object]:
+        camera = self._views[view_id].renderer.GetActiveCamera()
+        return {
+            "position": list(camera.GetPosition()),
+            "target": list(camera.GetFocalPoint()),
+            "up": list(camera.GetViewUp()),
+            "fov": float(camera.GetViewAngle()),
+            "parallel_projection": bool(camera.GetParallelProjection()),
+            "parallel_scale": float(camera.GetParallelScale()),
+        }
+
+    def set_camera_state(self, view_id: str, value: dict[str, object]) -> None:
+        handle = self._views[view_id]
+        camera = handle.renderer.GetActiveCamera()
+        if value.get("position") is not None:
+            camera.SetPosition(*value["position"])
+        if value.get("target") is not None:
+            camera.SetFocalPoint(*value["target"])
+        if value.get("up") is not None:
+            camera.SetViewUp(*value["up"])
+        if value.get("fov") is not None:
+            camera.SetViewAngle(float(value["fov"]))
+        if value.get("parallel_projection") is not None:
+            camera.SetParallelProjection(bool(value["parallel_projection"]))
+        if value.get("parallel_scale") is not None:
+            camera.SetParallelScale(float(value["parallel_scale"]))
+        handle.renderer.ResetCameraClippingRange()
         handle.renderer.Modified()
         handle.render_window.Modified()
 
@@ -459,9 +482,7 @@ class VTKRenderingBackend(RenderingBackend):
                 array_name,
                 association,
             )
-            handle.coloring_data = (
-                coloring_data if coloring_data is not source_data else None
-            )
+            handle.coloring_data = coloring_data if coloring_data is not source_data else None
             mapper.SetInputDataObject(coloring_data)
 
         if representation.kind == "volume":
@@ -547,11 +568,7 @@ class VTKRenderingBackend(RenderingBackend):
         else:
             prop.SetRepresentationToSurface()
 
-        if (
-            representation.kind == "outline"
-            or selected_array_name is None
-            or tf is None
-        ):
+        if representation.kind == "outline" or selected_array_name is None or tf is None:
             mapper.ScalarVisibilityOff()
 
             if representation.kind != "outline":
@@ -576,9 +593,7 @@ class VTKRenderingBackend(RenderingBackend):
         color_map = _build_surface_color_map(tf)
         handle.lookup_table = color_map
         mapper.SetLookupTable(color_map)
-        mapper.SetScalarRange(
-            float(tf["control_points"][0][0]), float(tf["control_points"][-1][0])
-        )
+        mapper.SetScalarRange(float(tf["control_points"][0][0]), float(tf["control_points"][-1][0]))
         mapper.SetColorModeToMapScalars()
         mapper.UseLookupTableScalarRangeOn()
 
@@ -595,9 +610,7 @@ def _data_for_coloring(
         return source_data, None
 
     attributes = (
-        source_data.GetCellData()
-        if association == "cell"
-        else source_data.GetPointData()
+        source_data.GetCellData() if association == "cell" else source_data.GetPointData()
     )
     array = attributes.GetArray(array_name)
     if array is None:
@@ -653,6 +666,7 @@ def _apply_volume_transfer_function(
         for value, _r, _g, _b, opacity in control_points:
             opacity_function.AddPoint(float(value), float(opacity))
         opacity_function.Modified()
+
 
 
 def _apply_fixed_volume_color(

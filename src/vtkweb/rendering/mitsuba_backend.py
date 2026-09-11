@@ -15,9 +15,9 @@ from vtkweb.rendering.base import RenderView, RenderingBackend, Representation
 
 @dataclass
 class MitsubaViewHandle:
-    background_color: tuple[float, float, float]
-    world_ambient_color: tuple[float, float, float]
-    world_ambient_intensity: float
+    background_color: tuple[float, float, float] = (0.1, 0.1, 0.1)
+    world_ambient_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    world_ambient_intensity: float = 1.0
     width: int = 1024
     height: int = 768
     camera_origin: tuple[float, float, float] = (0.0, 0.0, 5.0)
@@ -67,26 +67,22 @@ class MitsubaRenderingBackend(RenderingBackend):
     def __init__(self, transfer_function_provider=None) -> None:
         import mitsuba as mi
 
-        self._transfer_function_provider = transfer_function_provider or (
-            lambda _name: None
-        )
+        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
         self.mi = mi
         if mi.variant() != "cuda_ad_rgb":
             mi.set_variant("cuda_ad_rgb")
 
         self._views: dict[str, MitsubaViewHandle] = {}
-        self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
+        self._representations: dict[
+            tuple[str, str], MitsubaRepresentationHandle
+        ] = {}
 
     # ------------------------------------------------------------------
     # Views
     # ------------------------------------------------------------------
 
     def add_view(self, view: RenderView) -> None:
-        self._views[view.id] = MitsubaViewHandle(
-            background_color=view.settings.background_color,
-            world_ambient_color=view.settings.world_ambient_color,
-            world_ambient_intensity=view.settings.world_ambient_intensity,
-        )
+        self._views[view.id] = MitsubaViewHandle()
 
     def remove_view(self, view_id: str) -> None:
         for key in [key for key in self._representations if key[1] == view_id]:
@@ -99,24 +95,18 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         self._views[new_view_id] = self._views.pop(view_id)
         renamed = {}
-        for (
-            representation_id,
-            current_view_id,
-        ), handle in self._representations.items():
-            renamed[
-                (
-                    representation_id,
-                    new_view_id if current_view_id == view_id else current_view_id,
-                )
-            ] = handle
+        for (representation_id, current_view_id), handle in self._representations.items():
+            renamed[(
+                representation_id,
+                new_view_id if current_view_id == view_id else current_view_id,
+            )] = handle
         self._representations = renamed
 
-    def set_view_settings(self, view: RenderView) -> None:
-        handle = self._views[view.id]
-        handle.background_color = view.settings.background_color
-        handle.world_ambient_color = view.settings.world_ambient_color
-        handle.world_ambient_intensity = view.settings.world_ambient_intensity
-        self.invalidate_scene(view.id)
+    def set_view_property(self, view_id: str, name: str, value: Any) -> None:
+        if name not in {"background_color", "world_ambient_color", "world_ambient_intensity"}:
+            return
+        setattr(self._views[view_id], name, value)
+        self.invalidate_scene(view_id)
 
     def set_render_size(self, view_id: str, width: int, height: int) -> bool:
         """Update transient film dimensions and invalidate the scene."""
@@ -139,6 +129,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         return handle.scene_generation
 
     def reset_camera(self, view_id: str) -> None:
+        print(f"[camera] Mitsuba reset_camera(view_id={view_id})", flush=True)
         bounds = self._visible_bounds(view_id)
         handle = self._views[view_id]
 
@@ -159,7 +150,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             ],
             dtype=np.float64,
         )
-        diagonal = np.array([xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64)
+        diagonal = np.array(
+            [xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64
+        )
         radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
 
         half_fov = math.radians(45.0) * 0.5
@@ -181,6 +174,22 @@ class MitsubaRenderingBackend(RenderingBackend):
             "center_of_rotation": list(handle.center_of_rotation),
             "fov": 45.0,
         }
+
+    def set_camera_state(self, view_id: str, value: dict[str, Any]) -> None:
+        handle = self._views[view_id]
+        if "position" in value:
+            handle.camera_origin = tuple(float(v) for v in value["position"])
+        if "target" in value:
+            handle.camera_target = tuple(float(v) for v in value["target"])
+        if "up" in value:
+            handle.camera_up = tuple(float(v) for v in value["up"])
+        if "center_of_rotation" in value:
+            handle.center_of_rotation = tuple(
+                float(v) for v in value["center_of_rotation"]
+            )
+        else:
+            handle.center_of_rotation = tuple(handle.camera_target)
+        self.invalidate_scene(view_id)
 
     def interact_camera(
         self,
@@ -449,7 +458,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 if colors is not None:
                     if association == "cell":
                         vertices = vertices[faces].reshape(-1, 3)
-                        faces = np.arange(len(vertices), dtype=np.uint32).reshape(-1, 3)
+                        faces = np.arange(
+                            len(vertices), dtype=np.uint32
+                        ).reshape(-1, 3)
                         vertex_colors = np.repeat(colors, 3, axis=0)
                     else:
                         vertex_colors = colors
@@ -478,7 +489,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "name": "vertex_color",
                 }
             else:
-                color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
+                color = _hex_to_rgb(
+                    representation.properties.get("color", "#d9d9d9")
+                )
                 reflectance = {"type": "rgb", "value": list(color)}
 
             mesh.set_bsdf(
@@ -722,6 +735,8 @@ def _evaluate_transfer_function(
         ]
     )
     return np.asarray(rgb, dtype=np.float32)
+
+
 
 
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:

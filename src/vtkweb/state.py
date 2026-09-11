@@ -13,6 +13,12 @@ from vtkweb.workspace import WorkspaceManager
 _IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z_]+")
 
 
+def _emit_call(lines: list[str], call: str, *args: str, assign: str | None = None) -> None:
+    lines.append(f"    {assign + ' = ' if assign else ''}{call}(")
+    lines.extend(f"        {arg}," for arg in args)
+    lines.append("    )")
+
+
 def export_python_state(
     pipeline: PipelineGraph,
     rendering: RenderManager,
@@ -43,54 +49,24 @@ def export_python_state(
         )
         view_vars[value["id"]] = variable
 
-        kwargs = []
+        args = [repr(value["type"]), f"name={value.get('name')!r}", f"view_id={value['id']!r}"]
         if value.get("type") == "dummy" and value.get("message") is not None:
-            kwargs.append(f"        message={value['message']!r},")
-
-        lines.extend(
-            [
-                f"    {variable} = ctrl.create_view(",
-                f"        {value['type']!r},",
-                f"        name={value.get('name')!r},",
-                f"        view_id={value['id']!r},",
-                *kwargs,
-                "    )",
-            ]
-        )
+            args.append(f"message={value['message']!r}")
+        _emit_call(lines, "ctrl.create_view", *args, assign=variable)
 
         if value.get("type") in {"vtk", "mitsuba"}:
-            background = value.get("background_color")
-            if background is not None:
-                lines.extend(
-                    [
-                        "    ctrl.set_view_background_color(",
-                        f"        {variable},",
-                        f"        {background!r},",
-                        "    )",
-                    ]
-                )
+            for property_name in (
+                "background_color",
+                "world_ambient_color",
+                "world_ambient_intensity",
+            ):
+                property_value = value.get(property_name)
+                if property_value is None:
+                    continue
+                _emit_call(lines, "ctrl.set_view_property", variable, repr(property_name), repr(property_value))
 
-            ambient_color = value.get("world_ambient_color")
-            if ambient_color is not None:
-                lines.extend(
-                    [
-                        "    ctrl.set_view_world_ambient_color(",
-                        f"        {variable},",
-                        f"        {ambient_color!r},",
-                        "    )",
-                    ]
-                )
-
-            ambient_intensity = value.get("world_ambient_intensity")
-            if ambient_intensity is not None:
-                lines.extend(
-                    [
-                        "    ctrl.set_view_world_ambient_intensity(",
-                        f"        {variable},",
-                        f"        {float(ambient_intensity)!r},",
-                        "    )",
-                    ]
-                )
+            camera = rendering.get_view_property(value["id"], "camera")
+            _emit_call(lines, "ctrl.set_view_property", variable, repr("camera"), repr(camera))
 
     container_vars: dict[str, str] = {}
     root_id = workspace.state.workspace_root_id
@@ -101,13 +77,7 @@ def export_python_state(
             "root_container", used_names, fallback="root_container"
         )
         container_vars[root_id] = root_var
-        lines.extend(
-            [
-                f"    {root_var} = ctrl.create_workspace(",
-                f"        container_id={root_id!r},",
-                "    )",
-            ]
-        )
+        _emit_call(lines, "ctrl.create_workspace", f"container_id={root_id!r}", assign=root_var)
         _export_workspace_node(
             lines,
             workspace.state.workspace_nodes,
@@ -131,14 +101,9 @@ def export_python_state(
         )
         node_vars[node_id] = variable
 
-        lines.extend(
-            [
-                f"    {variable} = ctrl.create_node(",
-                f"        {node.class_name!r},",
-                f"        name={node.name!r},",
-                f"        node_id={node.id!r},",
-                "    )",
-            ]
+        _emit_call(
+            lines, "ctrl.create_node", repr(node.class_name), f"name={node.name!r}",
+            f"node_id={node.id!r}", assign=variable,
         )
 
     if pipeline.edges:
@@ -146,15 +111,10 @@ def export_python_state(
         lines.append("    # Pipeline connections")
 
     for edge in pipeline.edges:
-        lines.extend(
-            [
-                "    ctrl.connect_nodes(",
-                f"        {node_vars[edge.source_node_id]},",
-                f"        {node_vars[edge.target_node_id]},",
-                f"        source_port={edge.source_port!r},",
-                f"        target_port={edge.target_port!r},",
-                "    )",
-            ]
+        _emit_call(
+            lines, "ctrl.connect_nodes", node_vars[edge.source_node_id],
+            node_vars[edge.target_node_id], f"source_port={edge.source_port!r}",
+            f"target_port={edge.target_port!r}",
         )
 
     property_lines: list[str] = []
@@ -174,15 +134,7 @@ def export_python_state(
             if value is None:
                 continue
 
-            property_lines.extend(
-                [
-                    "    ctrl.set_node_property(",
-                    f"        {node_vars[node_id]},",
-                    f"        {property_name!r},",
-                    f"        {value!r},",
-                    "    )",
-                ]
-            )
+            _emit_call(property_lines, "ctrl.set_node_property", node_vars[node_id], repr(property_name), repr(value))
 
         input_arrays = node_state.get("input_arrays", {})
         for key in sorted(input_arrays, key=lambda item: int(item)):
@@ -191,14 +143,9 @@ def export_python_state(
             if value is None:
                 continue
 
-            input_array_lines.extend(
-                [
-                    "    ctrl.set_node_input_array(",
-                    f"        {node_vars[node_id]},",
-                    f"        {int(input_state['index'])!r},",
-                    f"        {value!r},",
-                    "    )",
-                ]
+            _emit_call(
+                input_array_lines, "ctrl.set_node_input_array", node_vars[node_id],
+                repr(int(input_state["index"])), repr(value),
             )
 
     if property_lines:
@@ -216,16 +163,7 @@ def export_python_state(
         lines.append("")
         lines.append("    # Transfer functions")
         for array_name in sorted(transfer_functions):
-            lines.extend(
-                [
-                    "    ctrl.set_tf_data(",
-                    f"        {array_name!r},",
-                    f"        {transfer_functions[array_name]!r},",
-                    "    )",
-                ]
-            )
-
-    representation_vars: dict[str, str] = {}
+            _emit_call(lines, "ctrl.set_tf_data", repr(array_name), repr(transfer_functions[array_name]))
 
     if rendering.representations:
         lines.append("")
@@ -237,8 +175,6 @@ def export_python_state(
             used_names,
             fallback=f"representation_{index}",
         )
-        representation_vars[representation.id] = variable
-
         ordered_view_ids = [
             view.id for view in rendering.views if view.id in representation.view_ids
         ]
@@ -258,36 +194,19 @@ def export_python_state(
         )
 
         for property_name, property_value in representation.properties.items():
-            lines.extend(
-                [
-                    "    ctrl.set_representation_property(",
-                    f"        {variable},",
-                    f"        {property_name!r},",
-                    f"        {property_value!r},",
-                    "    )",
-                ]
+            _emit_call(
+                lines, "ctrl.set_representation_property", variable,
+                repr(property_name), repr(property_value),
             )
 
     lines.append("")
     lines.append("    # Active selections")
 
     if pipeline.active_node_id is not None:
-        lines.extend(
-            [
-                "    ctrl.set_active_node(",
-                f"        {node_vars[pipeline.active_node_id]},",
-                "    )",
-            ]
-        )
+        _emit_call(lines, "ctrl.set_active_node", node_vars[pipeline.active_node_id])
 
     if rendering.active_view_id is not None:
-        lines.extend(
-            [
-                "    ctrl.set_active_view(",
-                f"        {view_vars[rendering.active_view_id]},",
-                "    )",
-            ]
-        )
+        _emit_call(lines, "ctrl.set_active_view", view_vars[rendering.active_view_id])
 
     # The emitter uses four-space indentation for readable nested snippets;
     # state files themselves are plain top-level statements.
@@ -339,14 +258,7 @@ def _export_workspace_node(
     if node["kind"] == "leaf":
         view_id = node.get("view_id")
         if view_id is not None:
-            lines.extend(
-                [
-                    "    ctrl.assign_view_to_container(",
-                    f"        {variable},",
-                    f"        {view_vars[view_id]},",
-                    "    )",
-                ]
-            )
+            _emit_call(lines, "ctrl.assign_view_to_container", variable, view_vars[view_id])
         return
 
     first_id = node["first"]
@@ -360,16 +272,10 @@ def _export_workspace_node(
     container_vars[first_id] = first_var
     container_vars[second_id] = second_var
 
-    lines.extend(
-        [
-            f"    {first_var}, {second_var} = ctrl.split_container(",
-            f"        {variable},",
-            f"        {node['orientation']!r},",
-            f"        ratio={float(node['ratio'])!r},",
-            f"        first_id={first_id!r},",
-            f"        second_id={second_id!r},",
-            "    )",
-        ]
+    _emit_call(
+        lines, "ctrl.split_container", variable, repr(node["orientation"]),
+        f"ratio={float(node['ratio'])!r}", f"first_id={first_id!r}",
+        f"second_id={second_id!r}", assign=f"{first_var}, {second_var}",
     )
     _export_workspace_node(
         lines, nodes, first_id, container_vars, view_vars, used_names
