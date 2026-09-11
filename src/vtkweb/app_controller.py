@@ -139,13 +139,20 @@ def initialize_app_controller(
         )
 
     def add_representation(
-        node_id: str, output_port: int = 0, kind: str = "surface",
-        view_ids: Iterable[str] = (), camera_reset_mode: int = 0,
+        node_id: str,
+        output_port: int = 0,
+        kind: str = "surface",
+        view_ids: Iterable[str] = (),
+        camera_reset_mode: int = 0,
         representation_id: str | None = None,
     ) -> str:
         return rendering.add_representation(
-            node_id, output_port=int(output_port), kind=kind, view_ids=view_ids,
-            camera_reset_mode=int(camera_reset_mode), representation_id=representation_id,
+            node_id,
+            output_port=int(output_port),
+            kind=kind,
+            view_ids=view_ids,
+            camera_reset_mode=int(camera_reset_mode),
+            representation_id=representation_id,
         ).id
 
     def toggle_representation_in_view(
@@ -437,7 +444,9 @@ def initialize_app_controller(
     ctrl.apply_tf_preset = rendering.transfer_functions.apply_preset
     ctrl.set_tf_range = rendering.transfer_functions.set_range
     ctrl.rescale_tf = rendering.transfer_functions.rescale
-    ctrl.set_tf_control_point_component = rendering.transfer_functions.set_control_point_component
+    ctrl.set_tf_control_point_component = (
+        rendering.transfer_functions.set_control_point_component
+    )
     ctrl.add_tf_control_point = rendering.transfer_functions.add_control_point
     ctrl.remove_tf_control_point = rendering.transfer_functions.remove_control_point
     ctrl.create_view = create_view
@@ -452,7 +461,6 @@ def initialize_app_controller(
     ctrl.set_active_view = rendering.set_active_view
     ctrl.set_view_property = rendering.set_view_property
     ctrl.reset_camera = rendering.reset_camera
-    ctrl.sync_vtk_camera = rendering.sync_vtk_camera
     ctrl.interact_mitsuba_camera = rendering.interact_mitsuba_camera
     ctrl.set_mitsuba_render_size = rendering.set_mitsuba_render_size
     ctrl.set_active_node = set_active_node
@@ -470,9 +478,9 @@ def initialize_app_controller(
 
     # Client-to-server render/workspace RPCs. UI code emits these events but
     # application/controller ownership stays here.
+    ctrl.trigger("sync_vtk_camera")(rendering.sync_vtk_camera)
     ctrl.trigger("interact_mitsuba_camera")(rendering.interact_mitsuba_camera)
     ctrl.trigger("set_mitsuba_render_size")(rendering.set_mitsuba_render_size)
     ctrl.trigger("set_split_ratio")(set_split_ratio)
 
-    server.trigger("delete_active_node")(delete_active_node)
-    server.trigger("execute_pipeline")(execute_pipeline)
+    server.trigger("delete_act

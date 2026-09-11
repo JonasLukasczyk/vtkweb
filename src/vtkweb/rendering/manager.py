@@ -38,7 +38,6 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
 }
 
 
-
 class RenderManager:
     """Rendering service backed by serializable trame state.
 
@@ -175,8 +174,14 @@ class RenderManager:
         else:
             self._backend_for_type(view_type).add_view(self._backend_view(view_id))
         backend = self._backend_for_view(view_id)
-        for name in ("background_color", "world_ambient_color", "world_ambient_intensity"):
-            backend.set_view_property(backend_id, name, self._backend_view_property(name, value[name]))
+        for name in (
+            "background_color",
+            "world_ambient_color",
+            "world_ambient_intensity",
+        ):
+            backend.set_view_property(
+                backend_id, name, self._backend_view_property(name, value[name])
+            )
         if view_type == "mitsuba":
             self.progressive.register_view(
                 view_id, self._progressive_backend_for_view(view_id), backend_id
@@ -205,7 +210,6 @@ class RenderManager:
         views = dict(self.state.views)
         del views[view_id]
         self.state.views = views
-
 
         if self.active_view_id == view_id:
             self.state.active_view_id = next(
@@ -246,9 +250,14 @@ class RenderManager:
             old_backend.remove_view(old_backend_id)
 
         if view_type == "vtk":
-            backend_id = next((slot for slot, owner in self._slot_owners.items() if owner is None), None)
+            backend_id = next(
+                (slot for slot, owner in self._slot_owners.items() if owner is None),
+                None,
+            )
             if backend_id is None:
-                raise RuntimeError(f"Maximum number of VTK views reached ({len(self._slot_ids)})")
+                raise RuntimeError(
+                    f"Maximum number of VTK views reached ({len(self._slot_ids)})"
+                )
             self._slot_owners[backend_id] = view_id
         else:
             backend_id = view_id
@@ -259,15 +268,22 @@ class RenderManager:
         if view_type == "mitsuba":
             backend.add_view(self._backend_view(view_id))
 
-        for name in ("background_color", "world_ambient_color", "world_ambient_intensity"):
-            backend.set_view_property(backend_id, name, self._backend_view_property(name, value[name]))
+        for name in (
+            "background_color",
+            "world_ambient_color",
+            "world_ambient_intensity",
+        ):
+            backend.set_view_property(
+                backend_id, name, self._backend_view_property(name, value[name])
+            )
         backend.set_camera_state(backend_id, camera)
 
         for representation_id in representation_ids:
             representation = self.get_representation(representation_id)
             if self.pipeline.has_valid_output(representation.node_id):
                 backend.add_representation(
-                    representation, self._backend_view(view_id),
+                    representation,
+                    self._backend_view(view_id),
                     self.pipeline.nodes[representation.node_id].processor,
                 )
 
@@ -379,7 +395,10 @@ class RenderManager:
                     ),
                 )
 
-        self.state.representations = {**self.state.representations, representation_id: value}
+        self.state.representations = {
+            **self.state.representations,
+            representation_id: value,
+        }
 
         for view_id in view_ids:
             self.assign_representation(
@@ -453,8 +472,11 @@ class RenderManager:
             if self.get_representations(node_id, output_port):
                 continue
             representation = self.add_representation(
-                node_id, output_port=output_port, kind="outline",
-                view_ids=view_ids, notify=False,
+                node_id,
+                output_port=output_port,
+                kind="outline",
+                view_ids=view_ids,
+                notify=False,
             )
             created.append(representation.id)
 
@@ -713,9 +735,7 @@ class RenderManager:
         minimum, maximum = array.GetRange(component)
         return (float(minimum), float(maximum))
 
-    def get_global_array_range(
-        self, array_name: str
-    ) -> tuple[float, float] | None:
+    def get_global_array_range(self, array_name: str) -> tuple[float, float] | None:
         minimum = None
         maximum = None
         for node_id, node in self.pipeline.nodes.items():
@@ -730,10 +750,14 @@ class RenderManager:
                     if data_range is None:
                         continue
                     minimum = (
-                        data_range[0] if minimum is None else min(minimum, data_range[0])
+                        data_range[0]
+                        if minimum is None
+                        else min(minimum, data_range[0])
                     )
                     maximum = (
-                        data_range[1] if maximum is None else max(maximum, data_range[1])
+                        data_range[1]
+                        if maximum is None
+                        else max(maximum, data_range[1])
                     )
         if minimum is None or maximum is None:
             return None
@@ -747,7 +771,9 @@ class RenderManager:
         self.get_view(view_id)
         if name == "camera":
             backend = self._backend_for_view(view_id)
-            return backend.get_camera_state(self.backend_view_id(view_id))
+            backend_id = self.backend_view_id(view_id)
+            camera = backend.get_camera_state(backend_id)
+            return camera
         return self.state.views[view_id].get(name)
 
     def set_view_property(self, view_id: str, name: str, value) -> None:
@@ -762,13 +788,17 @@ class RenderManager:
                 self.progressive.ensure(view_id)
             return
 
-        if name in {"background_color", "world_ambient_color"} and not isinstance(value, str):
+        if name in {"background_color", "world_ambient_color"} and not isinstance(
+            value, str
+        ):
             value = _rgb_to_hex(tuple(map(float, value)))
         elif name == "world_ambient_intensity":
             value = max(0.0, float(value))
         view = dict(self.state.views[view_id], **{name: value})
         self.state.views = {**self.state.views, view_id: view}
-        backend.set_view_property(backend_id, name, self._backend_view_property(name, value))
+        backend.set_view_property(
+            backend_id, name, self._backend_view_property(name, value)
+        )
         if self._is_mitsuba_view(view_id):
             self.progressive.ensure(view_id)
         self._notify_render()
@@ -781,32 +811,35 @@ class RenderManager:
 
         print(
             f"[camera] RenderManager.reset_camera(view_id={view_id}, "
-            f"caller={inspect.stack()[1].function})", flush=True
+            f"caller={inspect.stack()[1].function})",
+            flush=True,
         )
         self._backend_for_view(view_id).reset_camera(self.backend_view_id(view_id))
         self._notify_camera()
         if self._is_mitsuba_view(view_id):
             self.progressive.ensure(view_id)
 
-    def sync_vtk_camera(self, view_id: str, value: dict) -> None:
-        """Mirror the client-side VTK camera into the server vtkCamera."""
-        if self.state.views.get(view_id, {}).get("type") != "vtk":
+    def sync_vtk_camera(self, view_id: str, value: dict | None) -> None:
+        """Mirror a client-side VTK camera update into the server vtkCamera."""
+        if not value or self.state.views.get(view_id, {}).get("type") != "vtk":
             return
-        self._backend_for_view(view_id).set_camera_state(
-            self.backend_view_id(view_id),
-            {
-                "position": value.get("position"),
-                "target": value.get("target", value.get("focalPoint")),
-                "up": value.get("up", value.get("viewUp")),
-                "fov": value.get("fov", value.get("viewAngle")),
-                "parallel_projection": value.get(
-                    "parallel_projection", value.get("parallelProjection")
-                ),
-                "parallel_scale": value.get(
-                    "parallel_scale", value.get("parallelScale")
-                ),
-            },
+        backend = self._backend_for_view(view_id)
+        backend_id = self.backend_view_id(view_id)
+        mapped = {
+            "position": value.get("position"),
+            "target": value.get("target", value.get("focalPoint")),
+            "up": value.get("up", value.get("viewUp")),
+            "fov": value.get("fov", value.get("viewAngle")),
+            "parallel_projection": value.get(
+                "parallel_projection", value.get("parallelProjection")
+            ),
+            "parallel_scale": value.get("parallel_scale", value.get("parallelScale")),
+        }
+        print(
+            f"[camera] VtkLocalView -> server view_id={view_id} camera={mapped}",
+            flush=True,
         )
+        backend.set_camera_state(backend_id, mapped)
 
     def interact_mitsuba_camera(
         self,
@@ -842,7 +875,11 @@ class RenderManager:
 
     @staticmethod
     def _backend_view_property(name: str, value):
-        return _hex_to_rgb(value) if name in {"background_color", "world_ambient_color"} else value
+        return (
+            _hex_to_rgb(value)
+            if name in {"background_color", "world_ambient_color"}
+            else value
+        )
 
     def _set_representation_state(
         self,
@@ -898,23 +935,4 @@ class RenderManager:
 
     def _is_mitsuba_view(self, view_id: str) -> bool:
         value = self.state.views.get(view_id)
-        return value is not None and value.get("type") == "mitsuba"
-
-
-
-def _rgb_to_hex(
-    color: tuple[float, float, float],
-) -> str:
-    values = [round(max(0.0, min(1.0, component)) * 255) for component in color]
-    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
-
-
-def _hex_to_rgb(
-    value: str,
-) -> tuple[float, float, float]:
-    value = value.lstrip("#")
-    return (
-        int(value[0:2], 16) / 255.0,
-        int(value[2:4], 16) / 255.0,
-        int(value[4:6], 16) / 255.0,
-    )
+        return valu

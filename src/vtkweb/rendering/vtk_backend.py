@@ -42,9 +42,12 @@ class VTKRenderingBackend(RenderingBackend):
 
     def __init__(
         self,
-        transfer_function_provider: Callable[[str], dict[str, Any] | None] | None = None,
+        transfer_function_provider: Callable[[str], dict[str, Any] | None]
+        | None = None,
     ) -> None:
-        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
+        self._transfer_function_provider = transfer_function_provider or (
+            lambda _name: None
+        )
         self._views: dict[
             str,
             VTKViewHandle,
@@ -189,7 +192,7 @@ class VTKRenderingBackend(RenderingBackend):
 
     def get_camera_state(self, view_id: str) -> dict[str, object]:
         camera = self._views[view_id].renderer.GetActiveCamera()
-        return {
+        result = {
             "position": list(camera.GetPosition()),
             "target": list(camera.GetFocalPoint()),
             "up": list(camera.GetViewUp()),
@@ -197,6 +200,7 @@ class VTKRenderingBackend(RenderingBackend):
             "parallel_projection": bool(camera.GetParallelProjection()),
             "parallel_scale": float(camera.GetParallelScale()),
         }
+        return result
 
     def set_camera_state(self, view_id: str, value: dict[str, object]) -> None:
         handle = self._views[view_id]
@@ -482,7 +486,9 @@ class VTKRenderingBackend(RenderingBackend):
                 array_name,
                 association,
             )
-            handle.coloring_data = coloring_data if coloring_data is not source_data else None
+            handle.coloring_data = (
+                coloring_data if coloring_data is not source_data else None
+            )
             mapper.SetInputDataObject(coloring_data)
 
         if representation.kind == "volume":
@@ -568,7 +574,11 @@ class VTKRenderingBackend(RenderingBackend):
         else:
             prop.SetRepresentationToSurface()
 
-        if representation.kind == "outline" or selected_array_name is None or tf is None:
+        if (
+            representation.kind == "outline"
+            or selected_array_name is None
+            or tf is None
+        ):
             mapper.ScalarVisibilityOff()
 
             if representation.kind != "outline":
@@ -593,7 +603,9 @@ class VTKRenderingBackend(RenderingBackend):
         color_map = _build_surface_color_map(tf)
         handle.lookup_table = color_map
         mapper.SetLookupTable(color_map)
-        mapper.SetScalarRange(float(tf["control_points"][0][0]), float(tf["control_points"][-1][0]))
+        mapper.SetScalarRange(
+            float(tf["control_points"][0][0]), float(tf["control_points"][-1][0])
+        )
         mapper.SetColorModeToMapScalars()
         mapper.UseLookupTableScalarRangeOn()
 
@@ -610,7 +622,9 @@ def _data_for_coloring(
         return source_data, None
 
     attributes = (
-        source_data.GetCellData() if association == "cell" else source_data.GetPointData()
+        source_data.GetCellData()
+        if association == "cell"
+        else source_data.GetPointData()
     )
     array = attributes.GetArray(array_name)
     if array is None:
@@ -668,7 +682,6 @@ def _apply_volume_transfer_function(
         opacity_function.Modified()
 
 
-
 def _apply_fixed_volume_color(
     color_function: vtk.vtkColorTransferFunction | None,
     opacity_function: vtk.vtkPiecewiseFunction | None,
@@ -686,7 +699,4 @@ def _apply_fixed_volume_color(
         color_function.AddRGBPoint(1.0, *rgb)
         color_function.Modified()
     if opacity_function is not None:
-        opacity_function.RemoveAllPoints()
-        opacity_function.AddPoint(0.0, 1.0)
-        opacity_function.AddPoint(1.0, 1.0)
-        opacity_function.Modified()
+        opacity_func

@@ -18,11 +18,12 @@ class MitsubaViewHandle:
     background_color: tuple[float, float, float] = (0.1, 0.1, 0.1)
     world_ambient_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     world_ambient_intensity: float = 1.0
-    width: int = 1024
-    height: int = 768
+    width: int = 0
+    height: int = 0
     camera_origin: tuple[float, float, float] = (0.0, 0.0, 5.0)
     camera_target: tuple[float, float, float] = (0.0, 0.0, 0.0)
     camera_up: tuple[float, float, float] = (0.0, 1.0, 0.0)
+    camera_fov: float = 30.0
     center_of_rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
     accumulation: np.ndarray | None = None
     accumulated_spp: int = 0
@@ -67,15 +68,15 @@ class MitsubaRenderingBackend(RenderingBackend):
     def __init__(self, transfer_function_provider=None) -> None:
         import mitsuba as mi
 
-        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
+        self._transfer_function_provider = transfer_function_provider or (
+            lambda _name: None
+        )
         self.mi = mi
         if mi.variant() != "cuda_ad_rgb":
             mi.set_variant("cuda_ad_rgb")
 
         self._views: dict[str, MitsubaViewHandle] = {}
-        self._representations: dict[
-            tuple[str, str], MitsubaRepresentationHandle
-        ] = {}
+        self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
 
     # ------------------------------------------------------------------
     # Views
@@ -95,15 +96,24 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         self._views[new_view_id] = self._views.pop(view_id)
         renamed = {}
-        for (representation_id, current_view_id), handle in self._representations.items():
-            renamed[(
-                representation_id,
-                new_view_id if current_view_id == view_id else current_view_id,
-            )] = handle
+        for (
+            representation_id,
+            current_view_id,
+        ), handle in self._representations.items():
+            renamed[
+                (
+                    representation_id,
+                    new_view_id if current_view_id == view_id else current_view_id,
+                )
+            ] = handle
         self._representations = renamed
 
     def set_view_property(self, view_id: str, name: str, value: Any) -> None:
-        if name not in {"background_color", "world_ambient_color", "world_ambient_intensity"}:
+        if name not in {
+            "background_color",
+            "world_ambient_color",
+            "world_ambient_intensity",
+        }:
             return
         setattr(self._views[view_id], name, value)
         self.invalidate_scene(view_id)
@@ -150,12 +160,10 @@ class MitsubaRenderingBackend(RenderingBackend):
             ],
             dtype=np.float64,
         )
-        diagonal = np.array(
-            [xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64
-        )
+        diagonal = np.array([xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64)
         radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
 
-        half_fov = math.radians(45.0) * 0.5
+        half_fov = math.radians(handle.camera_fov) * 0.5
         distance = 1.15 * radius / math.sin(half_fov)
 
         origin = center + np.array([0.0, 0.0, distance])
@@ -172,7 +180,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             "target": list(handle.camera_target),
             "up": list(handle.camera_up),
             "center_of_rotation": list(handle.center_of_rotation),
-            "fov": 45.0,
+            "fov": float(handle.camera_fov),
         }
 
     def set_camera_state(self, view_id: str, value: dict[str, Any]) -> None:
@@ -183,6 +191,8 @@ class MitsubaRenderingBackend(RenderingBackend):
             handle.camera_target = tuple(float(v) for v in value["target"])
         if "up" in value:
             handle.camera_up = tuple(float(v) for v in value["up"])
+        if value.get("fov") is not None:
+            handle.camera_fov = float(value["fov"])
         if "center_of_rotation" in value:
             handle.center_of_rotation = tuple(
                 float(v) for v in value["center_of_rotation"]
@@ -233,7 +243,10 @@ class MitsubaRenderingBackend(RenderingBackend):
                 screen_up = _normalized(np.cross(right, forward))
                 height = max(float(viewport_height), 1.0)
                 world_per_pixel = (
-                    2.0 * distance * math.tan(0.5 * math.radians(45.0)) / height
+                    2.0
+                    * distance
+                    * math.tan(0.5 * math.radians(handle.camera_fov))
+                    / height
                 )
                 shift = (-dx * right + dy * screen_up) * world_per_pixel
                 position += shift
@@ -259,12 +272,18 @@ class MitsubaRenderingBackend(RenderingBackend):
 
     def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]:
         handle = self._views[view_id]
-        return handle.scene_generation, self.get_camera_state(view_id)
+        camera = self.get_camera_state(view_id)
+        return handle.scene_generation, camera
 
     def has_renderable_scene(self, view_id: str) -> bool:
-        return any(
-            current_view_id == view_id and rep.mesh is not None
-            for (_, current_view_id), rep in self._representations.items()
+        handle = self._views[view_id]
+        return (
+            handle.width > 0
+            and handle.height > 0
+            and any(
+                current_view_id == view_id and rep.mesh is not None
+                for (_, current_view_id), rep in self._representations.items()
+            )
         )
 
     def clear_accumulation(self, view_id: str, generation: int | None = None) -> None:
@@ -458,9 +477,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 if colors is not None:
                     if association == "cell":
                         vertices = vertices[faces].reshape(-1, 3)
-                        faces = np.arange(
-                            len(vertices), dtype=np.uint32
-                        ).reshape(-1, 3)
+                        faces = np.arange(len(vertices), dtype=np.uint32).reshape(-1, 3)
                         vertex_colors = np.repeat(colors, 3, axis=0)
                     else:
                         vertex_colors = colors
@@ -489,9 +506,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "name": "vertex_color",
                 }
             else:
-                color = _hex_to_rgb(
-                    representation.properties.get("color", "#d9d9d9")
-                )
+                color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
                 reflectance = {"type": "rgb", "value": list(color)}
 
             mesh.set_bsdf(
@@ -538,7 +553,8 @@ class MitsubaRenderingBackend(RenderingBackend):
             },
             "sensor": {
                 "type": "perspective",
-                "fov": float(camera.get("fov", 45.0)),
+                "fov": float(camera.get("fov", handle.camera_fov)),
+                "fov_axis": "y",
                 "to_world": self.mi.ScalarTransform4f().look_at(
                     origin=camera["position"],
                     target=camera["target"],
@@ -737,8 +753,6 @@ def _evaluate_transfer_function(
     return np.asarray(rgb, dtype=np.float32)
 
 
-
-
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
     value = str(value).lstrip("#")
     if len(value) != 6:
@@ -762,7 +776,4 @@ def _rotate_vector(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.nda
     cosine = math.cos(angle)
     sine = math.sin(angle)
     return (
-        vector * cosine
-        + np.cross(axis, vector) * sine
-        + axis * float(np.dot(axis, vector)) * (1.0 - cosine)
-    )
+    

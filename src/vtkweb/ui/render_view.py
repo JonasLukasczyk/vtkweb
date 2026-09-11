@@ -404,6 +404,40 @@ def build_render_view(
 
     client.ClientTriggers(
         mounted="""
+            window.__vtkwebVtkCameraWatchers = new Map();
+            window.__vtkwebWatchVtkCamera = (slotId, viewId, component) => {
+                if (!viewId || !component || typeof component.getCamera !== 'function') return;
+                const previous = window.__vtkwebVtkCameraWatchers.get(slotId);
+                if (previous) window.cancelAnimationFrame(previous.frame);
+
+                const watcher = { frame: 0, signature: null };
+                const poll = () => {
+                    try {
+                        const camera = component.getCamera();
+                        if (camera) {
+                            const value = {
+                                position: Array.from(camera.position || []),
+                                target: Array.from(camera.focalPoint || []),
+                                up: Array.from(camera.viewUp || []),
+                                fov: camera.viewAngle,
+                                parallel_projection: camera.parallelProjection,
+                                parallel_scale: camera.parallelScale,
+                            };
+                            const signature = JSON.stringify(value);
+                            if (signature !== watcher.signature) {
+                                watcher.signature = signature;
+                                trigger('sync_vtk_camera', [viewId, value]);
+                            }
+                        }
+                    } catch (_) {
+                        // The local renderer may briefly disappear while a slot is rebound.
+                    }
+                    watcher.frame = window.requestAnimationFrame(poll);
+                };
+                window.__vtkwebVtkCameraWatchers.set(slotId, watcher);
+                poll();
+            };
+
             window.__vtkwebSendMitsubaResize = (viewId, width, height) => {
                 trigger('set_mitsuba_render_size', [viewId, width, height]);
             };
@@ -543,6 +577,13 @@ def build_render_view(
             };
         """,
         before_unmount="""
+            if (window.__vtkwebVtkCameraWatchers) {
+                for (const watcher of window.__vtkwebVtkCameraWatchers.values()) {
+                    window.cancelAnimationFrame(watcher.frame);
+                }
+            }
+            delete window.__vtkwebWatchVtkCamera;
+            delete window.__vtkwebVtkCameraWatchers;
             delete window.__vtkwebSendMitsubaResize;
             delete window.__vtkwebStartTileResize;
             delete window.__vtkwebStartMitsubaCameraDrag;
@@ -570,10 +611,9 @@ def build_render_view(
                     ref=ref,
                     tabindex=0,
                     style="height:100%;width:100%;outline:none;",
-                    interactor_events=("['EndInteraction']",),
-                    EndInteraction=(
-                        ctrl.sync_vtk_camera,
-                        f"[vtk_slot_layout['{slot_id}'].view_id, $refs.{ref}.getCamera()]",
+                    on_ready=(
+                        f"$event && window.__vtkwebWatchVtkCamera('{slot_id}', "
+                        f"vtk_slot_layout['{slot_id}']?.view_id, $refs.{ref})"
                     ),
                     focus=(
                         ctrl.set_active_view,
@@ -611,8 +651,8 @@ def build_render_view(
                 raw_attrs=[
                     '@mousedown="window.__vtkwebStartMitsubaCameraDrag(tile.view_id, $event)"',
                     '@wheel.prevent="window.__vtkwebMitsubaWheel(tile.view_id, $event)"',
-                    '@contextmenu.prevent',
-                    '@keydown.space.exact.prevent="trigger(\'render_view_reset\', [tile.view_id])"',
+                    "@contextmenu.prevent",
+                    "@keydown.space.exact.prevent=\"trigger('render_view_reset', [tile.view_id])\"",
                 ],
             ):
                 html.Canvas(
@@ -658,9 +698,13 @@ def build_render_view(
                 )
                 html.Button(
                     "⇄",
-                    title=("views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",),
+                    title=(
+                        "views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",
+                    ),
                     classes="vtkweb-tile-button",
-                    v_if=("tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",),
+                    v_if=(
+                        "tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",
+                    ),
                     click=(
                         ctrl.switch_view_type,
                         "[tile.view_id, views[tile.view_id]?.type === 'vtk' ? 'mitsuba' : 'vtk']",
@@ -708,5 +752,4 @@ def build_render_view(
     @state.change("camera_revision")
     def push_vtk_cameras(**_):
         for slot_id, widget in vtk_widgets_by_slot.items():
-            if state.vtk_slot_layout.get(slot_id) is not None:
-                widget.push_camera()
+        
