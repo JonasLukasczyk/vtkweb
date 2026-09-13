@@ -18,6 +18,7 @@ from vtkweb.rendering.base import (
 class VTKViewHandle:
     renderer: vtk.vtkRenderer
     render_window: vtk.vtkRenderWindow
+    interactor: vtk.vtkRenderWindowInteractor
 
     keepalive_source: vtk.vtkSphereSource
     keepalive_mapper: vtk.vtkPolyDataMapper
@@ -71,13 +72,22 @@ class VTKRenderingBackend(RenderingBackend):
         render_window = vtk.vtkRenderWindow()
         render_window.AddRenderer(renderer)
 
+        # trame-vtklocal mirrors the actual VTK object graph into VTK/WASM.
+        # Unlike trame_vtk.VtkLocalView, it therefore needs a real VTK
+        # interactor attached to every render window so the client runtime can
+        # start its local interaction event loop. Keep a Python reference to
+        # the interactor in VTKViewHandle as well.
+        interactor = vtk.vtkRenderWindowInteractor()
+        interactor.SetRenderWindow(render_window)
+        interactor.GetInteractorStyle().SetCurrentStyleToTrackballCamera()
+
         render_window.SetOffScreenRendering(1)
 
         # ---------------------------------------------------------------------
-        # VtkLocalView keepalive workaround
+        # Local VTK view keepalive
         # ---------------------------------------------------------------------
         #
-        # VtkLocalView / vtk.js can end up without a usable current renderer
+        # A local mirrored VTK view can end up without a usable current renderer
         # when the scene becomes completely empty.
         #
         # Keep one tiny backend-private actor in every render view so the
@@ -117,6 +127,7 @@ class VTKRenderingBackend(RenderingBackend):
         self._views[view.id] = VTKViewHandle(
             renderer=renderer,
             render_window=render_window,
+            interactor=interactor,
             keepalive_source=keepalive_source,
             keepalive_mapper=keepalive_mapper,
             keepalive_actor=keepalive_actor,
@@ -181,7 +192,6 @@ class VTKRenderingBackend(RenderingBackend):
         self,
         view_id: str,
     ) -> None:
-        print(f"[camera] VTK reset_camera(view_id={view_id})", flush=True)
         handle = self._views[view_id]
 
         handle.renderer.ResetCamera()
@@ -699,4 +709,7 @@ def _apply_fixed_volume_color(
         color_function.AddRGBPoint(1.0, *rgb)
         color_function.Modified()
     if opacity_function is not None:
-        opacity_func
+        opacity_function.RemoveAllPoints()
+        opacity_function.AddPoint(0.0, 1.0)
+        opacity_function.AddPoint(1.0, 1.0)
+        opacity_function.Modified()

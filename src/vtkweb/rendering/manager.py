@@ -64,13 +64,13 @@ class RenderManager:
         self.state.representations = {}
         self.state.active_view_id = None
 
-        # Monotonic notification used by VtkLocalView adapters. Backend-only
+        # Monotonic notification used by local VTK view adapters. Backend-only
         # representation refreshes do not otherwise mutate Trame state, so the
         # client would have no reason to pull the updated render window.
         self.state.render_revision = 0
         self.state.camera_revision = 0
 
-        # VtkLocalView components are created once when the Trame UI is built.
+        # Local VTK view components are created once when the Trame UI is built.
         # Keep a small pool of backend render windows alive and map logical
         # vtk views onto those slots. Logical view IDs remain fully dynamic and
         # serializable while the client-side VTK components stay stable.
@@ -276,7 +276,6 @@ class RenderManager:
             backend.set_view_property(
                 backend_id, name, self._backend_view_property(name, value[name])
             )
-        backend.set_camera_state(backend_id, camera)
 
         for representation_id in representation_ids:
             representation = self.get_representation(representation_id)
@@ -287,12 +286,23 @@ class RenderManager:
                     self.pipeline.nodes[representation.node_id].processor,
                 )
 
+        # Apply the preserved camera only after the target backend has its
+        # representations again. For VTK, set_camera_state() calls
+        # ResetCameraClippingRange(); doing that before actors are restored
+        # computes near/far against an empty scene and leaves stale clipping
+        # until the first client interaction.
+        backend.set_camera_state(backend_id, camera)
+
         if view_type == "mitsuba":
             self.progressive.register_view(
                 view_id, self._progressive_backend_for_view(view_id), backend_id
             )
             self.progressive.ensure(view_id)
         self._notify_render()
+        if view_type == "vtk":
+            # Push the final camera (including the freshly recomputed clipping
+            # range) to the WASM view immediately after the backend switch.
+            self._notify_camera()
 
     # -------------------------------------------------------------------------
     # Representations
@@ -490,7 +500,7 @@ class RenderManager:
 
         This operation changes backend VTK objects without necessarily changing
         serialized representation state. ``render_revision`` therefore changes
-        after the backend is current so VtkLocalView pushes the new scene to the
+        after the backend is current so the local VTK view pushes the new scene to the
         browser immediately rather than waiting for a camera interaction.
         """
 
@@ -809,37 +819,10 @@ class RenderManager:
         if view_id is None:
             return
 
-        print(
-            f"[camera] RenderManager.reset_camera(view_id={view_id}, "
-            f"caller={inspect.stack()[1].function})",
-            flush=True,
-        )
         self._backend_for_view(view_id).reset_camera(self.backend_view_id(view_id))
         self._notify_camera()
         if self._is_mitsuba_view(view_id):
             self.progressive.ensure(view_id)
-
-    def sync_vtk_camera(self, view_id: str, value: dict | None) -> None:
-        """Mirror a client-side VTK camera update into the server vtkCamera."""
-        if not value or self.state.views.get(view_id, {}).get("type") != "vtk":
-            return
-        backend = self._backend_for_view(view_id)
-        backend_id = self.backend_view_id(view_id)
-        mapped = {
-            "position": value.get("position"),
-            "target": value.get("target", value.get("focalPoint")),
-            "up": value.get("up", value.get("viewUp")),
-            "fov": value.get("fov", value.get("viewAngle")),
-            "parallel_projection": value.get(
-                "parallel_projection", value.get("parallelProjection")
-            ),
-            "parallel_scale": value.get("parallel_scale", value.get("parallelScale")),
-        }
-        print(
-            f"[camera] VtkLocalView -> server view_id={view_id} camera={mapped}",
-            flush=True,
-        )
-        backend.set_camera_state(backend_id, mapped)
 
     def interact_mitsuba_camera(
         self,
@@ -935,4 +918,22 @@ class RenderManager:
 
     def _is_mitsuba_view(self, view_id: str) -> bool:
         value = self.state.views.get(view_id)
-        return valu
+        return value is not None and value.get("type") == "mitsuba"
+
+
+def _rgb_to_hex(
+    color: tuple[float, float, float],
+) -> str:
+    values = [round(max(0.0, min(1.0, component)) * 255) for component in color]
+    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
+
+
+def _hex_to_rgb(
+    value: str,
+) -> tuple[float, float, float]:
+    value = value.lstrip("#")
+    return (
+        int(value[0:2], 16) / 255.0,
+        int(value[2:4], 16) / 255.0,
+        int(value[4:6], 16) / 255.0,
+    )

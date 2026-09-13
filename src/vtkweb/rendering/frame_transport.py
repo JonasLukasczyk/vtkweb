@@ -12,7 +12,9 @@ from aiohttp import WSMsgType, web
 @dataclass
 class _Client:
     websocket: web.WebSocketResponse
-    queue: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue(maxsize=1))
+    queue: asyncio.Queue[bytes] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=1)
+    )
     sender_task: asyncio.Task | None = None
 
 
@@ -67,7 +69,11 @@ class WebSocketFrameTransport:
 
         try:
             async for message in websocket:
-                if message.type in {WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED}:
+                if message.type in {
+                    WSMsgType.CLOSE,
+                    WSMsgType.CLOSING,
+                    WSMsgType.CLOSED,
+                }:
                     break
                 if message.type == WSMsgType.ERROR:
                     break
@@ -129,4 +135,3 @@ class WebSocketFrameTransport:
                 client.queue.put_nowait(packet)
             except asyncio.QueueFull:
                 pass
-

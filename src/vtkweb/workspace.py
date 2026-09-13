@@ -108,8 +108,12 @@ class WorkspaceManager:
             return
 
         parent_id = next(
-            (node_id for node_id, node in nodes.items()
-             if node.get("kind") == "split" and leaf_id in (node["first"], node["second"])),
+            (
+                node_id
+                for node_id, node in nodes.items()
+                if node.get("kind") == "split"
+                and leaf_id in (node["first"], node["second"])
+            ),
             None,
         )
         if parent_id is None:

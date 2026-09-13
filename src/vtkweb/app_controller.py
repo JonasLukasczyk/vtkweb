@@ -478,9 +478,9 @@ def initialize_app_controller(
 
     # Client-to-server render/workspace RPCs. UI code emits these events but
     # application/controller ownership stays here.
-    ctrl.trigger("sync_vtk_camera")(rendering.sync_vtk_camera)
     ctrl.trigger("interact_mitsuba_camera")(rendering.interact_mitsuba_camera)
     ctrl.trigger("set_mitsuba_render_size")(rendering.set_mitsuba_render_size)
     ctrl.trigger("set_split_ratio")(set_split_ratio)
 
-    server.trigger("delete_act
+    server.trigger("delete_active_node")(delete_active_node)
+    server.trigger("execute_pipeline")(execute_pipeline)

@@ -139,7 +139,6 @@ class MitsubaRenderingBackend(RenderingBackend):
         return handle.scene_generation
 
     def reset_camera(self, view_id: str) -> None:
-        print(f"[camera] Mitsuba reset_camera(view_id={view_id})", flush=True)
         bounds = self._visible_bounds(view_id)
         handle = self._views[view_id]
 
@@ -776,4 +775,7 @@ def _rotate_vector(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.nda
     cosine = math.cos(angle)
     sine = math.sin(angle)
     return (
-    
+        vector * cosine
+        + np.cross(axis, vector) * sine
+        + axis * float(np.dot(axis, vector)) * (1.0 - cosine)
+    )

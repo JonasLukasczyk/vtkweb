@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trame.widgets import client, html
-from trame.widgets import vtk as vtk_widgets
+from trame_vtklocal.widgets import vtklocal
 
 from vtkweb.rendering import RenderManager
 
@@ -243,8 +243,25 @@ def build_render_view(
             previous_slot_views[slot_id] = view_id
             widget = vtk_widgets_by_slot.get(slot_id)
             if widget is not None and view_id is not None:
-                widget.update()
-                widget.push_camera()
+                widget.update(push_camera=True)
+
+    def on_vtk_camera(slot_id: str, camera_state: dict | None) -> None:
+        """Mirror a trame-vtklocal camera event into the server vtkCamera."""
+        item = state.vtk_slot_layout.get(slot_id)
+        view_id = item and item.get("view_id")
+        if not view_id or not camera_state:
+            return
+
+        widget = vtk_widgets_by_slot.get(slot_id)
+        if widget is None:
+            return
+
+        # The payload is VTK/WASM object state. Applying it through
+        # trame-vtklocal updates the corresponding server-side vtkCamera.
+        # RenderManager's camera property reads that vtkCamera directly, so
+        # after this call the logical view property and the visible camera are
+        # the same source of truth.
+        widget.vtk_update_from_state(camera_state)
 
     def reset_render_view(view_id: str | None = None) -> None:
         if view_id in state.views:
@@ -404,40 +421,6 @@ def build_render_view(
 
     client.ClientTriggers(
         mounted="""
-            window.__vtkwebVtkCameraWatchers = new Map();
-            window.__vtkwebWatchVtkCamera = (slotId, viewId, component) => {
-                if (!viewId || !component || typeof component.getCamera !== 'function') return;
-                const previous = window.__vtkwebVtkCameraWatchers.get(slotId);
-                if (previous) window.cancelAnimationFrame(previous.frame);
-
-                const watcher = { frame: 0, signature: null };
-                const poll = () => {
-                    try {
-                        const camera = component.getCamera();
-                        if (camera) {
-                            const value = {
-                                position: Array.from(camera.position || []),
-                                target: Array.from(camera.focalPoint || []),
-                                up: Array.from(camera.viewUp || []),
-                                fov: camera.viewAngle,
-                                parallel_projection: camera.parallelProjection,
-                                parallel_scale: camera.parallelScale,
-                            };
-                            const signature = JSON.stringify(value);
-                            if (signature !== watcher.signature) {
-                                watcher.signature = signature;
-                                trigger('sync_vtk_camera', [viewId, value]);
-                            }
-                        }
-                    } catch (_) {
-                        // The local renderer may briefly disappear while a slot is rebound.
-                    }
-                    watcher.frame = window.requestAnimationFrame(poll);
-                };
-                window.__vtkwebVtkCameraWatchers.set(slotId, watcher);
-                poll();
-            };
-
             window.__vtkwebSendMitsubaResize = (viewId, width, height) => {
                 trigger('set_mitsuba_render_size', [viewId, width, height]);
             };
@@ -577,13 +560,6 @@ def build_render_view(
             };
         """,
         before_unmount="""
-            if (window.__vtkwebVtkCameraWatchers) {
-                for (const watcher of window.__vtkwebVtkCameraWatchers.values()) {
-                    window.cancelAnimationFrame(watcher.frame);
-                }
-            }
-            delete window.__vtkwebWatchVtkCamera;
-            delete window.__vtkwebVtkCameraWatchers;
             delete window.__vtkwebSendMitsubaResize;
             delete window.__vtkwebStartTileResize;
             delete window.__vtkwebStartMitsubaCameraDrag;
@@ -604,24 +580,23 @@ def build_render_view(
                     ctrl.set_active_view,
                     f"[vtk_slot_layout['{slot_id}'].view_id]",
                 ),
+                tabindex=0,
+                focus=(
+                    ctrl.set_active_view,
+                    f"[vtk_slot_layout['{slot_id}'].view_id]",
+                ),
+                raw_attrs=[
+                    f"@keydown.space.exact.prevent=\"trigger('render_view_reset', [vtk_slot_layout['{slot_id}'].view_id])\""
+                ],
             ):
-                ref = f"render_view_{slot_id}"
-                widget = vtk_widgets.VtkLocalView(
+                widget = vtklocal.LocalView(
                     backend.get_render_window(slot_id),
-                    ref=ref,
-                    tabindex=0,
-                    style="height:100%;width:100%;outline:none;",
-                    on_ready=(
-                        f"$event && window.__vtkwebWatchVtkCamera('{slot_id}', "
-                        f"vtk_slot_layout['{slot_id}']?.view_id, $refs.{ref})"
+                    ref=f"render_view_{slot_id}",
+                    style="height:100%;width:100%;",
+                    camera=(
+                        lambda value, slot_id=slot_id: on_vtk_camera(slot_id, value),
+                        "[$event]",
                     ),
-                    focus=(
-                        ctrl.set_active_view,
-                        f"[vtk_slot_layout['{slot_id}'].view_id]",
-                    ),
-                    raw_attrs=[
-                        f"@keydown.space.exact.prevent=\"trigger('render_view_reset', [vtk_slot_layout['{slot_id}'].view_id])\""
-                    ],
                 )
                 vtk_widgets_by_slot[slot_id] = widget
 
@@ -752,4 +727,5 @@ def build_render_view(
     @state.change("camera_revision")
     def push_vtk_cameras(**_):
         for slot_id, widget in vtk_widgets_by_slot.items():
-        
+            if state.vtk_slot_layout.get(slot_id) is not None:
+                widget.update(push_camera=True)
