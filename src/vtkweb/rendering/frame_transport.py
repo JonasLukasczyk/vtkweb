@@ -12,12 +12,14 @@ from aiohttp import WSMsgType, web
 @dataclass
 class _Client:
     websocket: web.WebSocketResponse
-    queue: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue(maxsize=1))
+    queue: asyncio.Queue[bytes] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=1)
+    )
     sender_task: asyncio.Task | None = None
 
 
 class FrameTransport(Protocol):
-    """Transport interface for encoded progressive frames."""
+    """Transport interface for encoded server-rendered frames."""
 
     async def publish(
         self,
@@ -31,14 +33,14 @@ class FrameTransport(Protocol):
 
 
 class WebSocketFrameTransport:
-    """Out-of-state binary frame stream for progressive render backends.
+    """Out-of-state binary frame stream for server render backends.
 
     A frame packet is one websocket binary message:
 
         uint32_be header_length | utf8 JSON header | encoded image bytes
 
     Each client owns a single-element queue. If rendering outruns the network,
-    the pending frame is replaced so progressive rendering is always
+    the pending frame is replaced so remote rendering is always
     latest-frame-wins rather than building latency. Frames are intentionally
     broadcast to all clients; per-session subscriptions can be added here if
     vtkweb later hosts independent users on one server process.
@@ -67,7 +69,11 @@ class WebSocketFrameTransport:
 
         try:
             async for message in websocket:
-                if message.type in {WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED}:
+                if message.type in {
+                    WSMsgType.CLOSE,
+                    WSMsgType.CLOSING,
+                    WSMsgType.CLOSED,
+                }:
                     break
                 if message.type == WSMsgType.ERROR:
                     break
@@ -129,4 +135,3 @@ class WebSocketFrameTransport:
                 client.queue.put_nowait(packet)
             except asyncio.QueueFull:
                 pass
-

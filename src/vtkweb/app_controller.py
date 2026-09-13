@@ -26,6 +26,15 @@ def initialize_app_controller(
     execution = PipelineExecutionManager(state, pipeline, rendering)
     execution_task: asyncio.Task | None = None
 
+    # Server -> client request token for transient remote viewport dimensions.
+    # The dimensions themselves remain outside serialized application state.
+    state.remote_render_size_request_epoch = 0
+
+    def request_render_sizes() -> None:
+        state.remote_render_size_request_epoch = (
+            int(state.remote_render_size_request_epoch or 0) + 1
+        )
+
     # -------------------------------------------------------------------------
     # Primitive application commands
     # -------------------------------------------------------------------------
@@ -88,13 +97,20 @@ def initialize_app_controller(
         )
 
     def add_representation(
-        node_id: str, output_port: int = 0, kind: str = "surface",
-        view_ids: Iterable[str] = (), camera_reset_mode: int = 0,
+        node_id: str,
+        output_port: int = 0,
+        kind: str = "surface",
+        view_ids: Iterable[str] = (),
+        camera_reset_mode: int = 0,
         representation_id: str | None = None,
     ) -> str:
         return rendering.add_representation(
-            node_id, output_port=int(output_port), kind=kind, view_ids=view_ids,
-            camera_reset_mode=int(camera_reset_mode), representation_id=representation_id,
+            node_id,
+            output_port=int(output_port),
+            kind=kind,
+            view_ids=view_ids,
+            camera_reset_mode=int(camera_reset_mode),
+            representation_id=representation_id,
         ).id
 
     def toggle_representation_in_view(
@@ -128,6 +144,10 @@ def initialize_app_controller(
             view_id=view_id,
             **kwargs,
         )
+
+    def switch_view_type(view_id: str, view_type: str) -> None:
+        rendering.switch_view_type(view_id, view_type)
+        request_render_sizes()
 
     def create_view_in_container(container_id: str, view_type: str) -> str:
         """Create a selected view backend in an empty workspace tile."""
@@ -286,7 +306,11 @@ def initialize_app_controller(
             rendering.remove_representation(representation.id)
 
         for view in tuple(views.views):
-            views.remove_view(view["id"])
+            # State files commonly recreate the same logical view IDs. Preserve
+            # their client-reported viewport sizes across this reconstruction so
+            # the replacement backend can render immediately even when the DOM
+            # tile itself never resizes.
+            views.remove_view(view["id"], preserve_runtime=True)
 
         workspace.clear()
         pipeline.clear()
@@ -295,11 +319,20 @@ def initialize_app_controller(
         state.active_representation_output_port = 0
 
     def finish_state_load() -> None:
-        """Finish reconstruction without executing the computational pipeline."""
+        """Finalize reconstructed state without executing the pipeline.
+
+        Loading restores configuration only. Pipeline execution remains an
+        explicit user action. The browser may keep the same render DOM nodes
+        across reconstruction, so ask it to re-report the actual viewport
+        dimensions even when no ResizeObserver event occurs.
+        """
 
         for node_id in pipeline.nodes:
             pipeline.mark_modified(node_id, include_downstream=False)
             pipeline.refresh_runtime_metadata(node_id)
+
+        rendering.prune_render_sizes()
+        request_render_sizes()
 
     def execute_pipeline() -> None:
         nonlocal execution_task
@@ -372,13 +405,15 @@ def initialize_app_controller(
     ctrl.apply_tf_preset = rendering.transfer_functions.apply_preset
     ctrl.set_tf_range = rendering.transfer_functions.set_range
     ctrl.rescale_tf = rendering.transfer_functions.rescale
-    ctrl.set_tf_control_point_component = rendering.transfer_functions.set_control_point_component
+    ctrl.set_tf_control_point_component = (
+        rendering.transfer_functions.set_control_point_component
+    )
     ctrl.add_tf_control_point = rendering.transfer_functions.add_control_point
     ctrl.remove_tf_control_point = rendering.transfer_functions.remove_control_point
     ctrl.create_view = create_view
     ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
-    ctrl.switch_view_type = rendering.switch_view_type
+    ctrl.switch_view_type = switch_view_type
     ctrl.create_workspace = create_workspace
     ctrl.split_container = split_container
     ctrl.assign_view_to_container = assign_view_to_container
@@ -392,6 +427,7 @@ def initialize_app_controller(
     ctrl.delete_node = delete_node
     ctrl.clear_state = clear_state
     ctrl.finish_state_load = finish_state_load
+    ctrl.request_render_sizes = request_render_sizes
     ctrl.export_python_state = export_state_source
     ctrl.load_python_state = load_state_source
     ctrl.save_python_state_file = save_python_state_file
@@ -401,8 +437,8 @@ def initialize_app_controller(
 
     # Client-to-server render/workspace RPCs. UI code emits these events but
     # application/controller ownership stays here.
-    ctrl.trigger("interact_mitsuba_camera")(rendering.interact_mitsuba_camera)
-    ctrl.trigger("set_mitsuba_render_size")(rendering.set_mitsuba_render_size)
+    ctrl.trigger("interact_view_camera")(rendering.interact_view_camera)
+    ctrl.trigger("set_render_size")(rendering.set_render_size)
     ctrl.trigger("set_split_ratio")(set_split_ratio)
 
     server.trigger("delete_active_node")(delete_active_node)

@@ -24,8 +24,14 @@ class ViewManager:
     def create_view(self, view_type: str, *, name=None, view_id=None, **kwargs) -> str:
         return self.registry.create(view_type, name=name, view_id=view_id, **kwargs)
 
-    def remove_view(self, view_id: str) -> None:
+    def remove_view(self, view_id: str, *, preserve_runtime: bool = False) -> None:
         value = self.state.views[view_id]
+        if value["type"] in {"vtk", "mitsuba"}:
+            self.rendering.remove_view(
+                view_id,
+                preserve_render_size=preserve_runtime,
+            )
+            return
         self.registry.remove(value["type"], view_id)
 
     def get(self, view_id: str) -> dict:

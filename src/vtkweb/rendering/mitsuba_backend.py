@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,8 +29,10 @@ class MitsubaViewHandle:
     accumulation: np.ndarray | None = None
     accumulated_spp: int = 0
     next_seed: int = 1
-    scene_generation: int = 0
-    accumulation_generation: int = -1
+    render_revision: int = 0
+    accumulation_revision: int = -1
+    cached_scene: Any | None = None
+    cached_scene_key: tuple | None = None
 
 
 @dataclass
@@ -68,219 +71,192 @@ class MitsubaRenderingBackend(RenderingBackend):
     def __init__(self, transfer_function_provider=None) -> None:
         import mitsuba as mi
 
-        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
+        self._transfer_function_provider = transfer_function_provider or (
+            lambda _name: None
+        )
         self.mi = mi
         if mi.variant() != "cuda_ad_rgb":
             mi.set_variant("cuda_ad_rgb")
 
+        # Protect only the small canonical render-state snapshot shared
+        # between the Trame/server thread and the dedicated render worker.
+        # Rendering and accumulation never hold this lock.
+        self._state_lock = threading.RLock()
         self._views: dict[str, MitsubaViewHandle] = {}
-        self._representations: dict[
-            tuple[str, str], MitsubaRepresentationHandle
-        ] = {}
+        self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
 
     # ------------------------------------------------------------------
     # Views
     # ------------------------------------------------------------------
 
     def add_view(self, view: RenderView) -> None:
-        self._views[view.id] = MitsubaViewHandle()
+        with self._state_lock:
+            self._views[view.id] = MitsubaViewHandle()
 
     def remove_view(self, view_id: str) -> None:
-        for key in [key for key in self._representations if key[1] == view_id]:
-            self._representations.pop(key, None)
-        self._views.pop(view_id, None)
-
+        with self._state_lock:
+            for key in [key for key in self._representations if key[1] == view_id]:
+                self._representations.pop(key, None)
+            self._views.pop(view_id, None)
 
     def get_view_property(self, view_id: str, name: str) -> Any:
-        handle = self._views[view_id]
-        if name in {"background_color", "world_ambient_color"}:
-            return _rgb_to_hex(getattr(handle, name))
-        if name == "world_ambient_intensity":
-            return float(handle.world_ambient_intensity)
-        if name == "camera":
-            return {
-                "position": list(handle.camera_origin),
-                "target": list(handle.camera_target),
-                "up": list(handle.camera_up),
-                "center_of_rotation": list(handle.center_of_rotation),
-                "fov": float(handle.camera_fov),
-            }
+        with self._state_lock:
+            handle = self._views[view_id]
+            if name in {"background_color", "world_ambient_color"}:
+                return _rgb_to_hex(getattr(handle, name))
+            if name == "world_ambient_intensity":
+                return float(handle.world_ambient_intensity)
+            if name == "camera":
+                return {
+                    "position": list(handle.camera_origin),
+                    "target": list(handle.camera_target),
+                    "up": list(handle.camera_up),
+                    "center_of_rotation": list(handle.center_of_rotation),
+                    "fov": float(handle.camera_fov),
+                }
         return None
 
     def set_view_property(self, view_id: str, name: str, value: Any) -> None:
-        handle = self._views[view_id]
-        if name in {"background_color", "world_ambient_color"}:
-            if isinstance(value, str):
-                value = _hex_to_rgb(value)
-            setattr(handle, name, value)
-            self.invalidate_scene(view_id)
-            return
-        if name == "world_ambient_intensity":
-            setattr(handle, name, float(value))
-            self.invalidate_scene(view_id)
-            return
-        if name != "camera":
-            return
-        if "position" in value:
-            handle.camera_origin = tuple(float(v) for v in value["position"])
-        if "target" in value:
-            handle.camera_target = tuple(float(v) for v in value["target"])
-        if "up" in value:
-            handle.camera_up = tuple(float(v) for v in value["up"])
-        if value.get("fov") is not None:
-            handle.camera_fov = float(value["fov"])
-        if "center_of_rotation" in value:
-            handle.center_of_rotation = tuple(float(v) for v in value["center_of_rotation"])
-        else:
-            handle.center_of_rotation = tuple(handle.camera_target)
-        self.invalidate_scene(view_id)
+        with self._state_lock:
+            handle = self._views[view_id]
+            if name in {"background_color", "world_ambient_color"}:
+                if isinstance(value, str):
+                    value = _hex_to_rgb(value)
+                setattr(handle, name, tuple(float(v) for v in value))
+                handle.render_revision += 1
+                return
+            if name == "world_ambient_intensity":
+                handle.world_ambient_intensity = float(value)
+                handle.render_revision += 1
+                return
+            if name != "camera":
+                return
+            if "position" in value:
+                handle.camera_origin = tuple(float(v) for v in value["position"])
+            if "target" in value:
+                handle.camera_target = tuple(float(v) for v in value["target"])
+            if "up" in value:
+                handle.camera_up = tuple(float(v) for v in value["up"])
+            if value.get("fov") is not None:
+                handle.camera_fov = float(value["fov"])
+            if "center_of_rotation" in value:
+                handle.center_of_rotation = tuple(
+                    float(v) for v in value["center_of_rotation"]
+                )
+            else:
+                handle.center_of_rotation = tuple(handle.camera_target)
+            handle.render_revision += 1
 
     def set_render_size(self, view_id: str, width: int, height: int) -> bool:
-        """Update transient film dimensions and invalidate the scene."""
-        handle = self._views[view_id]
+        """Update transient film dimensions and advance the render revision."""
         width = max(1, int(width))
         height = max(1, int(height))
-        if handle.width == width and handle.height == height:
-            return False
-
-        handle.width = width
-        handle.height = height
-        self.invalidate_scene(view_id)
+        with self._state_lock:
+            handle = self._views[view_id]
+            if handle.width == width and handle.height == height:
+                return False
+            handle.width = width
+            handle.height = height
+            handle.render_revision += 1
         return True
 
     def invalidate_scene(self, view_id: str) -> int:
-        """Advance the render generation and clear progressive accumulation."""
-        handle = self._views[view_id]
-        handle.scene_generation += 1
-        self.clear_accumulation(view_id, handle.scene_generation)
-        return handle.scene_generation
+        """Advance render state without touching worker-owned accumulation."""
+        with self._state_lock:
+            handle = self._views[view_id]
+            handle.render_revision += 1
+            return handle.render_revision
 
     def reset_camera(self, view_id: str) -> None:
-        bounds = self._visible_bounds(view_id)
-        handle = self._views[view_id]
+        with self._state_lock:
+            bounds = self._visible_bounds_unlocked(view_id)
+            handle = self._views[view_id]
 
-        if bounds is None:
-            handle.camera_origin = (0.0, 0.0, 5.0)
-            handle.camera_target = (0.0, 0.0, 0.0)
+            if bounds is None:
+                handle.camera_origin = (0.0, 0.0, 5.0)
+                handle.camera_target = (0.0, 0.0, 0.0)
+                handle.camera_up = (0.0, 1.0, 0.0)
+                handle.center_of_rotation = (0.0, 0.0, 0.0)
+                handle.render_revision += 1
+                return
+
+            xmin, xmax, ymin, ymax, zmin, zmax = bounds
+            center = np.array(
+                [
+                    0.5 * (xmin + xmax),
+                    0.5 * (ymin + ymax),
+                    0.5 * (zmin + zmax),
+                ],
+                dtype=np.float64,
+            )
+            diagonal = np.array(
+                [xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64
+            )
+            radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
+
+            half_fov = math.radians(handle.camera_fov) * 0.5
+            distance = 1.15 * radius / math.sin(half_fov)
+
+            origin = center + np.array([0.0, 0.0, distance])
+            handle.camera_origin = tuple(float(v) for v in origin)
+            handle.camera_target = tuple(float(v) for v in center)
             handle.camera_up = (0.0, 1.0, 0.0)
-            handle.center_of_rotation = (0.0, 0.0, 0.0)
-            self.invalidate_scene(view_id)
-            return
-
-        xmin, xmax, ymin, ymax, zmin, zmax = bounds
-        center = np.array(
-            [
-                0.5 * (xmin + xmax),
-                0.5 * (ymin + ymax),
-                0.5 * (zmin + zmax),
-            ],
-            dtype=np.float64,
-        )
-        diagonal = np.array(
-            [xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64
-        )
-        radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
-
-        half_fov = math.radians(handle.camera_fov) * 0.5
-        distance = 1.15 * radius / math.sin(half_fov)
-
-        origin = center + np.array([0.0, 0.0, distance])
-        handle.camera_origin = tuple(float(v) for v in origin)
-        handle.camera_target = tuple(float(v) for v in center)
-        handle.camera_up = (0.0, 1.0, 0.0)
-        handle.center_of_rotation = tuple(float(v) for v in center)
-        self.invalidate_scene(view_id)
-
-
-    def interact_camera(
-        self,
-        view_id: str,
-        mode: str,
-        dx: float,
-        dy: float,
-        viewport_height: float,
-    ) -> int:
-        """Apply an orbit, pan, or dolly delta to the runtime camera."""
-        handle = self._views[view_id]
-        dx = float(dx)
-        dy = float(dy)
-
-        position = np.asarray(handle.camera_origin, dtype=np.float64)
-        target = np.asarray(handle.camera_target, dtype=np.float64)
-        up = _normalized(np.asarray(handle.camera_up, dtype=np.float64))
-        center = np.asarray(handle.center_of_rotation, dtype=np.float64)
-
-        if mode == "orbit":
-            offset = position - center
-            radians_per_pixel = math.radians(0.35)
-            offset = _rotate_vector(offset, up, -dx * radians_per_pixel)
-            forward = _normalized(-offset)
-            right = np.cross(forward, up)
-            if np.linalg.norm(right) > 1.0e-12:
-                right = _normalized(right)
-                pitch = -dy * radians_per_pixel
-                offset = _rotate_vector(offset, right, pitch)
-                up = _normalized(_rotate_vector(up, right, pitch))
-            position = center + offset
-            target = center.copy()
-
-        elif mode == "pan":
-            forward_vector = target - position
-            distance = max(float(np.linalg.norm(forward_vector)), 1.0e-9)
-            forward = _normalized(forward_vector)
-            right = np.cross(forward, up)
-            if np.linalg.norm(right) > 1.0e-12:
-                right = _normalized(right)
-                screen_up = _normalized(np.cross(right, forward))
-                height = max(float(viewport_height), 1.0)
-                world_per_pixel = (
-                    2.0 * distance * math.tan(0.5 * math.radians(handle.camera_fov)) / height
-                )
-                shift = (-dx * right + dy * screen_up) * world_per_pixel
-                position += shift
-                target += shift
-                center += shift
-                up = screen_up
-
-        elif mode == "zoom":
-            offset = position - target
-            distance = float(np.linalg.norm(offset))
-            if distance > 1.0e-12:
-                factor = math.exp(max(-4.0, min(4.0, dy * 0.01)))
-                next_distance = max(1.0e-9, min(1.0e12, distance * factor))
-                position = target + offset * (next_distance / distance)
-        else:
-            raise ValueError(f"Unknown camera interaction mode: {mode}")
-
-        handle.camera_origin = tuple(float(v) for v in position)
-        handle.camera_target = tuple(float(v) for v in target)
-        handle.camera_up = tuple(float(v) for v in up)
-        handle.center_of_rotation = tuple(float(v) for v in center)
-        return self.invalidate_scene(view_id)
-
-    def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]:
-        handle = self._views[view_id]
-        camera = self.get_view_property(view_id, "camera")
-        return handle.scene_generation, camera
+            handle.center_of_rotation = tuple(float(v) for v in center)
+            handle.render_revision += 1
 
     def has_renderable_scene(self, view_id: str) -> bool:
-        handle = self._views[view_id]
-        return handle.width > 0 and handle.height > 0 and any(
-            current_view_id == view_id and rep.mesh is not None
-            for (_, current_view_id), rep in self._representations.items()
-        )
+        with self._state_lock:
+            handle = self._views[view_id]
+            return (
+                handle.width > 0
+                and handle.height > 0
+                and any(
+                    current_view_id == view_id and rep.mesh is not None
+                    for (_, current_view_id), rep in self._representations.items()
+                )
+            )
 
-    def clear_accumulation(self, view_id: str, generation: int | None = None) -> None:
-        handle = self._views[view_id]
+    def _clear_accumulation_worker(
+        self,
+        handle: MitsubaViewHandle,
+        revision: int,
+    ) -> None:
+        """Reset progressive state. Called only by the dedicated render worker."""
         handle.accumulation = None
         handle.accumulated_spp = 0
         handle.next_seed = 1
-        handle.accumulation_generation = (
-            handle.scene_generation if generation is None else int(generation)
-        )
+        handle.accumulation_revision = int(revision)
+        handle.cached_scene = None
+        handle.cached_scene_key = None
 
-    def accumulation_generation(self, view_id: str) -> int:
-        return self._views[view_id].accumulation_generation
+    def _snapshot_render_state(self, view_id: str) -> tuple[dict[str, Any], int]:
+        """Atomically copy the state consumed by one render pass."""
+        with self._state_lock:
+            handle = self._views[view_id]
+            snapshot = {
+                "camera": {
+                    "position": tuple(handle.camera_origin),
+                    "target": tuple(handle.camera_target),
+                    "up": tuple(handle.camera_up),
+                    "fov": float(handle.camera_fov),
+                },
+                "width": int(handle.width),
+                "height": int(handle.height),
+                "background_color": tuple(handle.background_color),
+                "world_ambient_color": tuple(handle.world_ambient_color),
+                "world_ambient_intensity": float(handle.world_ambient_intensity),
+                # Keep strong references to exactly the meshes represented by
+                # this revision even if the server thread replaces them later.
+                "shapes": tuple(
+                    (representation_id, rep.mesh)
+                    for (
+                        representation_id,
+                        current_view_id,
+                    ), rep in self._representations.items()
+                    if current_view_id == view_id and rep.mesh is not None
+                ),
+            }
+            return snapshot, int(handle.render_revision)
 
     # ------------------------------------------------------------------
     # Representations
@@ -293,10 +269,13 @@ class MitsubaRenderingBackend(RenderingBackend):
         source: Any,
     ) -> None:
         key = (representation.id, view.id)
-        if key in self._representations:
-            return
-        self._representations[key] = self._create_handle(representation, source)
-        self.invalidate_scene(view.id)
+        with self._state_lock:
+            if key in self._representations:
+                return
+        rep_handle = self._create_handle(representation, source)
+        with self._state_lock:
+            self._representations[key] = rep_handle
+            self._views[view.id].render_revision += 1
 
     def update_representation(
         self,
@@ -304,15 +283,16 @@ class MitsubaRenderingBackend(RenderingBackend):
         view: RenderView,
         source: Any,
     ) -> None:
-        self._representations[(representation.id, view.id)] = self._create_handle(
-            representation, source
-        )
-        self.invalidate_scene(view.id)
+        rep_handle = self._create_handle(representation, source)
+        with self._state_lock:
+            self._representations[(representation.id, view.id)] = rep_handle
+            self._views[view.id].render_revision += 1
 
     def remove_representation(self, representation_id: str, view_id: str) -> None:
-        self._representations.pop((representation_id, view_id), None)
-        if view_id in self._views:
-            self.invalidate_scene(view_id)
+        with self._state_lock:
+            self._representations.pop((representation_id, view_id), None)
+            if view_id in self._views:
+                self._views[view_id].render_revision += 1
 
     def _create_handle(
         self,
@@ -461,9 +441,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 if colors is not None:
                     if association == "cell":
                         vertices = vertices[faces].reshape(-1, 3)
-                        faces = np.arange(
-                            len(vertices), dtype=np.uint32
-                        ).reshape(-1, 3)
+                        faces = np.arange(len(vertices), dtype=np.uint32).reshape(-1, 3)
                         vertex_colors = np.repeat(colors, 3, axis=0)
                     else:
                         vertex_colors = colors
@@ -492,9 +470,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "name": "vertex_color",
                 }
             else:
-                color = _hex_to_rgb(
-                    representation.properties.get("color", "#d9d9d9")
-                )
+                color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
                 reflectance = {"type": "rgb", "value": list(color)}
 
             mesh.set_bsdf(
@@ -522,18 +498,18 @@ class MitsubaRenderingBackend(RenderingBackend):
     def render_pass(
         self,
         view_id: str,
-        camera: dict[str, Any],
+        snapshot: dict[str, Any],
+        revision: int,
         *,
         spp: int = 1,
     ) -> np.ndarray:
+        """Render exactly the state snapshot captured for this worker pass."""
         handle = self._views[view_id]
         spp = max(1, int(spp))
+        camera = snapshot["camera"]
 
         scene_dict: dict[str, Any] = {
             "type": "scene",
-            # The environment is used only for illumination.  The requested
-            # view background is composited after rendering so changing a UI
-            # background color does not also change scene exposure.
             "integrator": {
                 "type": "path",
                 "max_depth": 4,
@@ -541,7 +517,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             },
             "sensor": {
                 "type": "perspective",
-                "fov": float(camera.get("fov", handle.camera_fov)),
+                "fov": float(camera["fov"]),
                 "fov_axis": "y",
                 "to_world": self.mi.ScalarTransform4f().look_at(
                     origin=camera["position"],
@@ -550,8 +526,8 @@ class MitsubaRenderingBackend(RenderingBackend):
                 ),
                 "film": {
                     "type": "hdrfilm",
-                    "width": handle.width,
-                    "height": handle.height,
+                    "width": snapshot["width"],
+                    "height": snapshot["height"],
                     "pixel_format": "rgba",
                 },
                 "sampler": {"type": "independent", "sample_count": spp},
@@ -562,24 +538,25 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "type": "rgb",
                     "value": (
                         np.asarray(
-                            self._srgb_to_linear(handle.world_ambient_color),
+                            self._srgb_to_linear(snapshot["world_ambient_color"]),
                             dtype=np.float32,
                         )
-                        * float(handle.world_ambient_intensity)
+                        * snapshot["world_ambient_intensity"]
                     ).tolist(),
                 },
             },
         }
 
-        shape_index = 0
-        for (representation_id, current_view_id), rep in self._representations.items():
-            if current_view_id != view_id:
-                continue
-            if rep.mesh is not None:
-                scene_dict[f"shape_{shape_index}_{representation_id}"] = rep.mesh
-                shape_index += 1
+        for shape_index, (representation_id, mesh) in enumerate(snapshot["shapes"]):
+            scene_dict[f"shape_{shape_index}_{representation_id}"] = mesh
 
-        scene = self.mi.load_dict(scene_dict)
+        # The revision is a complete scene key. Only the worker mutates the
+        # cached scene, so no synchronization is needed here.
+        if handle.cached_scene is None or handle.cached_scene_key != revision:
+            handle.cached_scene = self.mi.load_dict(scene_dict)
+            handle.cached_scene_key = revision
+        scene = handle.cached_scene
+
         seed = handle.next_seed
         handle.next_seed += 1
         image = self.mi.render(scene, spp=spp, seed=seed)
@@ -589,29 +566,28 @@ class MitsubaRenderingBackend(RenderingBackend):
             rgb = rendered[..., :3]
             alpha = np.clip(rendered[..., 3:4], 0.0, 1.0)
             background = np.asarray(
-                self._srgb_to_linear(handle.background_color), dtype=np.float32
+                self._srgb_to_linear(snapshot["background_color"]),
+                dtype=np.float32,
             ).reshape((1, 1, 3))
             return rgb * alpha + background * (1.0 - alpha)
 
-        # Fallback for Mitsuba configurations that do not expose alpha even
-        # when an RGBA film is requested.
         return rendered[..., :3]
 
-    def accumulate_pass(
+    def _accumulate_pass_worker(
         self,
-        view_id: str,
+        handle: MitsubaViewHandle,
         sample: np.ndarray,
         *,
         spp: int,
-        generation: int,
+        revision: int,
     ) -> None:
-        handle = self._views[view_id]
-        if handle.accumulation_generation != generation:
-            self.clear_accumulation(view_id, generation)
+        """Accumulate one sample. Called only by the render worker."""
+        if handle.accumulation_revision != revision:
+            self._clear_accumulation_worker(handle, revision)
         if handle.accumulation is None or handle.accumulation.shape != sample.shape:
             handle.accumulation = np.zeros_like(sample, dtype=np.float32)
             handle.accumulated_spp = 0
-            handle.accumulation_generation = generation
+            handle.accumulation_revision = revision
         handle.accumulation += sample * float(spp)
         handle.accumulated_spp += int(spp)
 
@@ -637,14 +613,45 @@ class MitsubaRenderingBackend(RenderingBackend):
                     pass
         return payload
 
-    def encoded_accumulated_frame(self, view_id: str) -> bytes | None:
-        handle = self._views[view_id]
+    def _encoded_accumulated_frame_worker(
+        self,
+        handle: MitsubaViewHandle,
+    ) -> bytes | None:
         if handle.accumulation is None or handle.accumulated_spp <= 0:
             return None
         averaged = handle.accumulation / float(handle.accumulated_spp)
         return self.encoded_frame(averaged)
 
-    def _visible_bounds(
+    def render_frame(self, view_id: str) -> bytes | None:
+        """Render, accumulate, and publish one snapshot revision.
+
+        A pass always completes for the state it copied at its start. If the
+        server changes the camera or scene while that pass is running, the pass
+        is still accumulated and returned for its original revision. The next
+        iteration observes the newer revision and clears the worker-owned
+        accumulator before rendering it. This prevents cross-camera ghosting
+        without discarding completed intermediate frames.
+        """
+        handle = self._views.get(view_id)
+        if handle is None:
+            return None
+
+        snapshot, revision = self._snapshot_render_state(view_id)
+
+        # Accumulation ownership is entirely on this dedicated worker thread.
+        if handle.accumulation_revision != revision:
+            self._clear_accumulation_worker(handle, revision)
+
+        sample = self.render_pass(view_id, snapshot, revision, spp=1)
+        self._accumulate_pass_worker(
+            handle,
+            sample,
+            spp=1,
+            revision=revision,
+        )
+        return self._encoded_accumulated_frame_worker(handle)
+
+    def _visible_bounds_unlocked(
         self, view_id: str
     ) -> tuple[float, float, float, float, float, float] | None:
         bounds = [
@@ -730,8 +737,6 @@ def _evaluate_transfer_function(
     return np.asarray(rgb, dtype=np.float32)
 
 
-
-
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
     value = str(value).lstrip("#")
     if len(value) != 6:
@@ -740,24 +745,6 @@ def _hex_to_rgb(value: str) -> tuple[float, float, float]:
         int(value[0:2], 16) / 255.0,
         int(value[2:4], 16) / 255.0,
         int(value[4:6], 16) / 255.0,
-    )
-
-
-def _normalized(vector: np.ndarray) -> np.ndarray:
-    norm = float(np.linalg.norm(vector))
-    if norm < 1.0e-12:
-        return vector.copy()
-    return vector / norm
-
-
-def _rotate_vector(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
-    axis = _normalized(axis)
-    cosine = math.cos(angle)
-    sine = math.sin(angle)
-    return (
-        vector * cosine
-        + np.cross(axis, vector) * sine
-        + axis * float(np.dot(axis, vector)) * (1.0 - cosine)
     )
 
 

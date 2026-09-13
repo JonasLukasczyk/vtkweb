@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import math
+
+import numpy as np
 from copy import deepcopy
 from uuid import uuid4
 
@@ -10,11 +13,11 @@ from vtkweb.rendering.base import (
     REPRESENTATION_KINDS,
     VIEW_PROPERTY_NAMES,
     RenderView,
-    ProgressiveRenderingBackend,
+    FrameRenderingBackend,
     RenderingBackend,
     Representation,
 )
-from vtkweb.rendering.progressive import ProgressiveRenderManager
+from vtkweb.rendering.frame_scheduler import FrameRenderManager
 from vtkweb.rendering.vtk_backend import (
     VTKRenderingBackend,
 )
@@ -40,7 +43,6 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
 }
 
 
-
 class RenderManager:
     """Rendering service backed by serializable trame state.
 
@@ -58,32 +60,19 @@ class RenderManager:
     ) -> None:
         self.state = state
         self.pipeline = pipeline
-        self.progressive = ProgressiveRenderManager(frame_transport)
+        self.frames = FrameRenderManager(frame_transport)
         self.transfer_functions = TransferFunctionManager(state, self)
         vtk_backend = backend or VTKRenderingBackend(self.transfer_functions.get)
         self._backends: dict[str, RenderingBackend] = {"vtk": vtk_backend}
         self._view_backend_ids: dict[str, str] = {}
+        # Client viewport size is transient runtime state owned by the logical
+        # view. Keep it here so a backend switch does not lose the existing
+        # canvas dimensions when the DOM itself does not resize.
+        self._render_sizes: dict[str, tuple[int, int]] = {}
 
         self.state.views = {}
         self.state.representations = {}
         self.state.active_view_id = None
-
-        # Monotonic notification used by local VTK view adapters. Backend-only
-        # representation refreshes do not otherwise mutate Trame state, so the
-        # client would have no reason to pull the updated render window.
-        self.state.render_revision = 0
-        self.state.camera_revision = 0
-
-        # Local VTK view components are created once when the Trame UI is built.
-        # Keep a small pool of backend render windows alive and map logical
-        # vtk views onto those slots. Logical view IDs remain fully dynamic and
-        # serializable while the client-side VTK components stay stable.
-        self._slot_ids = tuple(f"vtk_slot_{index}" for index in range(8))
-        self._slot_owners: dict[str, str | None] = {
-            slot: None for slot in self._slot_ids
-        }
-        for slot_id in self._slot_ids:
-            vtk_backend.add_view(RenderView(id=slot_id, name=slot_id))
 
     # -------------------------------------------------------------------------
     # Views
@@ -98,10 +87,6 @@ class RenderManager:
             for view_id, value in self.state.views.items()
             if value.get("type") in {"vtk", "mitsuba"}
         )
-
-    @property
-    def backend_slots(self) -> tuple[str, ...]:
-        return self._slot_ids
 
     @property
     def active_view_id(
@@ -136,27 +121,17 @@ class RenderManager:
             raise ValueError(f"View ID already exists: {view_id}")
 
         backend = self.backend_for_type(view_type)
-        if view_type == "vtk":
-            backend_id = next(
-                (slot for slot, owner in self._slot_owners.items() if owner is None),
-                None,
-            )
-            if backend_id is None:
-                raise RuntimeError(
-                    f"Maximum number of VTK views reached ({len(self._slot_ids)})"
-                )
-            self._slot_owners[backend_id] = view_id
-        else:
-            backend_id = view_id
-            backend.add_view(RenderView(id=backend_id, name=name))
-
+        backend_id = view_id
+        backend.add_view(RenderView(id=backend_id, name=name))
         self._view_backend_ids[view_id] = backend_id
         value = {
             "id": view_id,
             "type": view_type,
             "name": name,
             **DEFAULT_VIEW_PROPERTIES,
-            "camera": _normalize_camera(backend.get_view_property(backend_id, "camera")),
+            "camera": _normalize_camera(
+                backend.get_view_property(backend_id, "camera")
+            ),
         }
         self.state.views = {**self.state.views, view_id: value}
 
@@ -167,16 +142,17 @@ class RenderManager:
                 value[property_name],
             )
 
-        if view_type == "mitsuba":
-            self.progressive.register_view(
-                view_id, self._progressive_backend_for_view(view_id), backend_id
-            )
+        self.frames.register_view(
+            view_id, self._frame_backend_for_view(view_id), backend_id
+        )
         self._notify_render()
         return self.get_view(view_id)
 
     def remove_view(
         self,
         view_id: str,
+        *,
+        preserve_render_size: bool = False,
     ) -> None:
         self.get_view(view_id)
 
@@ -184,19 +160,16 @@ class RenderManager:
             if view_id in representation.view_ids:
                 self.unassign_representation(representation.id, view_id, notify=False)
 
-        view_type = self.state.views[view_id]["type"]
         backend_id = self.backend_view_id(view_id)
-        if view_type == "vtk":
-            self._slot_owners[backend_id] = None
-        else:
-            self.progressive.unregister_view(view_id)
-            self._backend_for_view(view_id).remove_view(backend_id)
+        self.frames.unregister_view(view_id)
+        self._backend_for_view(view_id).remove_view(backend_id)
         self._view_backend_ids.pop(view_id, None)
+        if not preserve_render_size:
+            self._render_sizes.pop(view_id, None)
 
         views = dict(self.state.views)
         del views[view_id]
         self.state.views = views
-
 
         if self.active_view_id == view_id:
             self.state.active_view_id = next(
@@ -230,26 +203,12 @@ class RenderManager:
         for representation_id in representation_ids:
             old_backend.remove_representation(representation_id, old_backend_id)
 
-        if old_type == "vtk":
-            self._slot_owners[old_backend_id] = None
-        else:
-            self.progressive.unregister_view(view_id)
-            old_backend.remove_view(old_backend_id)
+        self.frames.unregister_view(view_id)
+        old_backend.remove_view(old_backend_id)
 
         backend = self.backend_for_type(view_type)
-        if view_type == "vtk":
-            backend_id = next(
-                (slot for slot, owner in self._slot_owners.items() if owner is None),
-                None,
-            )
-            if backend_id is None:
-                raise RuntimeError(
-                    f"Maximum number of VTK views reached ({len(self._slot_ids)})"
-                )
-            self._slot_owners[backend_id] = view_id
-        else:
-            backend_id = view_id
-            backend.add_view(RenderView(id=backend_id, name=value["name"]))
+        backend_id = view_id
+        backend.add_view(RenderView(id=backend_id, name=value["name"]))
         self._view_backend_ids[view_id] = backend_id
 
         value["type"] = view_type
@@ -276,21 +235,25 @@ class RenderManager:
         # Camera is a serialized view property. Apply it only after scene
         # representations exist so VTK can derive a valid clipping range when
         # the source backend did not provide one.
-        backend.set_view_property(
-            backend_id, "camera", value["camera"]
-        )
+        backend.set_view_property(backend_id, "camera", value["camera"])
         value["camera"] = _normalize_camera(
             backend.get_view_property(backend_id, "camera")
         )
         self.state.views = {**self.state.views, view_id: value}
 
-        if view_type == "mitsuba":
-            self.progressive.register_view(
-                view_id, self._progressive_backend_for_view(view_id), backend_id
+        # The browser canvas survives an in-place backend switch, so its
+        # ResizeObserver may not fire again. Carry the logical view's transient
+        # viewport size into the replacement backend explicitly.
+        render_size = self._render_sizes.get(view_id)
+        if render_size is not None:
+            self._frame_backend_for_view(view_id).set_render_size(
+                backend_id, *render_size
             )
-            self.progressive.ensure(view_id)
+
+        self.frames.register_view(
+            view_id, self._frame_backend_for_view(view_id), backend_id
+        )
         self._notify_render()
-        self._notify_camera()
 
     # -------------------------------------------------------------------------
     # Representations
@@ -393,7 +356,10 @@ class RenderManager:
                     ),
                 )
 
-        self.state.representations = {**self.state.representations, representation_id: value}
+        self.state.representations = {
+            **self.state.representations,
+            representation_id: value,
+        }
 
         for view_id in view_ids:
             self.assign_representation(
@@ -467,8 +433,11 @@ class RenderManager:
             if self.get_representations(node_id, output_port):
                 continue
             representation = self.add_representation(
-                node_id, output_port=output_port, kind="outline",
-                view_ids=view_ids, notify=False,
+                node_id,
+                output_port=output_port,
+                kind="outline",
+                view_ids=view_ids,
+                notify=False,
             )
             created.append(representation.id)
 
@@ -478,13 +447,7 @@ class RenderManager:
         self,
         node_id: str,
     ) -> None:
-        """Refresh every render representation backed by *node_id*.
-
-        This operation changes backend VTK objects without necessarily changing
-        serialized representation state. ``render_revision`` therefore changes
-        after the backend is current so the local VTK view pushes the new scene to the
-        browser immediately rather than waiting for a camera interaction.
-        """
+        """Refresh every render representation backed by *node_id*."""
 
         for representation in tuple(self.get_representations(node_id)):
             self._update_representation(representation.id)
@@ -520,8 +483,7 @@ class RenderManager:
             self._backend_for_view(view_id).add_representation(
                 representation, self._backend_view(view_id), node.processor
             )
-            if self._is_mitsuba_view(view_id):
-                self.progressive.ensure(view_id)
+            self.frames.ensure(view_id)
 
         value = dict(self.state.representations[representation_id])
         value["view_ids"] = [
@@ -712,9 +674,7 @@ class RenderManager:
         minimum, maximum = array.GetRange(component)
         return (float(minimum), float(maximum))
 
-    def get_global_array_range(
-        self, array_name: str
-    ) -> tuple[float, float] | None:
+    def get_global_array_range(self, array_name: str) -> tuple[float, float] | None:
         minimum = None
         maximum = None
         for node_id, node in self.pipeline.nodes.items():
@@ -729,10 +689,14 @@ class RenderManager:
                     if data_range is None:
                         continue
                     minimum = (
-                        data_range[0] if minimum is None else min(minimum, data_range[0])
+                        data_range[0]
+                        if minimum is None
+                        else min(minimum, data_range[0])
                     )
                     maximum = (
-                        data_range[1] if maximum is None else max(maximum, data_range[1])
+                        data_range[1]
+                        if maximum is None
+                        else max(maximum, data_range[1])
                     )
         if minimum is None or maximum is None:
             return None
@@ -762,15 +726,15 @@ class RenderManager:
             camera = dict(self.state.views[view_id].get("camera") or {})
             camera.update(dict(value or {}))
             value = _normalize_camera(camera)
-        elif name in {"background_color", "world_ambient_color"} and not isinstance(value, str):
+        elif name in {"background_color", "world_ambient_color"} and not isinstance(
+            value, str
+        ):
             value = _rgb_to_hex(tuple(map(float, value)))
         elif name == "world_ambient_intensity":
             value = max(0.0, float(value))
 
         value = deepcopy(value)
-        backend.set_view_property(
-            backend_id, name, value
-        )
+        backend.set_view_property(backend_id, name, value)
         if name == "camera":
             # Camera is interaction state, so preserve what the backend actually
             # accepted/materialized rather than a requested value that may
@@ -780,13 +744,9 @@ class RenderManager:
         view = dict(self.state.views[view_id], **{name: value})
         self.state.views = {**self.state.views, view_id: view}
 
-        if self._is_mitsuba_view(view_id):
-            self.progressive.ensure(view_id)
+        self.frames.ensure(view_id)
         if notify:
-            if name == "camera":
-                self._notify_camera()
-            else:
-                self._notify_render()
+            self._notify_render()
 
     def reset_camera(
         self,
@@ -806,11 +766,10 @@ class RenderManager:
         view = dict(self.state.views[view_id], camera=camera)
         self.state.views = {**self.state.views, view_id: view}
         if notify:
-            self._notify_camera()
-        if self._is_mitsuba_view(view_id):
-            self.progressive.ensure(view_id)
+            self._notify_render()
+        self.frames.ensure(view_id)
 
-    def interact_mitsuba_camera(
+    def interact_view_camera(
         self,
         view_id: str,
         mode: str,
@@ -818,24 +777,33 @@ class RenderManager:
         dy: float,
         viewport_height: float,
     ) -> None:
-        """Apply a client camera gesture and synchronize the view property."""
-        if not self._is_mitsuba_view(view_id):
-            return
-        backend = self._progressive_backend_for_view(view_id)
-        backend_id = self.backend_view_id(view_id)
-        backend.interact_camera(backend_id, mode, dx, dy, viewport_height)
-        camera = _normalize_camera(backend.get_view_property(backend_id, "camera"))
-        view = dict(self.state.views[view_id], camera=camera)
-        self.state.views = {**self.state.views, view_id: view}
-        self.progressive.ensure(view_id)
+        """Apply a renderer-agnostic camera gesture to one view."""
+        camera = _interacted_camera(
+            self.get_view_property(view_id, "camera"),
+            mode,
+            dx,
+            dy,
+            viewport_height,
+        )
+        self.set_view_property(view_id, "camera", camera)
 
-    def set_mitsuba_render_size(self, view_id: str, width: int, height: int) -> None:
+    def set_render_size(self, view_id: str, width: int, height: int) -> None:
         """Apply transient client viewport dimensions without serializing them."""
-        if not self._is_mitsuba_view(view_id):
-            return
-        backend = self._progressive_backend_for_view(view_id)
+        width = max(1, int(width))
+        height = max(1, int(height))
+        self._render_sizes[view_id] = (width, height)
+        backend = self._frame_backend_for_view(view_id)
         if backend.set_render_size(self.backend_view_id(view_id), width, height):
-            self.progressive.ensure(view_id)
+            self.frames.ensure(view_id)
+
+    def prune_render_sizes(self) -> None:
+        """Drop transient sizes for logical views that no longer exist."""
+        active_ids = set(self.state.views)
+        self._render_sizes = {
+            view_id: size
+            for view_id, size in self._render_sizes.items()
+            if view_id in active_ids
+        }
 
     # -------------------------------------------------------------------------
     # Internal
@@ -865,12 +833,7 @@ class RenderManager:
             )
 
     def _notify_render(self) -> None:
-        """Notify VTK clients and ensure progressive views are rendering."""
-        self.state.render_revision = int(self.state.render_revision or 0) + 1
-        self.progressive.ensure_all()
-
-    def _notify_camera(self) -> None:
-        self.state.camera_revision = int(self.state.camera_revision or 0) + 1
+        self.frames.ensure_all()
 
     def backend_for_type(self, view_type: str) -> RenderingBackend:
         backend = self._backends.get(view_type)
@@ -889,18 +852,11 @@ class RenderManager:
     def _backend_for_view(self, view_id: str) -> RenderingBackend:
         return self.backend_for_type(self.state.views[view_id]["type"])
 
-    def _progressive_backend_for_view(
-        self, view_id: str
-    ) -> ProgressiveRenderingBackend:
+    def _frame_backend_for_view(self, view_id: str) -> FrameRenderingBackend:
         backend = self._backend_for_view(view_id)
-        if not isinstance(backend, ProgressiveRenderingBackend):
-            raise TypeError(f"View is not backed by a progressive renderer: {view_id}")
+        if not isinstance(backend, FrameRenderingBackend):
+            raise TypeError(f"View is not backed by a frame renderer: {view_id}")
         return backend
-
-    def _is_mitsuba_view(self, view_id: str) -> bool:
-        value = self.state.views.get(view_id)
-        return value is not None and value.get("type") == "mitsuba"
-
 
 
 def _normalize_camera(value) -> dict:
@@ -915,6 +871,101 @@ def _normalize_camera(value) -> dict:
         result["parallel_projection"] = bool(value["parallel_projection"])
     if value.get("parallel_scale") is not None:
         result["parallel_scale"] = float(value["parallel_scale"])
+    return result
+
+
+def _normalized(vector: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1.0e-12:
+        return vector
+    return vector / norm
+
+
+def _rotate_vector(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+    axis = _normalized(axis)
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    return (
+        vector * cosine
+        + np.cross(axis, vector) * sine
+        + axis * np.dot(axis, vector) * (1.0 - cosine)
+    )
+
+
+def _interacted_camera(
+    camera: dict,
+    mode: str,
+    dx: float,
+    dy: float,
+    viewport_height: float,
+) -> dict:
+    """Return a new renderer-independent camera after one client gesture."""
+    result = _normalize_camera(camera)
+    position = np.asarray(result.get("position", [0.0, 0.0, 1.0]), dtype=np.float64)
+    target = np.asarray(result.get("target", [0.0, 0.0, 0.0]), dtype=np.float64)
+    up = _normalized(np.asarray(result.get("up", [0.0, 1.0, 0.0]), dtype=np.float64))
+    center = np.asarray(result.get("center_of_rotation", target), dtype=np.float64)
+    dx = float(dx)
+    dy = float(dy)
+
+    if mode == "orbit":
+        offset = position - center
+        radians_per_pixel = math.radians(0.35)
+        offset = _rotate_vector(offset, up, -dx * radians_per_pixel)
+        forward = _normalized(-offset)
+        right = np.cross(forward, up)
+        if np.linalg.norm(right) > 1.0e-12:
+            right = _normalized(right)
+            pitch = -dy * radians_per_pixel
+            offset = _rotate_vector(offset, right, pitch)
+            up = _normalized(_rotate_vector(up, right, pitch))
+        position = center + offset
+        target = center.copy()
+
+    elif mode == "pan":
+        forward_vector = target - position
+        distance = max(float(np.linalg.norm(forward_vector)), 1.0e-9)
+        forward = _normalized(forward_vector)
+        right = np.cross(forward, up)
+        if np.linalg.norm(right) > 1.0e-12:
+            right = _normalized(right)
+            screen_up = _normalized(np.cross(right, forward))
+            height = max(float(viewport_height), 1.0)
+            if result.get("parallel_projection"):
+                world_per_pixel = (
+                    2.0 * float(result.get("parallel_scale", 1.0)) / height
+                )
+            else:
+                fov = float(result.get("fov", 30.0))
+                world_per_pixel = (
+                    2.0 * distance * math.tan(0.5 * math.radians(fov)) / height
+                )
+            shift = (-dx * right + dy * screen_up) * world_per_pixel
+            position += shift
+            target += shift
+            center += shift
+            up = screen_up
+
+    elif mode == "zoom":
+        factor = math.exp(max(-4.0, min(4.0, dy * 0.01)))
+        if result.get("parallel_projection"):
+            result["parallel_scale"] = max(
+                1.0e-12,
+                min(1.0e12, float(result.get("parallel_scale", 1.0)) * factor),
+            )
+        else:
+            offset = position - target
+            distance = float(np.linalg.norm(offset))
+            if distance > 1.0e-12:
+                next_distance = max(1.0e-9, min(1.0e12, distance * factor))
+                position = target + offset * (next_distance / distance)
+    else:
+        raise ValueError(f"Unknown camera interaction mode: {mode}")
+
+    result["position"] = [float(v) for v in position]
+    result["target"] = [float(v) for v in target]
+    result["up"] = [float(v) for v in up]
+    result["center_of_rotation"] = [float(v) for v in center]
     return result
 
 

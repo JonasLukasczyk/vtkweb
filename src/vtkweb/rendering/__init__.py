@@ -3,7 +3,7 @@ from vtkweb.rendering.base import (
     REPRESENTATION_KINDS,
     VIEW_PROPERTY_NAMES,
     RenderView,
-    ProgressiveRenderingBackend,
+    FrameRenderingBackend,
     RenderingBackend,
     Representation,
 )
@@ -20,7 +20,7 @@ __all__ = [
     "REPRESENTATION_KINDS",
     "VIEW_PROPERTY_NAMES",
     "RenderView",
-    "ProgressiveRenderingBackend",
+    "FrameRenderingBackend",
     "FrameTransport",
     "WebSocketFrameTransport",
     "RenderingBackend",

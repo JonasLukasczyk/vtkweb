@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from trame.widgets import client, html
-from trame_vtklocal.widgets import vtklocal
-
 from vtkweb.rendering import RenderManager
 
 
@@ -18,8 +16,7 @@ WORKSPACE_STYLE = """
 }
 
 .vtkweb-workspace-tile,
-.vtkweb-vtk-slot,
-.vtkweb-mitsuba-view {
+.vtkweb-remote-view {
     position: absolute;
     box-sizing: border-box;
     overflow: hidden;
@@ -116,7 +113,7 @@ WORKSPACE_STYLE = """
     background: #303030;
 }
 
-.vtkweb-mitsuba-view {
+.vtkweb-remote-view {
     inset: 0;
     z-index: 5;
     background: #1a1a1a;
@@ -126,11 +123,11 @@ WORKSPACE_STYLE = """
     user-select: none;
 }
 
-.vtkweb-mitsuba-view:active {
+.vtkweb-remote-view:active {
     cursor: grabbing;
 }
 
-.vtkweb-mitsuba-image {
+.vtkweb-remote-image {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -139,7 +136,7 @@ WORKSPACE_STYLE = """
     pointer-events: none;
 }
 
-.vtkweb-mitsuba-fps {
+.vtkweb-remote-fps {
     position: absolute;
     top: 36px;
     right: 8px;
@@ -203,64 +200,7 @@ def build_render_view(
 ) -> None:
     """Build the heterogeneous tiled rendering workspace."""
 
-    backend = rendering.backend_for_type("vtk")
     client.Style(WORKSPACE_STYLE)
-
-    vtk_widgets_by_slot = {}
-
-    def sync_slot_layout(**_):
-        layout = {slot_id: None for slot_id in rendering.backend_slots}
-        tiles_by_view = {
-            tile.get("view_id"): tile
-            for tile in state.workspace_geometry.get("tiles", [])
-            if tile.get("view_id") is not None
-        }
-        for view_id, value in state.views.items():
-            if value.get("type") != "vtk":
-                continue
-            tile = tiles_by_view.get(view_id)
-            if tile is None:
-                continue
-            slot_id = rendering.backend_view_id(view_id)
-            layout[slot_id] = {
-                "view_id": view_id,
-                "container_id": tile["container_id"],
-                "style": tile["style"],
-            }
-        state.vtk_slot_layout = layout
-
-    sync_slot_layout()
-
-    previous_slot_views = {}
-
-    @state.change("workspace_geometry", "views")
-    def _sync_slots(**_):
-        sync_slot_layout()
-        for slot_id, item in state.vtk_slot_layout.items():
-            view_id = item and item["view_id"]
-            if view_id == previous_slot_views.get(slot_id):
-                continue
-            previous_slot_views[slot_id] = view_id
-            widget = vtk_widgets_by_slot.get(slot_id)
-            if widget is not None and view_id is not None:
-                widget.update(push_camera=True)
-
-    def on_vtk_camera(slot_id: str, camera_state: dict | None) -> None:
-        """Store a VTK/WASM camera event through the canonical view property."""
-        item = state.vtk_slot_layout.get(slot_id)
-        view_id = item and item.get("view_id")
-        if not view_id or not camera_state:
-            return
-
-        camera = {
-            "position": camera_state.get("Position"),
-            "target": camera_state.get("FocalPoint"),
-            "up": camera_state.get("ViewUp"),
-            "fov": camera_state.get("ViewAngle"),
-            "parallel_projection": camera_state.get("ParallelProjection"),
-            "parallel_scale": camera_state.get("ParallelScale"),
-        }
-        rendering.set_view_property(view_id, "camera", camera, notify=False)
 
     def reset_render_view(view_id: str | None = None) -> None:
         view = state.views.get(view_id) if view_id is not None else None
@@ -272,35 +212,35 @@ def build_render_view(
     client.Script(
         r"""
 (() => {
-    if (window.__vtkwebMitsubaFrameStreamInitialized) return;
-    window.__vtkwebMitsubaFrameStreamInitialized = true;
+    if (window.__vtkwebRemoteFrameStreamInitialized) return;
+    window.__vtkwebRemoteFrameStreamInitialized = true;
 
-    window.__vtkwebMitsubaFrameStats = new Map();
-    window.__vtkwebMitsubaLatestFrame = new Map();
+    window.__vtkwebRemoteFrameStats = new Map();
+    window.__vtkwebRemoteLatestFrame = new Map();
 
-    const updateMitsubaFps = () => {
+    const updateRemoteFps = () => {
         const now = performance.now();
-        for (const [viewId, stats] of window.__vtkwebMitsubaFrameStats.entries()) {
+        for (const [viewId, stats] of window.__vtkwebRemoteFrameStats.entries()) {
             const elapsed = Math.max(1, now - stats.lastSampleTime);
             const fps = (stats.framesSinceSample * 1000.0) / elapsed;
             stats.framesSinceSample = 0;
             stats.lastSampleTime = now;
-            const label = document.getElementById('vtkweb-mitsuba-fps-' + viewId);
+            const label = document.getElementById('vtkweb-remote-fps-' + viewId);
             if (label) label.textContent = fps.toFixed(1) + ' fps';
         }
     };
-    window.__vtkwebMitsubaFpsTimer = window.setInterval(updateMitsubaFps, 500);
+    window.__vtkwebRemoteFpsTimer = window.setInterval(updateRemoteFps, 500);
 
     // Render resolution is transient transport/control data, not application
     // state. Observe the actual CSS viewport on the client and report settled
     // sizes over the ordinary Trame trigger channel.
-    window.__vtkwebMitsubaResizeTimers = new Map();
-    window.__vtkwebMitsubaObservedElements = new WeakSet();
+    window.__vtkwebRemoteResizeTimers = new Map();
+    window.__vtkwebRemoteObservedElements = new WeakSet();
 
-    const reportMitsubaSize = (element) => {
-        const canvas = element.querySelector('canvas[id^="vtkweb-mitsuba-canvas-"]');
+    const reportRemoteSize = (element) => {
+        const canvas = element.querySelector('canvas[id^="vtkweb-remote-canvas-"]');
         if (!canvas) return;
-        const prefix = 'vtkweb-mitsuba-canvas-';
+        const prefix = 'vtkweb-remote-canvas-';
         const viewId = canvas.id.substring(prefix.length);
         if (!viewId) return;
 
@@ -308,48 +248,56 @@ def build_render_view(
         const width = Math.max(1, Math.round(rect.width));
         const height = Math.max(1, Math.round(rect.height));
 
-        const existing = window.__vtkwebMitsubaResizeTimers.get(viewId);
+        const existing = window.__vtkwebRemoteResizeTimers.get(viewId);
         if (existing !== undefined) window.clearTimeout(existing);
         const timer = window.setTimeout(() => {
-            window.__vtkwebMitsubaResizeTimers.delete(viewId);
-            const sender = window.__vtkwebSendMitsubaResize;
+            window.__vtkwebRemoteResizeTimers.delete(viewId);
+            const sender = window.__vtkwebSendRemoteResize;
             if (typeof sender === 'function') sender(viewId, width, height);
         }, 150);
-        window.__vtkwebMitsubaResizeTimers.set(viewId, timer);
+        window.__vtkwebRemoteResizeTimers.set(viewId, timer);
     };
 
-    const mitsubaResizeObserver = new ResizeObserver((entries) => {
-        for (const entry of entries) reportMitsubaSize(entry.target);
-    });
-    window.__vtkwebMitsubaResizeObserver = mitsubaResizeObserver;
+    // Expose the same measurement path so the server can explicitly request
+    // fresh viewport sizes after lifecycle operations where no DOM resize occurs.
+    window.__vtkwebReportRemoteSize = reportRemoteSize;
+    window.__vtkwebRequestRemoteSizes = () => {
+        const elements = document.querySelectorAll('.vtkweb-remote-view');
+        for (const element of elements) reportRemoteSize(element);
+    };
 
-    const observeMitsubaViews = () => {
-        const elements = document.querySelectorAll('.vtkweb-mitsuba-view');
+    const remoteResizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) reportRemoteSize(entry.target);
+    });
+    window.__vtkwebRemoteResizeObserver = remoteResizeObserver;
+
+    const observeRemoteViews = () => {
+        const elements = document.querySelectorAll('.vtkweb-remote-view');
         for (const element of elements) {
-            if (window.__vtkwebMitsubaObservedElements.has(element)) continue;
-            window.__vtkwebMitsubaObservedElements.add(element);
-            const canvas = element.querySelector('canvas[id^="vtkweb-mitsuba-canvas-"]');
+            if (window.__vtkwebRemoteObservedElements.has(element)) continue;
+            window.__vtkwebRemoteObservedElements.add(element);
+            const canvas = element.querySelector('canvas[id^="vtkweb-remote-canvas-"]');
             if (canvas) {
-                const viewId = canvas.id.substring('vtkweb-mitsuba-canvas-'.length);
-                window.__vtkwebMitsubaLatestFrame.delete(viewId);
-                window.__vtkwebMitsubaFrameStats.delete(viewId);
+                const viewId = canvas.id.substring('vtkweb-remote-canvas-'.length);
+                window.__vtkwebRemoteLatestFrame.delete(viewId);
+                window.__vtkwebRemoteFrameStats.delete(viewId);
             }
-            mitsubaResizeObserver.observe(element);
-            reportMitsubaSize(element);
+            remoteResizeObserver.observe(element);
+            reportRemoteSize(element);
         }
     };
 
-    const mitsubaDomObserver = new MutationObserver(observeMitsubaViews);
-    window.__vtkwebMitsubaDomObserver = mitsubaDomObserver;
+    const remoteDomObserver = new MutationObserver(observeRemoteViews);
+    window.__vtkwebRemoteDomObserver = remoteDomObserver;
     if (document.body) {
-        mitsubaDomObserver.observe(document.body, { childList: true, subtree: true });
+        remoteDomObserver.observe(document.body, { childList: true, subtree: true });
     }
-    window.requestAnimationFrame(observeMitsubaViews);
+    window.requestAnimationFrame(observeRemoteViews);
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const frameSocket = new WebSocket(wsProtocol + '//' + window.location.host + '/vtkweb/frame-stream');
     frameSocket.binaryType = 'arraybuffer';
-    window.__vtkwebMitsubaFrameSocket = frameSocket;
+    window.__vtkwebRemoteFrameSocket = frameSocket;
 
     frameSocket.onmessage = async (event) => {
         if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 4) return;
@@ -369,21 +317,21 @@ def build_render_view(
         const viewId = header.view_id;
         if (!viewId) return;
 
-        let stats = window.__vtkwebMitsubaFrameStats.get(viewId);
+        let stats = window.__vtkwebRemoteFrameStats.get(viewId);
         if (!stats) {
             stats = { framesSinceSample: 0, lastSampleTime: performance.now() };
-            window.__vtkwebMitsubaFrameStats.set(viewId, stats);
+            window.__vtkwebRemoteFrameStats.set(viewId, stats);
         }
         stats.framesSinceSample += 1;
 
         const generation = Number(header.generation || 0);
         const sequence = Number(header.sequence || 0);
-        const previous = window.__vtkwebMitsubaLatestFrame.get(viewId);
+        const previous = window.__vtkwebRemoteLatestFrame.get(viewId);
         if (previous && (
             generation < previous.generation ||
             (generation === previous.generation && sequence <= previous.sequence)
         )) return;
-        window.__vtkwebMitsubaLatestFrame.set(viewId, { generation, sequence });
+        window.__vtkwebRemoteLatestFrame.set(viewId, { generation, sequence });
 
         const imageBytes = bytes.slice(4 + headerLength);
         const blob = new Blob([imageBytes], { type: header.mime_type || 'image/jpeg' });
@@ -395,13 +343,13 @@ def build_render_view(
             return;
         }
 
-        const latest = window.__vtkwebMitsubaLatestFrame.get(viewId);
+        const latest = window.__vtkwebRemoteLatestFrame.get(viewId);
         if (!latest || latest.generation !== generation || latest.sequence !== sequence) {
             bitmap.close();
             return;
         }
 
-        const canvas = document.getElementById('vtkweb-mitsuba-canvas-' + viewId);
+        const canvas = document.getElementById('vtkweb-remote-canvas-' + viewId);
         if (!canvas) {
             bitmap.close();
             return;
@@ -419,10 +367,19 @@ def build_render_view(
         """
     )
 
+    client.ClientStateChange(
+        value="remote_render_size_request_epoch",
+        change="""
+            $nextTick(() => {
+                window.__vtkwebRequestRemoteSizes?.();
+            });
+        """,
+    )
+
     client.ClientTriggers(
         mounted="""
-            window.__vtkwebSendMitsubaResize = (viewId, width, height) => {
-                trigger('set_mitsuba_render_size', [viewId, width, height]);
+            window.__vtkwebSendRemoteResize = (viewId, width, height) => {
+                trigger('set_render_size', [viewId, width, height]);
             };
 
             window.__vtkwebStartTileResize = (splitter, event) => {
@@ -458,9 +415,9 @@ def build_render_view(
                 window.addEventListener('mouseup', up);
             };
 
-            window.__vtkwebMitsubaWheelSessions = new Map();
+            window.__vtkwebRemoteWheelSessions = new Map();
 
-            window.__vtkwebStartMitsubaCameraDrag = (viewId, event) => {
+            window.__vtkwebStartCameraDrag = (viewId, event) => {
                 if (event.button < 0 || event.button > 2) return;
 
                 event.preventDefault();
@@ -488,7 +445,7 @@ def build_render_view(
                     pendingDx = 0;
                     pendingDy = 0;
                     const height = Math.max(element.getBoundingClientRect().height, 1);
-                    trigger('interact_mitsuba_camera', [viewId, mode, dx, dy, height]);
+                    trigger('interact_view_camera', [viewId, mode, dx, dy, height]);
                 };
 
                 const move = (moveEvent) => {
@@ -516,15 +473,15 @@ def build_render_view(
                 window.addEventListener('mouseup', upHandler);
             };
 
-            window.__vtkwebMitsubaWheel = (viewId, event) => {
+            window.__vtkwebRemoteWheel = (viewId, event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 event.currentTarget?.focus();
 
-                let session = window.__vtkwebMitsubaWheelSessions.get(viewId);
+                let session = window.__vtkwebRemoteWheelSessions.get(viewId);
                 if (!session) {
                     session = { pending: 0, animationFrame: null, idleTimer: null };
-                    window.__vtkwebMitsubaWheelSessions.set(viewId, session);
+                    window.__vtkwebRemoteWheelSessions.set(viewId, session);
                 }
 
                 let deltaPixels = event.deltaY;
@@ -542,7 +499,7 @@ def build_render_view(
                     const height = Math.max(event.currentTarget?.clientHeight || 1, 1);
                     // Match drag-dolly sensitivity while retaining the smoother
                     // wheel/trackpad scale from the previous implementation.
-                    trigger('interact_mitsuba_camera', [viewId, 'zoom', 0, delta * 0.15, height]);
+                    trigger('interact_view_camera', [viewId, 'zoom', 0, delta * 0.15, height]);
                 };
 
                 if (session.animationFrame === null) {
@@ -555,53 +512,21 @@ def build_render_view(
                         session.animationFrame = null;
                     }
                     flush();
-                    window.__vtkwebMitsubaWheelSessions.delete(viewId);
+                    window.__vtkwebRemoteWheelSessions.delete(viewId);
                 }, 180);
             };
         """,
         before_unmount="""
-            delete window.__vtkwebSendMitsubaResize;
+            delete window.__vtkwebSendRemoteResize;
             delete window.__vtkwebStartTileResize;
-            delete window.__vtkwebStartMitsubaCameraDrag;
-            delete window.__vtkwebMitsubaWheel;
-            delete window.__vtkwebMitsubaWheelSessions;
+            delete window.__vtkwebStartCameraDrag;
+            delete window.__vtkwebRemoteWheel;
+            delete window.__vtkwebRemoteWheelSessions;
         """,
     )
 
     with html.Div(classes="vtkweb-workspace"):
-        # The VTK widgets are created once, one per backend slot. Their logical
-        # view assignment and geometry are driven entirely by serialized state.
-        for slot_id in rendering.backend_slots:
-            with html.Div(
-                classes="vtkweb-vtk-slot",
-                v_show=(f"vtk_slot_layout['{slot_id}'] !== null",),
-                style=(f"(vtk_slot_layout['{slot_id}']?.style || '') + 'z-index:10;'",),
-                click=(
-                    ctrl.set_active_view,
-                    f"[vtk_slot_layout['{slot_id}'].view_id]",
-                ),
-                tabindex=0,
-                focus=(
-                    ctrl.set_active_view,
-                    f"[vtk_slot_layout['{slot_id}'].view_id]",
-                ),
-                raw_attrs=[
-                    f"@keydown.space.exact.prevent=\"trigger('render_view_reset', [vtk_slot_layout['{slot_id}'].view_id])\""
-                ],
-            ):
-                widget = vtklocal.LocalView(
-                    backend.get_render_window(slot_id),
-                    ref=f"render_view_{slot_id}",
-                    style="height:100%;width:100%;",
-                    camera=(
-                        lambda value, slot_id=slot_id: on_vtk_camera(slot_id, value),
-                        "[$event]",
-                    ),
-                )
-                vtk_widgets_by_slot[slot_id] = widget
-
-        # Dummy and empty content are ordinary Vue/HTML and therefore need no
-        # backend slots.
+        # Render views are backend-agnostic canvases; dummy/empty views remain HTML.
         with html.Div(
             v_for=("tile in workspace_geometry.tiles", "tile.container_id"),
             classes=(
@@ -619,25 +544,27 @@ def build_render_view(
                 html.Small("{{ views[tile.view_id]?.message || 'Dummy backend' }}")
 
             with html.Div(
-                v_if=("tile.view_id && views[tile.view_id]?.type === 'mitsuba'",),
-                classes="vtkweb-mitsuba-view",
+                v_if=(
+                    "tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",
+                ),
+                classes="vtkweb-remote-view",
                 tabindex=0,
                 click=(ctrl.set_active_view, "[tile.view_id]"),
                 raw_attrs=[
-                    '@mousedown="window.__vtkwebStartMitsubaCameraDrag(tile.view_id, $event)"',
-                    '@wheel.prevent="window.__vtkwebMitsubaWheel(tile.view_id, $event)"',
-                    '@contextmenu.prevent',
-                    '@keydown.space.exact.prevent="trigger(\'render_view_reset\', [tile.view_id])"',
+                    '@mousedown="window.__vtkwebStartCameraDrag(tile.view_id, $event)"',
+                    '@wheel.prevent="window.__vtkwebRemoteWheel(tile.view_id, $event)"',
+                    "@contextmenu.prevent",
+                    "@keydown.space.exact.prevent=\"trigger('render_view_reset', [tile.view_id])\"",
                 ],
             ):
                 html.Canvas(
-                    classes="vtkweb-mitsuba-image",
-                    id=("'vtkweb-mitsuba-canvas-' + tile.view_id",),
+                    classes="vtkweb-remote-image",
+                    id=("'vtkweb-remote-canvas-' + tile.view_id",),
                 )
                 html.Div(
                     "0.0 fps",
-                    classes="vtkweb-mitsuba-fps",
-                    id=("'vtkweb-mitsuba-fps-' + tile.view_id",),
+                    classes="vtkweb-remote-fps",
+                    id=("'vtkweb-remote-fps-' + tile.view_id",),
                 )
 
             with html.Div(
@@ -673,9 +600,13 @@ def build_render_view(
                 )
                 html.Button(
                     "⇄",
-                    title=("views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",),
+                    title=(
+                        "views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",
+                    ),
                     classes="vtkweb-tile-button",
-                    v_if=("tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",),
+                    v_if=(
+                        "tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",
+                    ),
                     click=(
                         ctrl.switch_view_type,
                         "[tile.view_id, views[tile.view_id]?.type === 'vtk' ? 'mitsuba' : 'vtk']",
@@ -713,15 +644,3 @@ def build_render_view(
             style=("splitter.style",),
             raw_attrs=['@mousedown="window.__vtkwebStartTileResize(splitter, $event)"'],
         )
-
-    @state.change("render_revision")
-    def update_render_views(**_):
-        for slot_id, widget in vtk_widgets_by_slot.items():
-            if state.vtk_slot_layout.get(slot_id) is not None:
-                widget.update()
-
-    @state.change("camera_revision")
-    def push_vtk_cameras(**_):
-        for slot_id, widget in vtk_widgets_by_slot.items():
-            if state.vtk_slot_layout.get(slot_id) is not None:
-                widget.update(push_camera=True)
