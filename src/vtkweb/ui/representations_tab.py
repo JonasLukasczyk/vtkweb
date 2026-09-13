@@ -203,11 +203,11 @@ def build_representations_tab(
                         variant="plain",
                         hide_details=True,
                         update_modelValue=(
-                            ctrl.set_representation_array,
+                            ctrl.set_representation_property,
                             (
-                                "[representation.id,"
-                                "$event === 'fixed' ? null : $event.split(':').slice(1).join(':'),"
-                                "$event === 'fixed' ? 'point' : $event.split(':')[0]]"
+                                "[representation.id,'color_by',"
+                                "$event === 'fixed' ? null : "
+                                "[$event.split(':').slice(1).join(':'), $event.split(':')[0]]]"
                             ),
                         ),
                     )

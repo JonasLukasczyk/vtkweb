@@ -91,11 +91,6 @@ class WorkspaceManager:
                 return node_id
         return None
 
-    def unassign_view(self, view_id: str) -> None:
-        container_id = self.container_for_view(view_id)
-        if container_id is not None:
-            self.assign_view(container_id, None)
-
     def close_view_tile(self, view_id: str) -> None:
         """Remove the view's leaf, collapsing its parent; keep the last tile empty."""
         leaf_id = self.container_for_view(view_id)
@@ -108,12 +103,8 @@ class WorkspaceManager:
             return
 
         parent_id = next(
-            (
-                node_id
-                for node_id, node in nodes.items()
-                if node.get("kind") == "split"
-                and leaf_id in (node["first"], node["second"])
-            ),
+            (node_id for node_id, node in nodes.items()
+             if node.get("kind") == "split" and leaf_id in (node["first"], node["second"])),
             None,
         )
         if parent_id is None:

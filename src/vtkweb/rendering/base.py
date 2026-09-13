@@ -13,6 +13,20 @@ REPRESENTATION_KINDS = (
     "volume",
 )
 
+VIEW_PROPERTY_NAMES = (
+    "background_color",
+    "world_ambient_color",
+    "world_ambient_intensity",
+    "camera",
+)
+
+DEFAULT_VIEW_PROPERTIES = {
+    "background_color": "#1a1a1a",
+    "world_ambient_color": "#ffffff",
+    "world_ambient_intensity": 1.0,
+}
+
+
 
 @dataclass
 class RenderView:
@@ -52,13 +66,6 @@ class RenderingBackend(ABC):
     ) -> None:
         pass
 
-    @abstractmethod
-    def rename_view(
-        self,
-        view_id: str,
-        new_view_id: str,
-    ) -> None:
-        pass
 
     @abstractmethod
     def add_representation(
@@ -87,6 +94,10 @@ class RenderingBackend(ABC):
         pass
 
     @abstractmethod
+    def get_view_property(self, view_id: str, name: str) -> Any:
+        pass
+
+    @abstractmethod
     def set_view_property(self, view_id: str, name: str, value: Any) -> None:
         pass
 
@@ -97,20 +108,6 @@ class RenderingBackend(ABC):
     ) -> None:
         pass
 
-    @abstractmethod
-    def get_camera_state(
-        self,
-        view_id: str,
-    ) -> dict[str, Any]:
-        pass
-
-    @abstractmethod
-    def set_camera_state(
-        self,
-        view_id: str,
-        value: dict[str, Any],
-    ) -> None:
-        pass
 
 
 @runtime_checkable
@@ -123,13 +120,9 @@ class ProgressiveRenderingBackend(Protocol):
     ) -> int: ...
     def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]: ...
     def has_renderable_scene(self, view_id: str) -> bool: ...
-    def clear_accumulation(
-        self, view_id: str, generation: int | None = None
-    ) -> None: ...
+    def clear_accumulation(self, view_id: str, generation: int | None = None) -> None: ...
     def accumulation_generation(self, view_id: str) -> int: ...
-    def render_pass(
-        self, view_id: str, camera: dict[str, Any], *, spp: int = 1
-    ) -> Any: ...
+    def render_pass(self, view_id: str, camera: dict[str, Any], *, spp: int = 1) -> Any: ...
     def accumulate_pass(
         self,
         view_id: str,

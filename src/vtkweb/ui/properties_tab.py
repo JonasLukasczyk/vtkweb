@@ -236,9 +236,11 @@ def build_properties_tab(
                             step="any",
                             value=("component",),
                             change=(
-                                ctrl.set_node_vector_component,
+                                ctrl.set_node_property,
                                 (
-                                    "[active_node_id,property.name,index,$event.target.value]"
+                                    "[active_node_id,property.name,"
+                                    "property.value.map((v,i) => i === index ? "
+                                    "($event.target.value === '' ? v : Number($event.target.value)) : v)]"
                                 ),
                             ),
                         )
@@ -261,9 +263,11 @@ def build_properties_tab(
                             step="any",
                             value=("value",),
                             change=(
-                                ctrl.set_node_list_value,
+                                ctrl.set_node_property,
                                 (
-                                    "[active_node_id,property.name,index,$event.target.value]"
+                                    "[active_node_id,property.name,"
+                                    "property.value.map((v,i) => i === index ? "
+                                    "($event.target.value === '' ? v : Number($event.target.value)) : v)]"
                                 ),
                             ),
                         )
@@ -274,10 +278,8 @@ def build_properties_tab(
                         classes="vtkweb-list-inline-button",
                         disabled=("property.value.length === 0",),
                         click=(
-                            ctrl.remove_node_list_value,
-                            (
-                                "[active_node_id,property.name,property.value.length - 1]"
-                            ),
+                            ctrl.set_node_property,
+                            "[active_node_id,property.name,property.value.slice(0,-1)]",
                         ),
                     )
                     html.Button(
@@ -285,7 +287,11 @@ def build_properties_tab(
                         type="button",
                         classes="vtkweb-list-inline-button",
                         click=(
-                            ctrl.add_node_list_value,
-                            "[active_node_id,property.name]",
+                            ctrl.set_node_property,
+                            (
+                                "[active_node_id,property.name,"
+                                "[...property.value, property.value.length ? "
+                                "property.value[property.value.length - 1] : 0.0]]"
+                            ),
                         ),
                     )

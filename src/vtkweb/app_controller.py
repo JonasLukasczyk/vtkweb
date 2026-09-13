@@ -74,57 +74,6 @@ def initialize_app_controller(
             value,
         )
 
-    def set_node_vector_component(
-        node_id: str,
-        name: str,
-        index: int,
-        value,
-    ) -> None:
-        if state.pipeline_executing:
-            return
-        pipeline.set_vector_component(
-            node_id,
-            name,
-            int(index),
-            value,
-        )
-
-    def set_node_list_value(
-        node_id: str,
-        name: str,
-        index: int,
-        value,
-    ) -> None:
-        if state.pipeline_executing:
-            return
-        pipeline.set_list_value(
-            node_id,
-            name,
-            int(index),
-            value,
-        )
-
-    def add_node_list_value(
-        node_id: str,
-        name: str,
-    ) -> None:
-        if state.pipeline_executing:
-            return
-        pipeline.add_list_value(node_id, name)
-
-    def remove_node_list_value(
-        node_id: str,
-        name: str,
-        index: int,
-    ) -> None:
-        if state.pipeline_executing:
-            return
-        pipeline.remove_list_value(
-            node_id,
-            name,
-            int(index),
-        )
-
     def set_node_input_array(
         node_id: str,
         index: int,
@@ -139,20 +88,13 @@ def initialize_app_controller(
         )
 
     def add_representation(
-        node_id: str,
-        output_port: int = 0,
-        kind: str = "surface",
-        view_ids: Iterable[str] = (),
-        camera_reset_mode: int = 0,
+        node_id: str, output_port: int = 0, kind: str = "surface",
+        view_ids: Iterable[str] = (), camera_reset_mode: int = 0,
         representation_id: str | None = None,
     ) -> str:
         return rendering.add_representation(
-            node_id,
-            output_port=int(output_port),
-            kind=kind,
-            view_ids=view_ids,
-            camera_reset_mode=int(camera_reset_mode),
-            representation_id=representation_id,
+            node_id, output_port=int(output_port), kind=kind, view_ids=view_ids,
+            camera_reset_mode=int(camera_reset_mode), representation_id=representation_id,
         ).id
 
     def toggle_representation_in_view(
@@ -199,15 +141,6 @@ def initialize_app_controller(
     def remove_view(view_id: str) -> None:
         workspace.close_view_tile(view_id)
         views.remove_view(view_id)
-        if state.active_view_id == view_id:
-            state.active_view_id = next(
-                (
-                    item["id"]
-                    for item in state.views.values()
-                    if item.get("type") in {"vtk", "mitsuba"}
-                ),
-                None,
-            )
 
     def create_workspace(*, container_id: str | None = None) -> str:
         return workspace.create_workspace(container_id=container_id)
@@ -429,24 +362,17 @@ def initialize_app_controller(
     ctrl.create_node = create_node
     ctrl.connect_nodes = connect_nodes
     ctrl.set_node_property = set_node_property
-    ctrl.set_node_vector_component = set_node_vector_component
-    ctrl.set_node_list_value = set_node_list_value
-    ctrl.add_node_list_value = add_node_list_value
-    ctrl.remove_node_list_value = remove_node_list_value
     ctrl.set_node_input_array = set_node_input_array
     ctrl.add_representation = add_representation
     ctrl.remove_representation = rendering.remove_representation
     ctrl.set_representation_kind = rendering.set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
-    ctrl.set_representation_array = rendering.set_array
     ctrl.set_representation_property = rendering.set_representation_property
     ctrl.set_tf_data = rendering.transfer_functions.set_data
     ctrl.apply_tf_preset = rendering.transfer_functions.apply_preset
     ctrl.set_tf_range = rendering.transfer_functions.set_range
     ctrl.rescale_tf = rendering.transfer_functions.rescale
-    ctrl.set_tf_control_point_component = (
-        rendering.transfer_functions.set_control_point_component
-    )
+    ctrl.set_tf_control_point_component = rendering.transfer_functions.set_control_point_component
     ctrl.add_tf_control_point = rendering.transfer_functions.add_control_point
     ctrl.remove_tf_control_point = rendering.transfer_functions.remove_control_point
     ctrl.create_view = create_view
@@ -456,13 +382,10 @@ def initialize_app_controller(
     ctrl.create_workspace = create_workspace
     ctrl.split_container = split_container
     ctrl.assign_view_to_container = assign_view_to_container
-    ctrl.set_split_ratio = set_split_ratio
     ctrl.split_view_container = split_view_container
     ctrl.set_active_view = rendering.set_active_view
     ctrl.set_view_property = rendering.set_view_property
     ctrl.reset_camera = rendering.reset_camera
-    ctrl.interact_mitsuba_camera = rendering.interact_mitsuba_camera
-    ctrl.set_mitsuba_render_size = rendering.set_mitsuba_render_size
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
     ctrl.insert_node = insert_node

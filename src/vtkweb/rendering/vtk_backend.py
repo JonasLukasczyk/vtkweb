@@ -31,11 +31,18 @@ class VTKRepresentationHandle:
     actor: Any
     kind: str
 
-    pipeline_filter: vtk.vtkAlgorithm | None = None
+    # Non-volume representations keep both render branches alive for the
+    # lifetime of the representation. trame-vtklocal mirrors VTK objects by
+    # id, so toggling visibility is safer than replacing/removing branches.
+    outline_filter: vtk.vtkOutlineFilter | None = None
+    outline_mapper: vtk.vtkPolyDataMapper | None = None
+    outline_actor: vtk.vtkActor | None = None
     color_function: vtk.vtkColorTransferFunction | None = None
     opacity_function: vtk.vtkPiecewiseFunction | None = None
     lookup_table: Any = None
     coloring_data: vtk.vtkDataObject | None = None
+    surface_filter: vtk.vtkDataSetSurfaceFilter | None = None
+    render_data: vtk.vtkDataObject | None = None
 
 
 class VTKRenderingBackend(RenderingBackend):
@@ -43,12 +50,9 @@ class VTKRenderingBackend(RenderingBackend):
 
     def __init__(
         self,
-        transfer_function_provider: Callable[[str], dict[str, Any] | None]
-        | None = None,
+        transfer_function_provider: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> None:
-        self._transfer_function_provider = transfer_function_provider or (
-            lambda _name: None
-        )
+        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
         self._views: dict[
             str,
             VTKViewHandle,
@@ -110,16 +114,15 @@ class VTKRenderingBackend(RenderingBackend):
 
         keepalive_source.Update()
         keepalive_mapper = vtk.vtkPolyDataMapper()
-        keepalive_mapper.SetInputDataObject(keepalive_source.GetOutputDataObject(0))
+        keepalive_mapper.SetInputDataObject(keepalive_source.GetOutput())
 
         keepalive_actor = vtk.vtkActor()
 
         keepalive_actor.SetMapper(keepalive_mapper)
 
-        # Keep this visible for now so we can verify that the workaround
-        # actually fixes the empty-scene issue.
-        keepalive_actor.GetProperty().SetOpacity(1.0)
-
+        # Keep the renderer structurally non-empty without contributing visible
+        # geometry to the scene.
+        keepalive_actor.SetVisibility(False)
         keepalive_actor.SetPickable(False)
 
         renderer.AddActor(keepalive_actor)
@@ -150,29 +153,6 @@ class VTKRenderingBackend(RenderingBackend):
             None,
         )
 
-    def rename_view(
-        self,
-        view_id: str,
-        new_view_id: str,
-    ) -> None:
-        if new_view_id != view_id and new_view_id in self._views:
-            raise ValueError(f"View ID already exists: {new_view_id}")
-
-        handle = self._views.pop(view_id)
-        self._views[new_view_id] = handle
-
-        renamed = {}
-        for (
-            representation_id,
-            current_view_id,
-        ), representation in self._representations.items():
-            key = (
-                representation_id,
-                new_view_id if current_view_id == view_id else current_view_id,
-            )
-            renamed[key] = representation
-
-        self._representations = renamed
 
     def get_render_window(
         self,
@@ -180,40 +160,35 @@ class VTKRenderingBackend(RenderingBackend):
     ) -> vtk.vtkRenderWindow:
         return self._views[view_id].render_window
 
+    def get_view_property(self, view_id: str, name: str) -> Any:
+        handle = self._views[view_id]
+        if name == "background_color":
+            return _rgb_to_hex(tuple(float(v) for v in handle.renderer.GetBackground()))
+        if name == "camera":
+            camera = handle.renderer.GetActiveCamera()
+            return {
+                "position": list(camera.GetPosition()),
+                "target": list(camera.GetFocalPoint()),
+                "up": list(camera.GetViewUp()),
+                "fov": float(camera.GetViewAngle()),
+                "parallel_projection": bool(camera.GetParallelProjection()),
+                "parallel_scale": float(camera.GetParallelScale()),
+            }
+        return None
+
     def set_view_property(self, view_id: str, name: str, value: Any) -> None:
-        if name != "background_color":
+        handle = self._views[view_id]
+        if name == "background_color":
+            if isinstance(value, str):
+                value = _hex_to_rgb(value)
+            handle.renderer.SetBackground(*value)
+            handle.renderer.Modified()
+            handle.render_window.Modified()
             return
-        handle = self._views[view_id]
-        handle.renderer.SetBackground(*value)
-        handle.renderer.Modified()
-        handle.render_window.Modified()
 
-    def reset_camera(
-        self,
-        view_id: str,
-    ) -> None:
-        handle = self._views[view_id]
+        if name != "camera":
+            return
 
-        handle.renderer.ResetCamera()
-        handle.renderer.ResetCameraClippingRange()
-
-        handle.renderer.Modified()
-        handle.render_window.Modified()
-
-    def get_camera_state(self, view_id: str) -> dict[str, object]:
-        camera = self._views[view_id].renderer.GetActiveCamera()
-        result = {
-            "position": list(camera.GetPosition()),
-            "target": list(camera.GetFocalPoint()),
-            "up": list(camera.GetViewUp()),
-            "fov": float(camera.GetViewAngle()),
-            "parallel_projection": bool(camera.GetParallelProjection()),
-            "parallel_scale": float(camera.GetParallelScale()),
-        }
-        return result
-
-    def set_camera_state(self, view_id: str, value: dict[str, object]) -> None:
-        handle = self._views[view_id]
         camera = handle.renderer.GetActiveCamera()
         if value.get("position") is not None:
             camera.SetPosition(*value["position"])
@@ -227,6 +202,16 @@ class VTKRenderingBackend(RenderingBackend):
             camera.SetParallelProjection(bool(value["parallel_projection"]))
         if value.get("parallel_scale") is not None:
             camera.SetParallelScale(float(value["parallel_scale"]))
+        handle.renderer.ResetCameraClippingRange()
+        handle.renderer.Modified()
+        handle.render_window.Modified()
+
+    def reset_camera(
+        self,
+        view_id: str,
+    ) -> None:
+        handle = self._views[view_id]
+        handle.renderer.ResetCamera()
         handle.renderer.ResetCameraClippingRange()
         handle.renderer.Modified()
         handle.render_window.Modified()
@@ -257,11 +242,13 @@ class VTKRenderingBackend(RenderingBackend):
         self._representations[key] = handle
 
         view_handle = self._views[view.id]
+        source_data = source.GetOutputDataObject(representation.output_port)
+        render_data = self._set_representation_input(handle, source_data)
 
         self._apply_representation(
             representation,
             handle,
-            source.GetOutputDataObject(representation.output_port),
+            render_data,
         )
 
         if self._source_has_geometry(
@@ -271,7 +258,12 @@ class VTKRenderingBackend(RenderingBackend):
             if representation.kind == "volume":
                 view_handle.renderer.AddVolume(handle.actor)
             else:
+                # Keep both non-volume branches in the renderer from the first
+                # synchronization onward. Representation kind changes then only
+                # toggle visibility and never churn vtklocal object ids.
                 view_handle.renderer.AddActor(handle.actor)
+                if handle.outline_actor is not None:
+                    view_handle.renderer.AddActor(handle.outline_actor)
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -282,67 +274,46 @@ class VTKRenderingBackend(RenderingBackend):
         view: RenderView,
         source: vtk.vtkAlgorithm,
     ) -> None:
-        key = (
-            representation.id,
-            view.id,
-        )
-
+        key = (representation.id, view.id)
         handle = self._representations.get(key)
 
-        source_data = source.GetOutputDataObject(representation.output_port)
-        if handle is not None and handle.pipeline_filter is not None:
-            if source_data is not None:
-                handle.pipeline_filter.SetInputDataObject(source_data)
-                handle.pipeline_filter.Update()
-                handle.mapper.SetInputDataObject(
-                    handle.pipeline_filter.GetOutputDataObject(0)
-                )
-
         if handle is None:
-            self.add_representation(
-                representation,
-                view,
-                source,
-            )
+            self.add_representation(representation, view, source)
             return
 
-        if handle.kind != representation.kind:
-            self.remove_representation(
-                representation.id,
-                view.id,
-            )
-
-            self.add_representation(
-                representation,
-                view,
-                source,
-            )
-
+        # vtkActor and vtkVolume are fundamentally different prop types. Keep
+        # the non-volume graph stable, but volume transitions still require a
+        # replacement representation.
+        old_is_volume = handle.kind == "volume"
+        new_is_volume = representation.kind == "volume"
+        if old_is_volume != new_is_volume:
+            self.remove_representation(representation.id, view.id)
+            self.add_representation(representation, view, source)
             return
 
-        self._apply_representation(
-            representation,
-            handle,
-            source_data,
-        )
+        source_data = source.GetOutputDataObject(representation.output_port)
+        handle.kind = representation.kind
+        render_data = self._set_representation_input(handle, source_data)
+        self._apply_representation(representation, handle, render_data)
 
         view_handle = self._views[view.id]
+        has_geometry = self._source_has_geometry(source, representation.output_port)
 
-        has_geometry = self._source_has_geometry(
-            source,
-            representation.output_port,
-        )
-
-        has_actor = bool(view_handle.renderer.HasViewProp(handle.actor))
-
-        if has_geometry and not has_actor:
-            if representation.kind == "volume":
+        if representation.kind == "volume":
+            has_actor = bool(view_handle.renderer.HasViewProp(handle.actor))
+            if has_geometry and not has_actor:
                 view_handle.renderer.AddVolume(handle.actor)
-            else:
-                view_handle.renderer.AddActor(handle.actor)
-
-        elif not has_geometry and has_actor:
-            view_handle.renderer.RemoveViewProp(handle.actor)
+            elif not has_geometry and has_actor:
+                view_handle.renderer.RemoveViewProp(handle.actor)
+        else:
+            for actor in (handle.actor, handle.outline_actor):
+                if actor is None:
+                    continue
+                has_actor = bool(view_handle.renderer.HasViewProp(actor))
+                if has_geometry and not has_actor:
+                    view_handle.renderer.AddActor(actor)
+                elif not has_geometry and has_actor:
+                    view_handle.renderer.RemoveViewProp(actor)
 
         view_handle.renderer.Modified()
         view_handle.render_window.Modified()
@@ -372,6 +343,8 @@ class VTKRenderingBackend(RenderingBackend):
 
         if view.renderer.HasViewProp(handle.actor):
             view.renderer.RemoveViewProp(handle.actor)
+        if handle.outline_actor is not None and view.renderer.HasViewProp(handle.outline_actor):
+            view.renderer.RemoveViewProp(handle.outline_actor)
 
         # Keepalive actor remains, so this renderer never becomes empty.
         view.renderer.Modified()
@@ -414,13 +387,58 @@ class VTKRenderingBackend(RenderingBackend):
         # data object is renderable.
         return True
 
+
+    def _set_representation_input(
+        self,
+        handle: VTKRepresentationHandle,
+        source_data: vtk.vtkDataObject | None,
+    ) -> vtk.vtkDataObject | None:
+        """Prepare the data object mirrored by trame-vtklocal.
+
+        The application pipeline stays server-side. For non-volume rendering we
+        additionally normalize vtkDataSet inputs to vtkPolyData. vtkObjectManager
+        currently leaves dangling dependency ids when vtkImageData is attached
+        directly to a mapper (for example vtkRTAnalyticSource output). A
+        server-side vtkDataSetSurfaceFilter keeps structured datasets out of the
+        mirrored object graph while preserving the visible surface and arrays.
+        """
+        if source_data is None:
+            handle.render_data = None
+            return None
+
+        if handle.kind == "volume":
+            render_data = source_data
+        elif isinstance(source_data, vtk.vtkPolyData):
+            render_data = source_data
+            handle.surface_filter = None
+        elif isinstance(source_data, vtk.vtkDataSet):
+            if handle.surface_filter is None:
+                handle.surface_filter = vtk.vtkDataSetSurfaceFilter()
+            handle.surface_filter.SetInputDataObject(source_data)
+            handle.surface_filter.Update()
+            render_data = handle.surface_filter.GetOutputDataObject(0)
+        else:
+            render_data = source_data
+
+        handle.render_data = render_data
+        handle.mapper.SetInputDataObject(render_data)
+
+        if handle.outline_filter is not None and handle.outline_mapper is not None:
+            handle.outline_filter.SetInputDataObject(render_data)
+            handle.outline_filter.Update()
+            outline_data = handle.outline_filter.GetOutputDataObject(0)
+            handle.outline_mapper.SetInputDataObject(outline_data)
+            handle.outline_mapper.Modified()
+
+        handle.mapper.Modified()
+        return render_data
+
     def _create_handle(
         self,
         representation: Representation,
         source: vtk.vtkAlgorithm,
     ) -> VTKRepresentationHandle:
         source_data = source.GetOutputDataObject(representation.output_port)
-
         if representation.kind == "volume":
             mapper = vtk.vtkSmartVolumeMapper()
             if source_data is not None:
@@ -444,26 +462,24 @@ class VTKRenderingBackend(RenderingBackend):
                 opacity_function=opacity_function,
             )
 
+        # Stable non-volume graph: surface/wireframe and outline branches are
+        # both created once and remain part of the renderer.
         mapper = vtk.vtkDataSetMapper()
-        pipeline_filter = None
-
-        if representation.kind == "outline":
-            pipeline_filter = vtk.vtkOutlineFilter()
-            if source_data is not None:
-                pipeline_filter.SetInputDataObject(source_data)
-                pipeline_filter.Update()
-                mapper.SetInputDataObject(pipeline_filter.GetOutputDataObject(0))
-        elif source_data is not None:
-            mapper.SetInputDataObject(source_data)
-
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
+
+        outline_filter = vtk.vtkOutlineFilter()
+        outline_mapper = vtk.vtkPolyDataMapper()
+        outline_actor = vtk.vtkActor()
+        outline_actor.SetMapper(outline_mapper)
 
         return VTKRepresentationHandle(
             mapper=mapper,
             actor=actor,
             kind=representation.kind,
-            pipeline_filter=pipeline_filter,
+            outline_filter=outline_filter,
+            outline_mapper=outline_mapper,
+            outline_actor=outline_actor,
         )
 
     def _apply_representation(
@@ -477,7 +493,13 @@ class VTKRenderingBackend(RenderingBackend):
         actor = handle.actor
         prop = actor.GetProperty()
 
-        actor.SetVisibility(1)
+        if representation.kind == "volume":
+            actor.SetVisibility(1)
+        else:
+            actor.SetVisibility(0 if representation.kind == "outline" else 1)
+            if handle.outline_actor is not None:
+                handle.outline_actor.SetVisibility(1 if representation.kind == "outline" else 0)
+                handle.outline_actor.SetPickable(representation.kind == "outline")
 
         color_by = properties.get("color_by")
         array_name = None
@@ -496,10 +518,14 @@ class VTKRenderingBackend(RenderingBackend):
                 array_name,
                 association,
             )
-            handle.coloring_data = (
-                coloring_data if coloring_data is not source_data else None
-            )
-            mapper.SetInputDataObject(coloring_data)
+            # The render graph is data-only. Restore the source data when no
+            # derived coloring data is needed; otherwise mirror the derived data.
+            if coloring_data is source_data:
+                handle.coloring_data = None
+                mapper.SetInputDataObject(source_data)
+            else:
+                handle.coloring_data = coloring_data
+                mapper.SetInputDataObject(coloring_data)
 
         if representation.kind == "volume":
             volume_property = actor.GetProperty()
@@ -579,25 +605,37 @@ class VTKRenderingBackend(RenderingBackend):
             actor.Modified()
             return
 
+        if representation.kind == "outline":
+            mapper.ScalarVisibilityOff()
+            if handle.outline_mapper is not None:
+                handle.outline_mapper.ScalarVisibilityOff()
+                handle.outline_mapper.Modified()
+            if handle.outline_actor is not None:
+                outline_prop = handle.outline_actor.GetProperty()
+                color = properties.get("color", "#ffffff").lstrip("#")
+                outline_prop.SetColor(
+                    int(color[0:2], 16) / 255.0,
+                    int(color[2:4], 16) / 255.0,
+                    int(color[4:6], 16) / 255.0,
+                )
+                outline_prop.SetLineWidth(float(properties.get("line_width", 1.0)))
+                handle.outline_actor.Modified()
+            actor.Modified()
+            return
+
         if representation.kind == "wireframe":
             prop.SetRepresentationToWireframe()
         else:
             prop.SetRepresentationToSurface()
 
-        if (
-            representation.kind == "outline"
-            or selected_array_name is None
-            or tf is None
-        ):
+        if selected_array_name is None or tf is None:
             mapper.ScalarVisibilityOff()
-
-            if representation.kind != "outline":
-                color = properties.get("color", "#ffffff").lstrip("#")
-                prop.SetColor(
-                    int(color[0:2], 16) / 255.0,
-                    int(color[2:4], 16) / 255.0,
-                    int(color[4:6], 16) / 255.0,
-                )
+            color = properties.get("color", "#ffffff").lstrip("#")
+            prop.SetColor(
+                int(color[0:2], 16) / 255.0,
+                int(color[2:4], 16) / 255.0,
+                int(color[4:6], 16) / 255.0,
+            )
 
             mapper.Modified()
             actor.Modified()
@@ -613,9 +651,7 @@ class VTKRenderingBackend(RenderingBackend):
         color_map = _build_surface_color_map(tf)
         handle.lookup_table = color_map
         mapper.SetLookupTable(color_map)
-        mapper.SetScalarRange(
-            float(tf["control_points"][0][0]), float(tf["control_points"][-1][0])
-        )
+        mapper.SetScalarRange(float(tf["control_points"][0][0]), float(tf["control_points"][-1][0]))
         mapper.SetColorModeToMapScalars()
         mapper.UseLookupTableScalarRangeOn()
 
@@ -632,9 +668,7 @@ def _data_for_coloring(
         return source_data, None
 
     attributes = (
-        source_data.GetCellData()
-        if association == "cell"
-        else source_data.GetPointData()
+        source_data.GetCellData() if association == "cell" else source_data.GetPointData()
     )
     array = attributes.GetArray(array_name)
     if array is None:
@@ -692,6 +726,7 @@ def _apply_volume_transfer_function(
         opacity_function.Modified()
 
 
+
 def _apply_fixed_volume_color(
     color_function: vtk.vtkColorTransferFunction | None,
     opacity_function: vtk.vtkPiecewiseFunction | None,
@@ -713,3 +748,17 @@ def _apply_fixed_volume_color(
         opacity_function.AddPoint(0.0, 1.0)
         opacity_function.AddPoint(1.0, 1.0)
         opacity_function.Modified()
+
+
+def _hex_to_rgb(value: str) -> tuple[float, float, float]:
+    value = value.lstrip("#")
+    return (
+        int(value[0:2], 16) / 255.0,
+        int(value[2:4], 16) / 255.0,
+        int(value[4:6], 16) / 255.0,
+    )
+
+
+def _rgb_to_hex(color: tuple[float, float, float]) -> str:
+    values = [round(max(0.0, min(1.0, component)) * 255) for component in color]
+    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"

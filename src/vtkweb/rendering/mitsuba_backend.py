@@ -68,15 +68,15 @@ class MitsubaRenderingBackend(RenderingBackend):
     def __init__(self, transfer_function_provider=None) -> None:
         import mitsuba as mi
 
-        self._transfer_function_provider = transfer_function_provider or (
-            lambda _name: None
-        )
+        self._transfer_function_provider = transfer_function_provider or (lambda _name: None)
         self.mi = mi
         if mi.variant() != "cuda_ad_rgb":
             mi.set_variant("cuda_ad_rgb")
 
         self._views: dict[str, MitsubaViewHandle] = {}
-        self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
+        self._representations: dict[
+            tuple[str, str], MitsubaRepresentationHandle
+        ] = {}
 
     # ------------------------------------------------------------------
     # Views
@@ -90,32 +90,49 @@ class MitsubaRenderingBackend(RenderingBackend):
             self._representations.pop(key, None)
         self._views.pop(view_id, None)
 
-    def rename_view(self, view_id: str, new_view_id: str) -> None:
-        if new_view_id != view_id and new_view_id in self._views:
-            raise ValueError(f"View ID already exists: {new_view_id}")
 
-        self._views[new_view_id] = self._views.pop(view_id)
-        renamed = {}
-        for (
-            representation_id,
-            current_view_id,
-        ), handle in self._representations.items():
-            renamed[
-                (
-                    representation_id,
-                    new_view_id if current_view_id == view_id else current_view_id,
-                )
-            ] = handle
-        self._representations = renamed
+    def get_view_property(self, view_id: str, name: str) -> Any:
+        handle = self._views[view_id]
+        if name in {"background_color", "world_ambient_color"}:
+            return _rgb_to_hex(getattr(handle, name))
+        if name == "world_ambient_intensity":
+            return float(handle.world_ambient_intensity)
+        if name == "camera":
+            return {
+                "position": list(handle.camera_origin),
+                "target": list(handle.camera_target),
+                "up": list(handle.camera_up),
+                "center_of_rotation": list(handle.center_of_rotation),
+                "fov": float(handle.camera_fov),
+            }
+        return None
 
     def set_view_property(self, view_id: str, name: str, value: Any) -> None:
-        if name not in {
-            "background_color",
-            "world_ambient_color",
-            "world_ambient_intensity",
-        }:
+        handle = self._views[view_id]
+        if name in {"background_color", "world_ambient_color"}:
+            if isinstance(value, str):
+                value = _hex_to_rgb(value)
+            setattr(handle, name, value)
+            self.invalidate_scene(view_id)
             return
-        setattr(self._views[view_id], name, value)
+        if name == "world_ambient_intensity":
+            setattr(handle, name, float(value))
+            self.invalidate_scene(view_id)
+            return
+        if name != "camera":
+            return
+        if "position" in value:
+            handle.camera_origin = tuple(float(v) for v in value["position"])
+        if "target" in value:
+            handle.camera_target = tuple(float(v) for v in value["target"])
+        if "up" in value:
+            handle.camera_up = tuple(float(v) for v in value["up"])
+        if value.get("fov") is not None:
+            handle.camera_fov = float(value["fov"])
+        if "center_of_rotation" in value:
+            handle.center_of_rotation = tuple(float(v) for v in value["center_of_rotation"])
+        else:
+            handle.center_of_rotation = tuple(handle.camera_target)
         self.invalidate_scene(view_id)
 
     def set_render_size(self, view_id: str, width: int, height: int) -> bool:
@@ -159,7 +176,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             ],
             dtype=np.float64,
         )
-        diagonal = np.array([xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64)
+        diagonal = np.array(
+            [xmax - xmin, ymax - ymin, zmax - zmin], dtype=np.float64
+        )
         radius = max(0.5 * float(np.linalg.norm(diagonal)), 1.0e-6)
 
         half_fov = math.radians(handle.camera_fov) * 0.5
@@ -172,33 +191,6 @@ class MitsubaRenderingBackend(RenderingBackend):
         handle.center_of_rotation = tuple(float(v) for v in center)
         self.invalidate_scene(view_id)
 
-    def get_camera_state(self, view_id: str) -> dict[str, Any]:
-        handle = self._views[view_id]
-        return {
-            "position": list(handle.camera_origin),
-            "target": list(handle.camera_target),
-            "up": list(handle.camera_up),
-            "center_of_rotation": list(handle.center_of_rotation),
-            "fov": float(handle.camera_fov),
-        }
-
-    def set_camera_state(self, view_id: str, value: dict[str, Any]) -> None:
-        handle = self._views[view_id]
-        if "position" in value:
-            handle.camera_origin = tuple(float(v) for v in value["position"])
-        if "target" in value:
-            handle.camera_target = tuple(float(v) for v in value["target"])
-        if "up" in value:
-            handle.camera_up = tuple(float(v) for v in value["up"])
-        if value.get("fov") is not None:
-            handle.camera_fov = float(value["fov"])
-        if "center_of_rotation" in value:
-            handle.center_of_rotation = tuple(
-                float(v) for v in value["center_of_rotation"]
-            )
-        else:
-            handle.center_of_rotation = tuple(handle.camera_target)
-        self.invalidate_scene(view_id)
 
     def interact_camera(
         self,
@@ -242,10 +234,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 screen_up = _normalized(np.cross(right, forward))
                 height = max(float(viewport_height), 1.0)
                 world_per_pixel = (
-                    2.0
-                    * distance
-                    * math.tan(0.5 * math.radians(handle.camera_fov))
-                    / height
+                    2.0 * distance * math.tan(0.5 * math.radians(handle.camera_fov)) / height
                 )
                 shift = (-dx * right + dy * screen_up) * world_per_pixel
                 position += shift
@@ -271,18 +260,14 @@ class MitsubaRenderingBackend(RenderingBackend):
 
     def render_snapshot(self, view_id: str) -> tuple[int, dict[str, Any]]:
         handle = self._views[view_id]
-        camera = self.get_camera_state(view_id)
+        camera = self.get_view_property(view_id, "camera")
         return handle.scene_generation, camera
 
     def has_renderable_scene(self, view_id: str) -> bool:
         handle = self._views[view_id]
-        return (
-            handle.width > 0
-            and handle.height > 0
-            and any(
-                current_view_id == view_id and rep.mesh is not None
-                for (_, current_view_id), rep in self._representations.items()
-            )
+        return handle.width > 0 and handle.height > 0 and any(
+            current_view_id == view_id and rep.mesh is not None
+            for (_, current_view_id), rep in self._representations.items()
         )
 
     def clear_accumulation(self, view_id: str, generation: int | None = None) -> None:
@@ -476,7 +461,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 if colors is not None:
                     if association == "cell":
                         vertices = vertices[faces].reshape(-1, 3)
-                        faces = np.arange(len(vertices), dtype=np.uint32).reshape(-1, 3)
+                        faces = np.arange(
+                            len(vertices), dtype=np.uint32
+                        ).reshape(-1, 3)
                         vertex_colors = np.repeat(colors, 3, axis=0)
                     else:
                         vertex_colors = colors
@@ -505,7 +492,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "name": "vertex_color",
                 }
             else:
-                color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
+                color = _hex_to_rgb(
+                    representation.properties.get("color", "#d9d9d9")
+                )
                 reflectance = {"type": "rgb", "value": list(color)}
 
             mesh.set_bsdf(
@@ -655,17 +644,6 @@ class MitsubaRenderingBackend(RenderingBackend):
         averaged = handle.accumulation / float(handle.accumulated_spp)
         return self.encoded_frame(averaged)
 
-    def render_frame(self, view_id: str, *, spp: int = 1) -> bytes:
-        generation, camera = self.render_snapshot(view_id)
-        if self.accumulation_generation(view_id) != generation:
-            self.clear_accumulation(view_id, generation)
-        sample = self.render_pass(view_id, camera, spp=spp)
-        self.accumulate_pass(view_id, sample, spp=spp, generation=generation)
-        return self.encoded_accumulated_frame(view_id) or b""
-
-    def get_accumulated_spp(self, view_id: str) -> int:
-        return self._views[view_id].accumulated_spp
-
     def _visible_bounds(
         self, view_id: str
     ) -> tuple[float, float, float, float, float, float] | None:
@@ -752,6 +730,8 @@ def _evaluate_transfer_function(
     return np.asarray(rgb, dtype=np.float32)
 
 
+
+
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
     value = str(value).lstrip("#")
     if len(value) != 6:
@@ -779,3 +759,8 @@ def _rotate_vector(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.nda
         + np.cross(axis, vector) * sine
         + axis * float(np.dot(axis, vector)) * (1.0 - cosine)
     )
+
+
+def _rgb_to_hex(color: tuple[float, float, float]) -> str:
+    values = [round(max(0.0, min(1.0, component)) * 255) for component in color]
+    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"

@@ -203,7 +203,7 @@ def build_render_view(
 ) -> None:
     """Build the heterogeneous tiled rendering workspace."""
 
-    backend = rendering.backend
+    backend = rendering.backend_for_type("vtk")
     client.Style(WORKSPACE_STYLE)
 
     vtk_widgets_by_slot = {}
@@ -221,7 +221,7 @@ def build_render_view(
             tile = tiles_by_view.get(view_id)
             if tile is None:
                 continue
-            slot_id = value["backend_id"]
+            slot_id = rendering.backend_view_id(view_id)
             layout[slot_id] = {
                 "view_id": view_id,
                 "container_id": tile["container_id"],
@@ -246,25 +246,25 @@ def build_render_view(
                 widget.update(push_camera=True)
 
     def on_vtk_camera(slot_id: str, camera_state: dict | None) -> None:
-        """Mirror a trame-vtklocal camera event into the server vtkCamera."""
+        """Store a VTK/WASM camera event through the canonical view property."""
         item = state.vtk_slot_layout.get(slot_id)
         view_id = item and item.get("view_id")
         if not view_id or not camera_state:
             return
 
-        widget = vtk_widgets_by_slot.get(slot_id)
-        if widget is None:
-            return
-
-        # The payload is VTK/WASM object state. Applying it through
-        # trame-vtklocal updates the corresponding server-side vtkCamera.
-        # RenderManager's camera property reads that vtkCamera directly, so
-        # after this call the logical view property and the visible camera are
-        # the same source of truth.
-        widget.vtk_update_from_state(camera_state)
+        camera = {
+            "position": camera_state.get("Position"),
+            "target": camera_state.get("FocalPoint"),
+            "up": camera_state.get("ViewUp"),
+            "fov": camera_state.get("ViewAngle"),
+            "parallel_projection": camera_state.get("ParallelProjection"),
+            "parallel_scale": camera_state.get("ParallelScale"),
+        }
+        rendering.set_view_property(view_id, "camera", camera, notify=False)
 
     def reset_render_view(view_id: str | None = None) -> None:
-        if view_id in state.views:
+        view = state.views.get(view_id) if view_id is not None else None
+        if view is not None and view.get("type") in {"vtk", "mitsuba"}:
             ctrl.reset_camera(view_id)
 
     ctrl.trigger("render_view_reset")(reset_render_view)
@@ -626,8 +626,8 @@ def build_render_view(
                 raw_attrs=[
                     '@mousedown="window.__vtkwebStartMitsubaCameraDrag(tile.view_id, $event)"',
                     '@wheel.prevent="window.__vtkwebMitsubaWheel(tile.view_id, $event)"',
-                    "@contextmenu.prevent",
-                    "@keydown.space.exact.prevent=\"trigger('render_view_reset', [tile.view_id])\"",
+                    '@contextmenu.prevent',
+                    '@keydown.space.exact.prevent="trigger(\'render_view_reset\', [tile.view_id])"',
                 ],
             ):
                 html.Canvas(
@@ -673,13 +673,9 @@ def build_render_view(
                 )
                 html.Button(
                     "⇄",
-                    title=(
-                        "views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",
-                    ),
+                    title=("views[tile.view_id]?.type === 'vtk' ? 'Switch to Mitsuba' : 'Switch to VTK'",),
                     classes="vtkweb-tile-button",
-                    v_if=(
-                        "tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",
-                    ),
+                    v_if=("tile.view_id && ['vtk', 'mitsuba'].includes(views[tile.view_id]?.type)",),
                     click=(
                         ctrl.switch_view_type,
                         "[tile.view_id, views[tile.view_id]?.type === 'vtk' ? 'mitsuba' : 'vtk']",

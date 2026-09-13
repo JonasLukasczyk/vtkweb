@@ -1,5 +1,7 @@
 from vtkweb.rendering.base import (
+    DEFAULT_VIEW_PROPERTIES,
     REPRESENTATION_KINDS,
+    VIEW_PROPERTY_NAMES,
     RenderView,
     ProgressiveRenderingBackend,
     RenderingBackend,
@@ -14,7 +16,9 @@ from vtkweb.rendering.vtk_backend import (
 )
 
 __all__ = [
+    "DEFAULT_VIEW_PROPERTIES",
     "REPRESENTATION_KINDS",
+    "VIEW_PROPERTY_NAMES",
     "RenderView",
     "ProgressiveRenderingBackend",
     "FrameTransport",
