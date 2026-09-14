@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
@@ -19,6 +19,11 @@ class VTKViewHandle:
     writer: vtk.vtkJPEGWriter
     width: int = 0
     height: int = 0
+    # Each logical view owns an independent renderer/render-window/capture
+    # pipeline and its own dedicated render thread. Synchronize mutations with
+    # that view only; unrelated views on the same rank must not block each
+    # other behind one backend-wide lock.
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
 @dataclass
@@ -36,10 +41,6 @@ class VTKRenderingBackend(RenderingBackend):
     """Server-side VTK renderer producing encoded image frames."""
 
     name = "vtk"
-    # Rendering continuously at an unbounded rate only steals resources from
-    # other server renderers. The scheduler still runs continuously, but
-    # paces VTK to a display-oriented rate.
-    target_fps = 30.0
 
     def __init__(
         self,
@@ -49,10 +50,6 @@ class VTKRenderingBackend(RenderingBackend):
         self._transfer_function_provider = transfer_function_provider or (
             lambda _name: None
         )
-        # VTK render windows/OpenGL contexts are used only from one worker at a
-        # time. The same lock also protects scene mutations against an in-flight
-        # render without adding per-view synchronization state.
-        self._lock = threading.RLock()
         self._views: dict[str, VTKViewHandle] = {}
         self._representations: dict[tuple[str, str], VTKRepresentationHandle] = {}
 
@@ -79,7 +76,10 @@ class VTKRenderingBackend(RenderingBackend):
         self._views[view.id] = VTKViewHandle(renderer, render_window, capture, writer)
 
     def remove_view(self, view_id: str) -> None:
-        with self._lock:
+        handle = self._views.get(view_id)
+        if handle is None:
+            return
+        with handle.lock:
             for representation_id, current_view_id in tuple(self._representations):
                 if current_view_id == view_id:
                     self.remove_representation(representation_id, view_id)
@@ -87,23 +87,26 @@ class VTKRenderingBackend(RenderingBackend):
 
     def get_view_property(self, view_id: str, name: str) -> Any:
         handle = self._views[view_id]
-        if name == "background_color":
-            return _rgb_to_hex(tuple(float(v) for v in handle.renderer.GetBackground()))
-        if name == "camera":
-            camera = handle.renderer.GetActiveCamera()
-            return {
-                "position": list(camera.GetPosition()),
-                "target": list(camera.GetFocalPoint()),
-                "up": list(camera.GetViewUp()),
-                "fov": float(camera.GetViewAngle()),
-                "parallel_projection": bool(camera.GetParallelProjection()),
-                "parallel_scale": float(camera.GetParallelScale()),
-            }
+        with handle.lock:
+            if name == "background_color":
+                return _rgb_to_hex(
+                    tuple(float(v) for v in handle.renderer.GetBackground())
+                )
+            if name == "camera":
+                camera = handle.renderer.GetActiveCamera()
+                return {
+                    "position": list(camera.GetPosition()),
+                    "target": list(camera.GetFocalPoint()),
+                    "up": list(camera.GetViewUp()),
+                    "fov": float(camera.GetViewAngle()),
+                    "parallel_projection": bool(camera.GetParallelProjection()),
+                    "parallel_scale": float(camera.GetParallelScale()),
+                }
         return None
 
     def set_view_property(self, view_id: str, name: str, value: Any) -> None:
-        with self._lock:
-            handle = self._views[view_id]
+        handle = self._views[view_id]
+        with handle.lock:
             if name == "background_color":
                 if isinstance(value, str):
                     value = _hex_to_rgb(value)
@@ -133,34 +136,77 @@ class VTKRenderingBackend(RenderingBackend):
     def set_render_size(self, view_id: str, width: int, height: int) -> bool:
         width = max(1, int(width))
         height = max(1, int(height))
-        with self._lock:
-            handle = self._views[view_id]
+        handle = self._views[view_id]
+        with handle.lock:
             if handle.width == width and handle.height == height:
                 return False
             handle.width = width
             handle.height = height
-            handle.render_window.SetSize(width, height)
         return True
 
     def has_renderable_scene(self, view_id: str) -> bool:
         handle = self._views[view_id]
-        return handle.width > 0 and handle.height > 0
+        with handle.lock:
+            return handle.width > 0 and handle.height > 0
 
-    def render_frame(self, view_id: str) -> bytes | None:
-        # The dedicated worker always renders the latest state available when it
-        # acquires the backend lock. Camera/property changes that arrive during a
-        # frame are therefore picked up naturally by the next loop iteration.
-        with self._lock:
-            handle = self._views.get(view_id)
-            if handle is None:
-                return None
+    def render_frame(
+        self, view_id: str, *, region=None, full_size=None
+    ) -> bytes | None:
+        """Render only this rank's image-space tile and encode it as JPEG.
 
-            handle.renderer.ResetCameraClippingRange()
-            handle.render_window.Render()
-            handle.capture.Modified()
-            handle.capture.Update()
+        The logical camera describes the full browser viewport. For a tile, we
+        derive the full-frame projection matrix, remap the tile's NDC rectangle
+        to the complete [-1, 1] render target, and render into a window sized
+        exactly to the tile. This avoids the previous full-frame render followed
+        by vtkImageClip while preserving the exact full-view camera projection.
+        """
+        handle = self._views.get(view_id)
+        if handle is None:
+            return None
+        with handle.lock:
+            if full_size is None:
+                full_width, full_height = handle.width, handle.height
+            else:
+                full_width, full_height = map(int, full_size)
+            full_width = max(1, full_width)
+            full_height = max(1, full_height)
 
-            handle.writer.Write()
+            if region is None:
+                x, y, width, height = 0, 0, full_width, full_height
+            else:
+                x, y, width, height = map(int, region)
+            width = max(1, width)
+            height = max(1, height)
+
+            camera = handle.renderer.GetActiveCamera()
+
+            old_use_explicit = bool(camera.GetUseExplicitProjectionTransformMatrix())
+            old_explicit = None
+            if old_use_explicit:
+                old_explicit = vtk.vtkMatrix4x4()
+                old_explicit.DeepCopy(camera.GetExplicitProjectionTransformMatrix())
+
+            try:
+                projection = _tile_projection_matrix(
+                    camera,
+                    region=(x, y, width, height),
+                    full_size=(full_width, full_height),
+                )
+                camera.SetExplicitProjectionTransformMatrix(projection)
+                camera.SetUseExplicitProjectionTransformMatrix(True)
+
+                handle.render_window.SetSize(width, height)
+                handle.render_window.Render()
+                handle.capture.Modified()
+                handle.capture.Update()
+                handle.writer.Write()
+            finally:
+                if old_use_explicit and old_explicit is not None:
+                    camera.SetExplicitProjectionTransformMatrix(old_explicit)
+                    camera.SetUseExplicitProjectionTransformMatrix(True)
+                else:
+                    camera.SetUseExplicitProjectionTransformMatrix(False)
+
             result = handle.writer.GetResult()
             if result is None or result.GetNumberOfValues() == 0:
                 return None
@@ -170,11 +216,12 @@ class VTKRenderingBackend(RenderingBackend):
         """Finalize the VTK graphics context on its dedicated render thread."""
         handle = self._views.get(view_id)
         if handle is not None:
-            handle.render_window.Finalize()
+            with handle.lock:
+                handle.render_window.Finalize()
 
     def reset_camera(self, view_id: str) -> None:
-        with self._lock:
-            handle = self._views[view_id]
+        handle = self._views[view_id]
+        with handle.lock:
             handle.renderer.ResetCamera()
             handle.renderer.ResetCameraClippingRange()
             handle.renderer.Modified()
@@ -193,11 +240,13 @@ class VTKRenderingBackend(RenderingBackend):
         key = (representation.id, view.id)
         if key in self._representations:
             return
-        with self._lock:
+        view_handle = self._views[view.id]
+        with view_handle.lock:
             handle = self._create_handle(representation, source)
             self._representations[key] = handle
-            self._views[view.id].renderer.AddViewProp(handle.actor)
+            view_handle.renderer.AddViewProp(handle.actor)
             self._apply_representation(representation, handle, source)
+            view_handle.renderer.ResetCameraClippingRange()
 
     def update_representation(
         self,
@@ -206,25 +255,31 @@ class VTKRenderingBackend(RenderingBackend):
         source: vtk.vtkAlgorithm,
     ) -> None:
         key = (representation.id, view.id)
-        with self._lock:
+        view_handle = self._views[view.id]
+        with view_handle.lock:
             handle = self._representations.get(key)
             if handle is None:
                 self.add_representation(representation, view, source)
                 return
             if handle.kind != representation.kind:
-                self._views[view.id].renderer.RemoveViewProp(handle.actor)
+                view_handle.renderer.RemoveViewProp(handle.actor)
                 handle = self._create_handle(representation, source)
                 self._representations[key] = handle
-                self._views[view.id].renderer.AddViewProp(handle.actor)
+                view_handle.renderer.AddViewProp(handle.actor)
             self._apply_representation(representation, handle, source)
+            view_handle.renderer.ResetCameraClippingRange()
 
     def remove_representation(self, representation_id: str, view_id: str) -> None:
-        with self._lock:
+        view = self._views.get(view_id)
+        if view is None:
+            self._representations.pop((representation_id, view_id), None)
+            return
+        with view.lock:
             handle = self._representations.pop((representation_id, view_id), None)
-            view = self._views.get(view_id)
-            if handle is None or view is None:
+            if handle is None:
                 return
             view.renderer.RemoveViewProp(handle.actor)
+            view.renderer.ResetCameraClippingRange()
 
     def _create_handle(
         self,
@@ -477,6 +532,50 @@ def _hex_to_rgb(color: str) -> tuple[float, float, float]:
         int(value[2:4], 16) / 255.0,
         int(value[4:6], 16) / 255.0,
     )
+
+
+def _tile_projection_matrix(
+    camera: vtk.vtkCamera,
+    *,
+    region: tuple[int, int, int, int],
+    full_size: tuple[int, int],
+) -> vtk.vtkMatrix4x4:
+    """Return a projection matrix for a browser-coordinate image tile.
+
+    ``region`` uses a top-left origin. VTK projection coordinates use +Y
+    upward, so Y is flipped while deriving the normalized tile bounds. The
+    resulting matrix maps that sub-frustum onto the full tile framebuffer.
+    """
+    x, y, width, height = region
+    full_width, full_height = full_size
+
+    left = 2.0 * x / full_width - 1.0
+    right = 2.0 * (x + width) / full_width - 1.0
+    top = 1.0 - 2.0 * y / full_height
+    bottom = 1.0 - 2.0 * (y + height) / full_height
+
+    half_width = max((right - left) * 0.5, 1.0e-12)
+    half_height = max((top - bottom) * 0.5, 1.0e-12)
+    center_x = (left + right) * 0.5
+    center_y = (bottom + top) * 0.5
+
+    full_projection = vtk.vtkMatrix4x4()
+    full_projection.DeepCopy(
+        camera.GetProjectionTransformMatrix(
+            float(full_width) / float(full_height), -1.0, 1.0
+        )
+    )
+
+    tile_transform = vtk.vtkMatrix4x4()
+    tile_transform.Identity()
+    tile_transform.SetElement(0, 0, 1.0 / half_width)
+    tile_transform.SetElement(0, 3, -center_x / half_width)
+    tile_transform.SetElement(1, 1, 1.0 / half_height)
+    tile_transform.SetElement(1, 3, -center_y / half_height)
+
+    tiled_projection = vtk.vtkMatrix4x4()
+    vtk.vtkMatrix4x4.Multiply4x4(tile_transform, full_projection, tiled_projection)
+    return tiled_projection
 
 
 def _rgb_to_hex(color: tuple[float, float, float]) -> str:

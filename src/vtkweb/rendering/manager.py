@@ -5,13 +5,15 @@ import math
 
 import numpy as np
 from copy import deepcopy
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from vtkweb.pipeline import PipelineGraph
+from vtkweb.distributed import context as distributed
 from vtkweb.rendering.base import (
     DEFAULT_VIEW_PROPERTIES,
     REPRESENTATION_KINDS,
     VIEW_PROPERTY_NAMES,
+    view_property_state,
     RenderView,
     FrameRenderingBackend,
     RenderingBackend,
@@ -42,6 +44,24 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
     "sample_distance": 1.0,
 }
 
+DEFAULT_VIEW_CAMERAS = {
+    "vtk": {
+        "position": [0.0, 0.0, 1.0],
+        "target": [0.0, 0.0, 0.0],
+        "up": [0.0, 1.0, 0.0],
+        "fov": 30.0,
+        "parallel_projection": False,
+        "parallel_scale": 1.0,
+    },
+    "mitsuba": {
+        "position": [0.0, 0.0, 5.0],
+        "target": [0.0, 0.0, 0.0],
+        "up": [0.0, 1.0, 0.0],
+        "center_of_rotation": [0.0, 0.0, 0.0],
+        "fov": 30.0,
+    },
+}
+
 
 class RenderManager:
     """Rendering service backed by serializable trame state.
@@ -69,6 +89,11 @@ class RenderManager:
         # view. Keep it here so a backend switch does not lose the existing
         # canvas dimensions when the DOM itself does not resize.
         self._render_sizes: dict[str, tuple[int, int]] = {}
+        # Transient size revisions are tracked for every logical view, even on
+        # workers where the backend is not materialized. Because resize
+        # mutations are replicated in order, all ranks keep the same revision
+        # and late-materialized workers join the current framebuffer epoch.
+        self._render_size_revisions: dict[str, int] = {}
 
         self.state.views = {}
         self.state.representations = {}
@@ -120,31 +145,28 @@ class RenderManager:
         if view_id in self.state.views:
             raise ValueError(f"View ID already exists: {view_id}")
 
-        backend = self.backend_for_type(view_type)
-        backend_id = view_id
-        backend.add_view(RenderView(id=backend_id, name=name))
-        self._view_backend_ids[view_id] = backend_id
+        property_values = {
+            **DEFAULT_VIEW_PROPERTIES,
+            "camera": deepcopy(DEFAULT_VIEW_CAMERAS[view_type]),
+        }
         value = {
             "id": view_id,
             "type": view_type,
             "name": name,
-            **DEFAULT_VIEW_PROPERTIES,
-            "camera": _normalize_camera(
-                backend.get_view_property(backend_id, "camera")
-            ),
+            "properties": {
+                property_name: view_property_state(
+                    property_name, property_values[property_name]
+                )
+                for property_name in VIEW_PROPERTY_NAMES
+            },
         }
         self.state.views = {**self.state.views, view_id: value}
 
-        for property_name in VIEW_PROPERTY_NAMES:
-            backend.set_view_property(
-                backend_id,
-                property_name,
-                value[property_name],
-            )
+        # Rank 0 always materializes browser-visible views. Worker ranks keep
+        # only logical replicated state until Distributed Rendering is enabled.
+        if self._should_materialize_view(view_id):
+            self._materialize_view(view_id)
 
-        self.frames.register_view(
-            view_id, self._frame_backend_for_view(view_id), backend_id
-        )
         self._notify_render()
         return self.get_view(view_id)
 
@@ -160,22 +182,18 @@ class RenderManager:
             if view_id in representation.view_ids:
                 self.unassign_representation(representation.id, view_id, notify=False)
 
-        backend_id = self.backend_view_id(view_id)
-        self.frames.unregister_view(view_id)
-        self._backend_for_view(view_id).remove_view(backend_id)
-        self._view_backend_ids.pop(view_id, None)
+        if self._is_view_materialized(view_id):
+            self._dematerialize_view(view_id)
         if not preserve_render_size:
             self._render_sizes.pop(view_id, None)
+            self._render_size_revisions.pop(view_id, None)
 
         views = dict(self.state.views)
         del views[view_id]
         self.state.views = views
 
         if self.active_view_id == view_id:
-            self.state.active_view_id = next(
-                (view.id for view in self.views),
-                None,
-            )
+            self.state.active_view_id = next((view.id for view in self.views), None)
 
         self._notify_render()
 
@@ -187,72 +205,23 @@ class RenderManager:
         self.state.active_view_id = view_id
 
     def switch_view_type(self, view_id: str, view_type: str) -> None:
-        """Replace a render backend in place while preserving view properties."""
+        """Replace a render backend in place while preserving logical state."""
         if view_type not in {"vtk", "mitsuba"}:
             raise ValueError(f"Unknown render view type: {view_type}")
-        value = dict(self.state.views[view_id])
+        value = deepcopy(self.state.views[view_id])
         if value.get("type") == view_type:
             return
 
-        representation_ids = [
-            rep.id for rep in self.representations if view_id in rep.view_ids
-        ]
-        old_type = value["type"]
-        old_backend_id = self.backend_view_id(view_id)
-        old_backend = self.backend_for_type(old_type)
-        for representation_id in representation_ids:
-            old_backend.remove_representation(representation_id, old_backend_id)
-
-        self.frames.unregister_view(view_id)
-        old_backend.remove_view(old_backend_id)
-
-        backend = self.backend_for_type(view_type)
-        backend_id = view_id
-        backend.add_view(RenderView(id=backend_id, name=value["name"]))
-        self._view_backend_ids[view_id] = backend_id
+        was_materialized = self._is_view_materialized(view_id)
+        if was_materialized:
+            self._dematerialize_view(view_id)
 
         value["type"] = view_type
+        # Keep the current camera when switching backends; it is renderer-agnostic.
         self.state.views = {**self.state.views, view_id: value}
 
-        for property_name in VIEW_PROPERTY_NAMES:
-            if property_name == "camera":
-                continue
-            backend.set_view_property(
-                backend_id,
-                property_name,
-                value[property_name],
-            )
-
-        for representation_id in representation_ids:
-            representation = self.get_representation(representation_id)
-            if self.pipeline.has_valid_output(representation.node_id):
-                backend.add_representation(
-                    representation,
-                    self._backend_view(view_id),
-                    self.pipeline.nodes[representation.node_id].processor,
-                )
-
-        # Camera is a serialized view property. Apply it only after scene
-        # representations exist so VTK can derive a valid clipping range when
-        # the source backend did not provide one.
-        backend.set_view_property(backend_id, "camera", value["camera"])
-        value["camera"] = _normalize_camera(
-            backend.get_view_property(backend_id, "camera")
-        )
-        self.state.views = {**self.state.views, view_id: value}
-
-        # The browser canvas survives an in-place backend switch, so its
-        # ResizeObserver may not fire again. Carry the logical view's transient
-        # viewport size into the replacement backend explicitly.
-        render_size = self._render_sizes.get(view_id)
-        if render_size is not None:
-            self._frame_backend_for_view(view_id).set_render_size(
-                backend_id, *render_size
-            )
-
-        self.frames.register_view(
-            view_id, self._frame_backend_for_view(view_id), backend_id
-        )
+        if self._should_materialize_view(view_id):
+            self._materialize_view(view_id)
         self._notify_render()
 
     # -------------------------------------------------------------------------
@@ -432,11 +401,15 @@ class RenderManager:
         for output_port in range(node.processor.GetNumberOfOutputPorts()):
             if self.get_representations(node_id, output_port):
                 continue
+            representation_id = uuid5(
+                NAMESPACE_URL, f"vtkweb:{node_id}:{output_port}:outline"
+            ).hex
             representation = self.add_representation(
                 node_id,
                 output_port=output_port,
                 kind="outline",
                 view_ids=view_ids,
+                representation_id=representation_id,
                 notify=False,
             )
             created.append(representation.id)
@@ -478,7 +451,9 @@ class RenderManager:
             return
 
         self.get_view(view_id)
-        if self.pipeline.has_valid_output(representation.node_id):
+        if self._is_view_materialized(view_id) and self.pipeline.has_valid_output(
+            representation.node_id
+        ):
             node = self.pipeline.nodes[representation.node_id]
             self._backend_for_view(view_id).add_representation(
                 representation, self._backend_view(view_id), node.processor
@@ -512,10 +487,11 @@ class RenderManager:
         if view_id not in representation.view_ids:
             return
 
-        self._backend_for_view(view_id).remove_representation(
-            representation.id,
-            self.backend_view_id(view_id),
-        )
+        if self._is_view_materialized(view_id):
+            self._backend_for_view(view_id).remove_representation(
+                representation.id,
+                self.backend_view_id(view_id),
+            )
 
         value = dict(self.state.representations[representation_id])
         value["view_ids"] = [
@@ -708,7 +684,10 @@ class RenderManager:
 
     def get_view_property(self, view_id: str, name: str):
         self.get_view(view_id)
-        return deepcopy(self.state.views[view_id].get(name))
+        property_state = self.state.views[view_id].get("properties", {}).get(name)
+        if property_state is None:
+            raise ValueError(f"Unknown view property: {name}")
+        return deepcopy(property_state.get("value"))
 
     def set_view_property(
         self,
@@ -719,11 +698,12 @@ class RenderManager:
         notify: bool = True,
     ) -> None:
         self.get_view(view_id)
-        backend = self._backend_for_view(view_id)
-        backend_id = self.backend_view_id(view_id)
+        properties = self.state.views[view_id].get("properties", {})
+        if name not in properties:
+            raise ValueError(f"Unknown view property: {name}")
 
         if name == "camera":
-            camera = dict(self.state.views[view_id].get("camera") or {})
+            camera = dict(self.get_view_property(view_id, "camera") or {})
             camera.update(dict(value or {}))
             value = _normalize_camera(camera)
         elif name in {"background_color", "world_ambient_color"} and not isinstance(
@@ -732,19 +712,60 @@ class RenderManager:
             value = _rgb_to_hex(tuple(map(float, value)))
         elif name == "world_ambient_intensity":
             value = max(0.0, float(value))
+        elif name == "fps_limit":
+            value = max(1, int(round(float(value))))
+        elif name in {"debug", "distributed"}:
+            value = bool(value)
 
         value = deepcopy(value)
-        backend.set_view_property(backend_id, name, value)
-        if name == "camera":
-            # Camera is interaction state, so preserve what the backend actually
-            # accepted/materialized rather than a requested value that may
-            # contain fields unsupported by the current renderer.
-            value = _normalize_camera(backend.get_view_property(backend_id, "camera"))
 
-        view = dict(self.state.views[view_id], **{name: value})
+        # Update authoritative logical state first. This lets a worker materialize
+        # the view immediately when Distributed Rendering transitions to true.
+        view = deepcopy(self.state.views[view_id])
+        properties = dict(view.get("properties", {}))
+        property_state = dict(properties[name])
+        property_state["value"] = value
+        properties[name] = property_state
+        view["properties"] = properties
         self.state.views = {**self.state.views, view_id: view}
 
-        self.frames.ensure(view_id)
+        if name == "distributed":
+            if self._should_materialize_view(view_id):
+                if not self._is_view_materialized(view_id):
+                    self._materialize_view(view_id)
+            elif self._is_view_materialized(view_id):
+                self._dematerialize_view(view_id)
+
+            if self._is_view_materialized(view_id):
+                self.frames.set_distributed(view_id, value)
+            if notify:
+                self._notify_render()
+            return
+
+        if name == "debug":
+            if self._is_view_materialized(view_id):
+                self.frames.set_debug(view_id, value)
+        elif name == "fps_limit":
+            if self._is_view_materialized(view_id):
+                self.frames.set_fps_limit(view_id, float(value))
+        elif self._is_view_materialized(view_id):
+            backend = self._backend_for_view(view_id)
+            backend_id = self.backend_view_id(view_id)
+            backend.set_view_property(backend_id, name, value)
+            if name == "camera":
+                value = _normalize_camera(
+                    backend.get_view_property(backend_id, "camera")
+                )
+                view = deepcopy(self.state.views[view_id])
+                properties = dict(view.get("properties", {}))
+                property_state = dict(properties[name])
+                property_state["value"] = value
+                properties[name] = property_state
+                view["properties"] = properties
+                self.state.views = {**self.state.views, view_id: view}
+
+        if self._is_view_materialized(view_id):
+            self.frames.ensure(view_id)
         if notify:
             self._notify_render()
 
@@ -758,12 +779,21 @@ class RenderManager:
             view_id = self.active_view_id
         if view_id is None:
             return
+        if not self._is_view_materialized(view_id):
+            # Worker-side state-only views receive the resulting camera from rank
+            # 0 via the controller's replicated set_view_property call.
+            return
 
         backend = self._backend_for_view(view_id)
         backend_id = self.backend_view_id(view_id)
         backend.reset_camera(backend_id)
         camera = _normalize_camera(backend.get_view_property(backend_id, "camera"))
-        view = dict(self.state.views[view_id], camera=camera)
+        view = deepcopy(self.state.views[view_id])
+        properties = dict(view.get("properties", {}))
+        camera_state = dict(properties["camera"])
+        camera_state["value"] = camera
+        properties["camera"] = camera_state
+        view["properties"] = properties
         self.state.views = {**self.state.views, view_id: view}
         if notify:
             self._notify_render()
@@ -791,7 +821,16 @@ class RenderManager:
         """Apply transient client viewport dimensions without serializing them."""
         width = max(1, int(width))
         height = max(1, int(height))
-        self._render_sizes[view_id] = (width, height)
+        new_size = (width, height)
+        if self._render_sizes.get(view_id) != new_size:
+            self._render_size_revisions[view_id] = (
+                self._render_size_revisions.get(view_id, 0) + 1
+            )
+        self._render_sizes[view_id] = new_size
+        revision = self._render_size_revisions.get(view_id, 1)
+        if not self._is_view_materialized(view_id):
+            return
+        self.frames.set_render_size(view_id, width, height, revision=revision)
         backend = self._frame_backend_for_view(view_id)
         if backend.set_render_size(self.backend_view_id(view_id), width, height):
             self.frames.ensure(view_id)
@@ -804,10 +843,96 @@ class RenderManager:
             for view_id, size in self._render_sizes.items()
             if view_id in active_ids
         }
+        self._render_size_revisions = {
+            view_id: revision
+            for view_id, revision in self._render_size_revisions.items()
+            if view_id in active_ids
+        }
 
     # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
+
+    def _is_view_materialized(self, view_id: str) -> bool:
+        return view_id in self._view_backend_ids
+
+    def _should_materialize_view(self, view_id: str) -> bool:
+        if distributed.is_root or not distributed.enabled:
+            return True
+        return bool(self.get_view_property(view_id, "distributed"))
+
+    def _materialize_view(self, view_id: str) -> None:
+        if self._is_view_materialized(view_id):
+            return
+
+        value = self.state.views[view_id]
+        backend = self.backend_for_type(value["type"])
+        backend_id = view_id
+        backend.add_view(RenderView(id=backend_id, name=value["name"]))
+        self._view_backend_ids[view_id] = backend_id
+
+        # Apply cheap view properties first. Camera is applied after scene
+        # representations so clipping/bounds-dependent backend state is valid.
+        for property_name in VIEW_PROPERTY_NAMES:
+            if property_name in {"camera", "debug", "fps_limit", "distributed"}:
+                continue
+            backend.set_view_property(
+                backend_id,
+                property_name,
+                deepcopy(value["properties"][property_name]["value"]),
+            )
+
+        for representation in self.representations:
+            if view_id not in representation.view_ids:
+                continue
+            if not self.pipeline.has_valid_output(representation.node_id):
+                continue
+            node = self.pipeline.nodes[representation.node_id]
+            backend.add_representation(
+                representation,
+                RenderView(id=backend_id, name=value["name"]),
+                node.processor,
+            )
+
+        camera = deepcopy(value["properties"]["camera"]["value"])
+        if camera is not None:
+            backend.set_view_property(backend_id, "camera", camera)
+        camera = _normalize_camera(backend.get_view_property(backend_id, "camera"))
+        view = deepcopy(self.state.views[view_id])
+        view["properties"]["camera"]["value"] = camera
+        self.state.views = {**self.state.views, view_id: view}
+
+        render_size = self._render_sizes.get(view_id)
+        if render_size is not None:
+            self._frame_backend_for_view(view_id).set_render_size(
+                backend_id, *render_size
+            )
+
+        self.frames.set_debug(view_id, bool(self.get_view_property(view_id, "debug")))
+        self.frames.set_fps_limit(
+            view_id, float(self.get_view_property(view_id, "fps_limit"))
+        )
+        self.frames.set_distributed(
+            view_id, bool(self.get_view_property(view_id, "distributed"))
+        )
+        if render_size is not None:
+            self.frames.set_render_size(
+                view_id,
+                *render_size,
+                revision=self._render_size_revisions.get(view_id, 1),
+            )
+        self.frames.register_view(
+            view_id, self._frame_backend_for_view(view_id), backend_id
+        )
+
+    def _dematerialize_view(self, view_id: str) -> None:
+        if not self._is_view_materialized(view_id):
+            return
+        backend_id = self._view_backend_ids[view_id]
+        backend = self._backend_for_view(view_id)
+        self.frames.unregister_view(view_id)
+        backend.remove_view(backend_id)
+        self._view_backend_ids.pop(view_id, None)
 
     def _backend_view(self, view_id: str) -> RenderView:
         view = self.get_view(view_id)
@@ -828,6 +953,8 @@ class RenderManager:
             return
         node = self.pipeline.nodes[representation.node_id]
         for view_id in tuple(representation.view_ids):
+            if not self._is_view_materialized(view_id):
+                continue
             self._backend_for_view(view_id).update_representation(
                 representation, self._backend_view(view_id), node.processor
             )

@@ -63,7 +63,8 @@ def export_python_state(
 
         if value.get("type") in {"vtk", "mitsuba"}:
             for property_name in VIEW_PROPERTY_NAMES:
-                property_value = value.get(property_name)
+                property_state = value.get("properties", {}).get(property_name, {})
+                property_value = property_state.get("value")
                 if property_value is None:
                     continue
                 _emit_call(

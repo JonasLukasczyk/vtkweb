@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import math
-import os
-import tempfile
 import threading
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import vtk
-from vtk.util.numpy_support import vtk_to_numpy
+from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from vtkweb.rendering.base import RenderView, RenderingBackend, Representation
 
@@ -30,7 +28,7 @@ class MitsubaViewHandle:
     accumulated_spp: int = 0
     next_seed: int = 1
     render_revision: int = 0
-    accumulation_revision: int = -1
+    accumulation_key: tuple | None = None
     cached_scene: Any | None = None
     cached_scene_key: tuple | None = None
 
@@ -82,6 +80,15 @@ class MitsubaRenderingBackend(RenderingBackend):
         # between the Trame/server thread and the dedicated render worker.
         # Rendering and accumulation never hold this lock.
         self._state_lock = threading.RLock()
+
+        # Mitsuba/Dr.Jit rendering is serialized within one backend instance
+        # (and therefore within one MPI rank). Multiple views on the same rank
+        # must not execute Dr.Jit render work concurrently. Separate MPI ranks
+        # own separate backend instances and remain fully parallel.
+        #
+        # Keep this lock through Bitmap -> NumPy materialization as Dr.Jit may
+        # defer work until the rendered tensor is consumed.
+        self._render_lock = threading.RLock()
         self._views: dict[str, MitsubaViewHandle] = {}
         self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
 
@@ -219,13 +226,13 @@ class MitsubaRenderingBackend(RenderingBackend):
     def _clear_accumulation_worker(
         self,
         handle: MitsubaViewHandle,
-        revision: int,
+        render_key: tuple,
     ) -> None:
         """Reset progressive state. Called only by the dedicated render worker."""
         handle.accumulation = None
         handle.accumulated_spp = 0
         handle.next_seed = 1
-        handle.accumulation_revision = int(revision)
+        handle.accumulation_key = render_key
         handle.cached_scene = None
         handle.cached_scene_key = None
 
@@ -446,43 +453,48 @@ class MitsubaRenderingBackend(RenderingBackend):
                     else:
                         vertex_colors = colors
 
-        mesh = self.mi.Mesh(
-            f"vtkweb_{representation.id}_{kind}",
-            vertex_count=len(vertices),
-            face_count=len(faces),
-            has_vertex_normals=False,
-            has_vertex_texcoords=False,
-        )
-        params = self.mi.traverse(mesh)
-        params["vertex_positions"] = vertices.reshape(-1)
-        params["faces"] = faces.reshape(-1)
-        params.update()
-
-        try:
-            if vertex_colors is not None:
-                mesh.add_attribute(
-                    "vertex_color",
-                    3,
-                    np.asarray(vertex_colors, dtype=np.float32).reshape(-1),
-                )
-                reflectance = {
-                    "type": "mesh_attribute",
-                    "name": "vertex_color",
-                }
-            else:
-                color = _hex_to_rgb(representation.properties.get("color", "#d9d9d9"))
-                reflectance = {"type": "rgb", "value": list(color)}
-
-            mesh.set_bsdf(
-                self.mi.load_dict(
-                    {
-                        "type": "diffuse",
-                        "reflectance": reflectance,
-                    }
-                )
+        # Mesh construction/traversal and BSDF creation touch Mitsuba/Dr.Jit
+        # runtime state. Serialize those operations with rendering on this rank.
+        with self._render_lock:
+            mesh = self.mi.Mesh(
+                f"vtkweb_{representation.id}_{kind}",
+                vertex_count=len(vertices),
+                face_count=len(faces),
+                has_vertex_normals=False,
+                has_vertex_texcoords=False,
             )
-        except Exception as exc:
-            print(f"Mitsuba backend: could not set {kind} color: {exc}")
+            params = self.mi.traverse(mesh)
+            params["vertex_positions"] = vertices.reshape(-1)
+            params["faces"] = faces.reshape(-1)
+            params.update()
+
+            try:
+                if vertex_colors is not None:
+                    mesh.add_attribute(
+                        "vertex_color",
+                        3,
+                        np.asarray(vertex_colors, dtype=np.float32).reshape(-1),
+                    )
+                    reflectance = {
+                        "type": "mesh_attribute",
+                        "name": "vertex_color",
+                    }
+                else:
+                    color = _hex_to_rgb(
+                        representation.properties.get("color", "#d9d9d9")
+                    )
+                    reflectance = {"type": "rgb", "value": list(color)}
+
+                mesh.set_bsdf(
+                    self.mi.load_dict(
+                        {
+                            "type": "diffuse",
+                            "reflectance": reflectance,
+                        }
+                    )
+                )
+            except Exception as exc:
+                print(f"Mitsuba backend: could not set {kind} color: {exc}")
 
         bounds = polydata.GetBounds()
         return MitsubaRepresentationHandle(
@@ -499,14 +511,18 @@ class MitsubaRenderingBackend(RenderingBackend):
         self,
         view_id: str,
         snapshot: dict[str, Any],
-        revision: int,
+        render_key: tuple,
         *,
+        region: tuple[int, int, int, int],
+        full_size: tuple[int, int],
         spp: int = 1,
     ) -> np.ndarray:
-        """Render exactly the state snapshot captured for this worker pass."""
+        """Render one progressive sample for exactly one image-space tile."""
         handle = self._views[view_id]
         spp = max(1, int(spp))
         camera = snapshot["camera"]
+        x, y, width, height = map(int, region)
+        full_width, full_height = map(int, full_size)
 
         scene_dict: dict[str, Any] = {
             "type": "scene",
@@ -526,8 +542,15 @@ class MitsubaRenderingBackend(RenderingBackend):
                 ),
                 "film": {
                     "type": "hdrfilm",
-                    "width": snapshot["width"],
-                    "height": snapshot["height"],
+                    # Keep the full logical film size so camera rays match the
+                    # browser viewport, but ask Mitsuba to trace only this
+                    # rank's crop window. The rendered tensor is tile-sized.
+                    "width": full_width,
+                    "height": full_height,
+                    "crop_offset_x": x,
+                    "crop_offset_y": y,
+                    "crop_width": width,
+                    "crop_height": height,
                     "pixel_format": "rgba",
                 },
                 "sampler": {"type": "independent", "sample_count": spp},
@@ -550,17 +573,22 @@ class MitsubaRenderingBackend(RenderingBackend):
         for shape_index, (representation_id, mesh) in enumerate(snapshot["shapes"]):
             scene_dict[f"shape_{shape_index}_{representation_id}"] = mesh
 
-        # The revision is a complete scene key. Only the worker mutates the
-        # cached scene, so no synchronization is needed here.
-        if handle.cached_scene is None or handle.cached_scene_key != revision:
-            handle.cached_scene = self.mi.load_dict(scene_dict)
-            handle.cached_scene_key = revision
-        scene = handle.cached_scene
+        # Scene creation and render/materialization all touch Dr.Jit runtime
+        # state. Keep them serialized across Mitsuba views within this rank.
+        with self._render_lock:
+            if handle.cached_scene is None or handle.cached_scene_key != render_key:
+                handle.cached_scene = self.mi.load_dict(scene_dict)
+                handle.cached_scene_key = render_key
+            scene = handle.cached_scene
 
-        seed = handle.next_seed
-        handle.next_seed += 1
-        image = self.mi.render(scene, spp=spp, seed=seed)
-        rendered = np.array(self.mi.Bitmap(image), dtype=np.float32, copy=True)
+            seed = handle.next_seed
+            handle.next_seed += 1
+            image = self.mi.render(scene, spp=spp, seed=seed)
+            rendered = np.array(
+                self.mi.Bitmap(image),
+                dtype=np.float32,
+                copy=True,
+            )
 
         if rendered.shape[-1] >= 4:
             rgb = rendered[..., :3]
@@ -579,39 +607,59 @@ class MitsubaRenderingBackend(RenderingBackend):
         sample: np.ndarray,
         *,
         spp: int,
-        revision: int,
+        render_key: tuple,
     ) -> None:
-        """Accumulate one sample. Called only by the render worker."""
-        if handle.accumulation_revision != revision:
-            self._clear_accumulation_worker(handle, revision)
+        """Accumulate one tile sample. Called only by the render worker."""
+        if handle.accumulation_key != render_key:
+            self._clear_accumulation_worker(handle, render_key)
         if handle.accumulation is None or handle.accumulation.shape != sample.shape:
             handle.accumulation = np.zeros_like(sample, dtype=np.float32)
             handle.accumulated_spp = 0
-            handle.accumulation_revision = revision
+            handle.accumulation_key = render_key
         handle.accumulation += sample * float(spp)
         handle.accumulated_spp += int(spp)
 
     def encoded_frame(self, image: np.ndarray) -> bytes:
-        """Encode one linear RGB image as JPEG bytes for binary transport."""
+        """Encode a linear RGB image to JPEG entirely in memory.
+
+        Mitsuba performs the linear->sRGB/UInt8 conversion. VTK's JPEG writer
+        is then used in WriteToMemory mode, avoiding all temporary files and
+        introducing no additional image-encoding dependency.
+        """
         bitmap = self.mi.Bitmap(image).convert(
             self.mi.Bitmap.PixelFormat.RGB,
             self.mi.Struct.Type.UInt8,
             True,
         )
-        filename = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as stream:
-                filename = stream.name
-            bitmap.write(filename)
-            with open(filename, "rb") as stream:
-                payload = stream.read()
-        finally:
-            if filename is not None:
-                try:
-                    os.unlink(filename)
-                except FileNotFoundError:
-                    pass
-        return payload
+        rgb = np.asarray(bitmap, dtype=np.uint8)
+        if rgb.ndim != 3 or rgb.shape[2] < 3:
+            raise RuntimeError(f"Unexpected Mitsuba bitmap shape: {rgb.shape}")
+        rgb = np.ascontiguousarray(rgb[..., :3])
+        height, width, _ = rgb.shape
+
+        # VTK image coordinates have +Y upward whereas NumPy/Mitsuba image rows
+        # are top-to-bottom. Flip while importing so the encoded JPEG preserves
+        # the browser/image-space orientation.
+        vtk_pixels = np.ascontiguousarray(np.flipud(rgb).reshape(-1, 3))
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetDimensions(width, height, 1)
+        vtk_array = numpy_to_vtk(
+            vtk_pixels,
+            deep=True,
+            array_type=vtk.VTK_UNSIGNED_CHAR,
+        )
+        vtk_array.SetNumberOfComponents(3)
+        vtk_image.GetPointData().SetScalars(vtk_array)
+
+        writer = vtk.vtkJPEGWriter()
+        writer.SetInputData(vtk_image)
+        writer.SetQuality(90)
+        writer.WriteToMemoryOn()
+        writer.Write()
+        result = writer.GetResult()
+        if result is None or result.GetNumberOfValues() == 0:
+            raise RuntimeError("VTK JPEG writer produced an empty in-memory result")
+        return bytes(memoryview(result))
 
     def _encoded_accumulated_frame_worker(
         self,
@@ -622,32 +670,44 @@ class MitsubaRenderingBackend(RenderingBackend):
         averaged = handle.accumulation / float(handle.accumulated_spp)
         return self.encoded_frame(averaged)
 
-    def render_frame(self, view_id: str) -> bytes | None:
-        """Render, accumulate, and publish one snapshot revision.
-
-        A pass always completes for the state it copied at its start. If the
-        server changes the camera or scene while that pass is running, the pass
-        is still accumulated and returned for its original revision. The next
-        iteration observes the newer revision and clears the worker-owned
-        accumulator before rendering it. This prevents cross-camera ghosting
-        without discarding completed intermediate frames.
-        """
+    def render_frame(
+        self, view_id: str, *, region=None, full_size=None
+    ) -> bytes | None:
+        """Render and progressively accumulate one full frame or MPI tile."""
         handle = self._views.get(view_id)
         if handle is None:
             return None
 
         snapshot, revision = self._snapshot_render_state(view_id)
+        if full_size is None:
+            full_size = (snapshot["width"], snapshot["height"])
+        full_width, full_height = map(int, full_size)
+        if region is None:
+            region = (0, 0, full_width, full_height)
+        x, y, width, height = map(int, region)
+        region = (x, y, max(1, width), max(1, height))
+        full_size = (max(1, full_width), max(1, full_height))
 
-        # Accumulation ownership is entirely on this dedicated worker thread.
-        if handle.accumulation_revision != revision:
-            self._clear_accumulation_worker(handle, revision)
+        # Progressive state is specific not only to scene/camera revision but
+        # also to the crop window. This matters when toggling distributed mode
+        # without changing the logical view itself.
+        render_key = (revision, full_size, region)
+        if handle.accumulation_key != render_key:
+            self._clear_accumulation_worker(handle, render_key)
 
-        sample = self.render_pass(view_id, snapshot, revision, spp=1)
+        sample = self.render_pass(
+            view_id,
+            snapshot,
+            render_key,
+            region=region,
+            full_size=full_size,
+            spp=1,
+        )
         self._accumulate_pass_worker(
             handle,
             sample,
             spp=1,
-            revision=revision,
+            render_key=render_key,
         )
         return self._encoded_accumulated_frame_worker(handle)
 

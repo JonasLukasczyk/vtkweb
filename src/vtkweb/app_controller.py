@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from pathlib import Path
+from uuid import uuid4
 
 from vtkweb.catalog import AlgorithmCatalog
 from vtkweb.pipeline import PipelineGraph
@@ -11,6 +12,7 @@ from vtkweb.rendering import RenderManager
 from vtkweb.state import export_python_state, load_python_state
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
+from vtkweb.distributed import context as distributed
 
 
 def initialize_app_controller(
@@ -45,6 +47,8 @@ def initialize_app_controller(
         name: str | None = None,
         node_id: str | None = None,
     ) -> str:
+        node_id = node_id or uuid4().hex
+        distributed.replicate("create_node", class_name, name=name, node_id=node_id)
         descriptor = next(
             item for item in catalog.algorithms if item.class_name == class_name
         )
@@ -63,6 +67,13 @@ def initialize_app_controller(
         source_port: int = 0,
         target_port: int = 0,
     ) -> None:
+        distributed.replicate(
+            "connect_nodes",
+            source_node_id,
+            target_node_id,
+            source_port=int(source_port),
+            target_port=int(target_port),
+        )
         pipeline.connect(
             source_node_id,
             target_node_id,
@@ -77,6 +88,7 @@ def initialize_app_controller(
     ) -> None:
         if state.pipeline_executing:
             return
+        distributed.replicate("set_node_property", node_id, name, value)
         pipeline.set_property(
             node_id,
             name,
@@ -90,6 +102,7 @@ def initialize_app_controller(
     ) -> None:
         if state.pipeline_executing:
             return
+        distributed.replicate("set_node_input_array", node_id, int(index), value)
         pipeline.set_input_array(
             node_id,
             int(index),
@@ -104,6 +117,17 @@ def initialize_app_controller(
         camera_reset_mode: int = 0,
         representation_id: str | None = None,
     ) -> str:
+        representation_id = representation_id or uuid4().hex
+        view_ids = tuple(view_ids)
+        distributed.replicate(
+            "add_representation",
+            node_id,
+            int(output_port),
+            kind,
+            view_ids,
+            int(camera_reset_mode),
+            representation_id,
+        )
         return rendering.add_representation(
             node_id,
             output_port=int(output_port),
@@ -117,6 +141,9 @@ def initialize_app_controller(
         representation_id: str,
         view_id: str,
     ) -> None:
+        distributed.replicate(
+            "toggle_representation_in_view", representation_id, view_id
+        )
         if rendering.representation_in_view(
             representation_id,
             view_id,
@@ -138,6 +165,10 @@ def initialize_app_controller(
         view_id: str | None = None,
         **kwargs,
     ) -> str:
+        view_id = view_id or uuid4().hex
+        distributed.replicate(
+            "create_view", view_type, name=name, view_id=view_id, **kwargs
+        )
         return views.create_view(
             view_type,
             name=name,
@@ -146,6 +177,7 @@ def initialize_app_controller(
         )
 
     def switch_view_type(view_id: str, view_type: str) -> None:
+        distributed.replicate("switch_view_type", view_id, view_type)
         rendering.switch_view_type(view_id, view_type)
         request_render_sizes()
 
@@ -159,6 +191,7 @@ def initialize_app_controller(
         return view_id
 
     def remove_view(view_id: str) -> None:
+        distributed.replicate("remove_view", view_id)
         workspace.close_view_tile(view_id)
         views.remove_view(view_id)
 
@@ -202,6 +235,7 @@ def initialize_app_controller(
     def set_active_node(
         node_id: str,
     ) -> None:
+        distributed.replicate("set_active_node", node_id)
         pipeline.set_active_node(node_id)
         state.active_representation_output_port = 0
 
@@ -241,12 +275,23 @@ def initialize_app_controller(
         )
 
         for representation in representations:
-            if visible:
+            is_visible = view_id in representation.view_ids
+            if visible and is_visible:
+                distributed.replicate(
+                    "toggle_representation_in_view",
+                    representation.id,
+                    view_id,
+                )
                 rendering.unassign_representation(
                     representation.id,
                     view_id,
                 )
-            else:
+            elif not visible and not is_visible:
+                distributed.replicate(
+                    "toggle_representation_in_view",
+                    representation.id,
+                    view_id,
+                )
                 rendering.assign_representation(
                     representation.id,
                     view_id,
@@ -281,6 +326,7 @@ def initialize_app_controller(
     ) -> None:
         if node_id not in pipeline.nodes:
             return
+        distributed.replicate("delete_node", node_id)
 
         rendering.remove_node(node_id)
         pipeline.remove_node(node_id)
@@ -301,6 +347,7 @@ def initialize_app_controller(
 
     def clear_state() -> None:
         """Clear all reconstructable application and workspace state."""
+        distributed.replicate("clear_state")
 
         for representation in tuple(rendering.representations):
             rendering.remove_representation(representation.id)
@@ -334,12 +381,11 @@ def initialize_app_controller(
         rendering.prune_render_sizes()
         request_render_sizes()
 
-    def execute_pipeline() -> None:
+    def _start_execution_plan(node_order) -> None:
         nonlocal execution_task
         if execution_task is not None and not execution_task.done():
             return
-
-        execution_task = asyncio.create_task(execution.execute())
+        execution_task = asyncio.create_task(execution.execute_plan(tuple(node_order)))
 
         def consume_result(task: asyncio.Task) -> None:
             nonlocal execution_task
@@ -350,6 +396,13 @@ def initialize_app_controller(
                 print(f"Pipeline execution failed: {exc}")
 
         execution_task.add_done_callback(consume_result)
+
+    def execute_pipeline() -> None:
+        if execution_task is not None and not execution_task.done():
+            return
+        node_order = execution.execution_plan()
+        distributed.replicate("execute_pipeline", tuple(node_order))
+        _start_execution_plan(node_order)
 
     def abort_pipeline() -> None:
         execution.abort()
@@ -388,6 +441,96 @@ def initialize_app_controller(
         )
         return str(path)
 
+    # MPI-replicated rendering mutations.  These wrappers keep MPI details out
+    # of the rendering/public APIs and preserve the same call path on workers.
+    def remove_representation(representation_id: str) -> None:
+        distributed.replicate("remove_representation", representation_id)
+        rendering.remove_representation(representation_id)
+
+    def set_representation_kind(representation_id: str, kind: str) -> None:
+        distributed.replicate("set_representation_kind", representation_id, kind)
+        rendering.set_representation_kind(representation_id, kind)
+
+    def set_representation_property(representation_id: str, name: str, value) -> None:
+        distributed.replicate(
+            "set_representation_property", representation_id, name, value
+        )
+        rendering.set_representation_property(representation_id, name, value)
+
+    def set_active_view(view_id: str) -> None:
+        distributed.replicate("set_active_view", view_id)
+        rendering.set_active_view(view_id)
+
+    def set_view_property(view_id: str, name: str, value) -> None:
+        distributed.replicate("set_view_property", view_id, name, value)
+        rendering.set_view_property(view_id, name, value)
+
+    def reset_camera(view_id: str | None = None) -> None:
+        if view_id is None:
+            view_id = rendering.active_view_id
+        if view_id is None:
+            return
+        # Reset on rank 0, then replicate the resulting renderer-agnostic camera
+        # value. State-only worker views have no backend to compute bounds from.
+        if distributed.is_root:
+            rendering.reset_camera(view_id)
+            distributed.replicate(
+                "set_view_property",
+                view_id,
+                "camera",
+                rendering.get_view_property(view_id, "camera"),
+            )
+        else:
+            rendering.reset_camera(view_id)
+
+    def interact_view_camera(view_id, mode, dx, dy, viewport_height) -> None:
+        distributed.replicate(
+            "interact_view_camera", view_id, mode, dx, dy, viewport_height
+        )
+        rendering.interact_view_camera(view_id, mode, dx, dy, viewport_height)
+
+    def set_render_size(view_id: str, width: int, height: int) -> None:
+        distributed.replicate("set_render_size", view_id, int(width), int(height))
+        rendering.set_render_size(view_id, width, height)
+
+    def set_tf_data(array_name, value) -> None:
+        distributed.replicate("set_tf_data", array_name, value)
+        rendering.transfer_functions.set_data(array_name, value)
+
+    def apply_tf_preset(array_name, preset_name) -> None:
+        distributed.replicate("apply_tf_preset", array_name, preset_name)
+        rendering.transfer_functions.apply_preset(array_name, preset_name)
+
+    def set_tf_range(array_name, minimum, maximum) -> None:
+        distributed.replicate("set_tf_range", array_name, minimum, maximum)
+        rendering.transfer_functions.set_range(array_name, minimum, maximum)
+
+    def rescale_tf(array_name) -> None:
+        distributed.replicate("rescale_tf", array_name)
+        rendering.transfer_functions.rescale(array_name)
+
+    def set_tf_control_point_component(
+        array_name, point_index, component_index, value
+    ) -> None:
+        distributed.replicate(
+            "set_tf_control_point_component",
+            array_name,
+            point_index,
+            component_index,
+            value,
+        )
+        rendering.transfer_functions.set_control_point_component(
+            array_name, point_index, component_index, value
+        )
+
+    def add_tf_control_point(array_name) -> None:
+        distributed.replicate("add_tf_control_point", array_name)
+        rendering.transfer_functions.add_control_point(array_name)
+
+    def remove_tf_control_point(array_name, point_index) -> None:
+        distributed.replicate("remove_tf_control_point", array_name, point_index)
+        rendering.transfer_functions.remove_control_point(array_name, point_index)
+
     # -------------------------------------------------------------------------
     # Controller
     # -------------------------------------------------------------------------
@@ -397,19 +540,17 @@ def initialize_app_controller(
     ctrl.set_node_property = set_node_property
     ctrl.set_node_input_array = set_node_input_array
     ctrl.add_representation = add_representation
-    ctrl.remove_representation = rendering.remove_representation
-    ctrl.set_representation_kind = rendering.set_representation_kind
+    ctrl.remove_representation = remove_representation
+    ctrl.set_representation_kind = set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
-    ctrl.set_representation_property = rendering.set_representation_property
-    ctrl.set_tf_data = rendering.transfer_functions.set_data
-    ctrl.apply_tf_preset = rendering.transfer_functions.apply_preset
-    ctrl.set_tf_range = rendering.transfer_functions.set_range
-    ctrl.rescale_tf = rendering.transfer_functions.rescale
-    ctrl.set_tf_control_point_component = (
-        rendering.transfer_functions.set_control_point_component
-    )
-    ctrl.add_tf_control_point = rendering.transfer_functions.add_control_point
-    ctrl.remove_tf_control_point = rendering.transfer_functions.remove_control_point
+    ctrl.set_representation_property = set_representation_property
+    ctrl.set_tf_data = set_tf_data
+    ctrl.apply_tf_preset = apply_tf_preset
+    ctrl.set_tf_range = set_tf_range
+    ctrl.rescale_tf = rescale_tf
+    ctrl.set_tf_control_point_component = set_tf_control_point_component
+    ctrl.add_tf_control_point = add_tf_control_point
+    ctrl.remove_tf_control_point = remove_tf_control_point
     ctrl.create_view = create_view
     ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
@@ -418,9 +559,9 @@ def initialize_app_controller(
     ctrl.split_container = split_container
     ctrl.assign_view_to_container = assign_view_to_container
     ctrl.split_view_container = split_view_container
-    ctrl.set_active_view = rendering.set_active_view
-    ctrl.set_view_property = rendering.set_view_property
-    ctrl.reset_camera = rendering.reset_camera
+    ctrl.set_active_view = set_active_view
+    ctrl.set_view_property = set_view_property
+    ctrl.reset_camera = reset_camera
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
     ctrl.insert_node = insert_node
@@ -437,9 +578,40 @@ def initialize_app_controller(
 
     # Client-to-server render/workspace RPCs. UI code emits these events but
     # application/controller ownership stays here.
-    ctrl.trigger("interact_view_camera")(rendering.interact_view_camera)
-    ctrl.trigger("set_render_size")(rendering.set_render_size)
+    ctrl.trigger("interact_view_camera")(interact_view_camera)
+    ctrl.trigger("set_render_size")(set_render_size)
     ctrl.trigger("set_split_ratio")(set_split_ratio)
+
+    distributed.register("create_node", create_node)
+    distributed.register("connect_nodes", connect_nodes)
+    distributed.register("set_node_property", set_node_property)
+    distributed.register("set_node_input_array", set_node_input_array)
+    distributed.register("add_representation", add_representation)
+    distributed.register("remove_representation", remove_representation)
+    distributed.register("set_representation_kind", set_representation_kind)
+    distributed.register("set_representation_property", set_representation_property)
+    distributed.register("toggle_representation_in_view", toggle_representation_in_view)
+    distributed.register("create_view", create_view)
+    distributed.register("remove_view", remove_view)
+    distributed.register("switch_view_type", switch_view_type)
+    distributed.register("set_active_view", set_active_view)
+    distributed.register("set_view_property", set_view_property)
+    distributed.register("reset_camera", reset_camera)
+    distributed.register("interact_view_camera", interact_view_camera)
+    distributed.register("set_render_size", set_render_size)
+    distributed.register("set_tf_data", set_tf_data)
+    distributed.register("apply_tf_preset", apply_tf_preset)
+    distributed.register("set_tf_range", set_tf_range)
+    distributed.register("rescale_tf", rescale_tf)
+    distributed.register(
+        "set_tf_control_point_component", set_tf_control_point_component
+    )
+    distributed.register("add_tf_control_point", add_tf_control_point)
+    distributed.register("remove_tf_control_point", remove_tf_control_point)
+    distributed.register("set_active_node", set_active_node)
+    distributed.register("delete_node", delete_node)
+    distributed.register("clear_state", clear_state)
+    distributed.register("execute_pipeline", _start_execution_plan)
 
     server.trigger("delete_active_node")(delete_active_node)
     server.trigger("execute_pipeline")(execute_pipeline)

@@ -6,55 +6,81 @@ from trame.widgets import html
 def build_view_tab(
     ctrl,
 ) -> None:
-    with html.Label(
-        classes="vtkweb-color-box",
+    with html.Div(
+        v_for=("property in Object.values(views[active_view_id]?.properties || {})"),
+        key=("property.name",),
+        classes="vtkweb-view-property",
     ):
-        html.Span(
-            "Background",
-            classes="vtkweb-control-label",
-        )
+        with html.Label(
+            v_if="property.ui !== false && property.kind === 'color'",
+            classes="vtkweb-color-box mt-1",
+        ):
+            html.Span(
+                "{{ property.label }}",
+                classes="vtkweb-control-label",
+            )
+            html.Input(
+                type="color",
+                value=("property.value",),
+                input=(
+                    ctrl.set_view_property,
+                    "[active_view_id,property.name,$event.target.value]",
+                ),
+            )
 
-        html.Input(
-            type="color",
-            value=("views[active_view_id]?.background_color || '#1a1a1a'",),
-            input=(
-                ctrl.set_view_property,
-                "[active_view_id,'background_color',$event.target.value]",
+        with html.Label(
+            v_if=(
+                "property.ui !== false && "
+                "(property.kind === 'int' || property.kind === 'float')"
             ),
-        )
+            classes="vtkweb-input-box mt-1",
+        ):
+            html.Span(
+                "{{ property.label }}",
+                classes="vtkweb-control-label",
+            )
+            html.Input(
+                type="number",
+                min=("property.min ?? null",),
+                max=("property.max ?? null",),
+                step=("property.step ?? (property.kind === 'int' ? 1 : 'any')",),
+                value=("property.value",),
+                change=(
+                    ctrl.set_view_property,
+                    "[active_view_id,property.name,Number($event.target.value)]",
+                ),
+            )
 
-    with html.Label(
-        classes="vtkweb-color-box mt-1",
-    ):
-        html.Span(
-            "World Ambient Color",
-            classes="vtkweb-control-label",
-        )
+        with html.Label(
+            v_if="property.ui !== false && property.kind === 'bool'",
+            classes="vtkweb-bool-row mt-1",
+        ):
+            html.Span(
+                "{{ property.label }}",
+                classes="vtkweb-control-label",
+            )
+            html.Input(
+                type="checkbox",
+                checked=("Boolean(property.value)",),
+                change=(
+                    ctrl.set_view_property,
+                    "[active_view_id,property.name,$event.target.checked]",
+                ),
+            )
 
-        html.Input(
-            type="color",
-            value=("views[active_view_id]?.world_ambient_color || '#ffffff'",),
-            input=(
-                ctrl.set_view_property,
-                "[active_view_id,'world_ambient_color',$event.target.value]",
-            ),
-        )
-
-    with html.Label(
-        classes="vtkweb-input-box mt-1",
-    ):
-        html.Span(
-            "Ambient Intensity",
-            classes="vtkweb-control-label",
-        )
-
-        html.Input(
-            type="number",
-            min="0",
-            step="0.1",
-            value=("views[active_view_id]?.world_ambient_intensity ?? 1.0",),
-            change=(
-                ctrl.set_view_property,
-                "[active_view_id,'world_ambient_intensity',Number($event.target.value)]",
-            ),
-        )
+        with html.Label(
+            v_if="property.ui !== false && property.kind === 'str'",
+            classes="vtkweb-input-box mt-1",
+        ):
+            html.Span(
+                "{{ property.label }}",
+                classes="vtkweb-control-label",
+            )
+            html.Input(
+                type="text",
+                value=("property.value ?? ''",),
+                change=(
+                    ctrl.set_view_property,
+                    "[active_view_id,property.name,$event.target.value]",
+                ),
+            )

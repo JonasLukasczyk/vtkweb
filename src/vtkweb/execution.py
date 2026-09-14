@@ -7,6 +7,7 @@ from time import perf_counter
 import vtk
 
 from vtkweb.pipeline import PipelineGraph
+from vtkweb.distributed import context as distributed
 
 
 class PipelineExecutionManager:
@@ -27,6 +28,109 @@ class PipelineExecutionManager:
     def abort(self) -> None:
         if self._running:
             self._abort_requested = True
+
+    def execution_plan(self) -> list[str]:
+        """Compute the exact deterministic node order for one explicit run."""
+        if not self.pipeline.modified_node_ids():
+            active = self.pipeline.active_node_id
+            if active is None:
+                return []
+            self.pipeline.mark_modified(active, include_downstream=False)
+
+        order = self.pipeline.topological_order()
+        scheduled: set[str] = set()
+        for node_id in order:
+            if self.pipeline.execution_state(node_id) == "modified":
+                scheduled.update(self.pipeline.downstream_subgraph(node_id))
+        return [node_id for node_id in order if node_id in scheduled]
+
+    async def execute_plan(self, node_order) -> None:
+        """Execute exactly the root-authored order on every rank.
+
+        The collective completion check doubles as the synchronization point
+        between nodes, which is compatible with future MPI-aware algorithms.
+        """
+        if self._running:
+            return
+        node_order = list(node_order)
+        self._running = True
+        self._abort_requested = False
+        self.state.pipeline_executing = True
+        self.pipeline.set_execution_states(node_order, "queued")
+        self._flush_state()
+
+        try:
+            for node_id in node_order:
+                if self._abort_requested:
+                    self._fail_all_queued()
+                    return
+                if node_id not in self.pipeline.nodes:
+                    local_ok = False
+                    errors = [f"missing node {node_id}"]
+                else:
+                    self.pipeline.set_execution_state(node_id, "running")
+                    self._flush_state()
+                    started_at = datetime.now().astimezone()
+                    started_perf = perf_counter()
+                    modification_version = self.pipeline.modification_version(node_id)
+                    errors: list[str] = []
+                    processor = self.pipeline.processor(node_id)
+
+                    def on_error(_obj, _event, message=None):
+                        errors.append(str(message or "VTK execution error"))
+
+                    observer_id = processor.AddObserver(
+                        vtk.vtkCommand.ErrorEvent, on_error
+                    )
+                    try:
+                        self._resolve_inputs(node_id)
+                        await asyncio.to_thread(processor.Update)
+                    except Exception as exc:
+                        errors.append(str(exc))
+                    finally:
+                        processor.RemoveObserver(observer_id)
+                    local_ok = not errors
+
+                all_ok, distributed_errors = distributed.execution_success(
+                    local_ok, "; ".join(errors) if errors else None
+                )
+                if not all_ok:
+                    if distributed.is_root and distributed_errors:
+                        print(
+                            f"[execution] distributed failure at {self._node_label(node_id)}: "
+                            + " | ".join(distributed_errors),
+                            flush=True,
+                        )
+                    if node_id in self.pipeline.nodes:
+                        self.pipeline.set_execution_state(node_id, "failed")
+                    self._fail_all_queued()
+                    return
+
+                elapsed = perf_counter() - started_perf
+                ended_at = datetime.now().astimezone()
+                if self.pipeline.modification_version(node_id) != modification_version:
+                    self.pipeline.set_execution_state(node_id, "modified")
+                else:
+                    self.pipeline.set_execution_state(node_id, "success")
+
+                final_state = self.pipeline.execution_state(node_id)
+                print(
+                    f"[execution rank {distributed.rank}] END {self._node_label(node_id)} "
+                    f"at {ended_at.isoformat(timespec='milliseconds')} "
+                    f"after {elapsed:.3f}s -> {final_state}",
+                    flush=True,
+                )
+                if final_state == "success":
+                    self.pipeline.bind_downstream_inputs(node_id)
+                    self.rendering.discover_transfer_functions(node_id)
+                    self.rendering.ensure_output_representations(node_id)
+                self.rendering.refresh_node(node_id)
+                self._flush_state()
+        finally:
+            self._running = False
+            self._abort_requested = False
+            self.state.pipeline_executing = False
+            self._flush_state()
 
     async def execute(self) -> None:
         if self._running:

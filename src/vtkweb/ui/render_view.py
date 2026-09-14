@@ -25,12 +25,15 @@ WORKSPACE_STYLE = """
 
 .vtkweb-workspace-tile {
     pointer-events: none;
-    border: 1px solid rgba(128, 128, 128, 0.2);
+    /* Keep geometry identical between active and inactive views. The remote
+       view fills the tile's padding box, so changing border width would
+       change the ResizeObserver dimensions and trigger a render resize. */
+    border: 2px solid transparent;
     z-index: 20;
 }
 
 .vtkweb-workspace-tile-active {
-    border: 2px solid #2196f3;
+    border-color: #2196f3;
     border-radius: 6px;
     box-shadow: inset 0 0 0 1px rgba(33, 150, 243, 0.25);
 }
@@ -217,6 +220,7 @@ def build_render_view(
 
     window.__vtkwebRemoteFrameStats = new Map();
     window.__vtkwebRemoteLatestFrame = new Map();
+    window.__vtkwebRemoteSizeRevision = new Map();
 
     const updateRemoteFps = () => {
         const now = performance.now();
@@ -253,7 +257,9 @@ def build_render_view(
         const timer = window.setTimeout(() => {
             window.__vtkwebRemoteResizeTimers.delete(viewId);
             const sender = window.__vtkwebSendRemoteResize;
-            if (typeof sender === 'function') sender(viewId, width, height);
+            if (typeof sender === 'function') {
+                sender(viewId, width, height);
+            }
         }, 150);
         window.__vtkwebRemoteResizeTimers.set(viewId, timer);
     };
@@ -279,8 +285,13 @@ def build_render_view(
             const canvas = element.querySelector('canvas[id^="vtkweb-remote-canvas-"]');
             if (canvas) {
                 const viewId = canvas.id.substring('vtkweb-remote-canvas-'.length);
-                window.__vtkwebRemoteLatestFrame.delete(viewId);
+                for (const key of window.__vtkwebRemoteLatestFrame.keys()) {
+                    if (key === viewId || key.startsWith(viewId + ':')) {
+                        window.__vtkwebRemoteLatestFrame.delete(key);
+                    }
+                }
                 window.__vtkwebRemoteFrameStats.delete(viewId);
+                window.__vtkwebRemoteSizeRevision.delete(viewId);
             }
             remoteResizeObserver.observe(element);
             reportRemoteSize(element);
@@ -299,69 +310,194 @@ def build_render_view(
     frameSocket.binaryType = 'arraybuffer';
     window.__vtkwebRemoteFrameSocket = frameSocket;
 
-    frameSocket.onmessage = async (event) => {
-        if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 4) return;
+    const sendFrameCredit = () => {
+        if (frameSocket.readyState === WebSocket.OPEN) {
+            frameSocket.send(JSON.stringify({ type: 'ready' }));
+        }
+    };
 
-        const bytes = new Uint8Array(event.data);
-        const view = new DataView(event.data);
-        const headerLength = view.getUint32(0, false);
-        if (headerLength < 2 || 4 + headerLength > bytes.byteLength) return;
+    frameSocket.onopen = () => {
+        // One outstanding credit is enough. If no frame is currently cached,
+        // rank 0 keeps this credit until a tile changes.
+        sendFrameCredit();
+    };
+
+    const decodeRemoteTile = async (packetBytes) => {
+        if (!(packetBytes instanceof Uint8Array) || packetBytes.byteLength < 4) return null;
+        const packetView = new DataView(
+            packetBytes.buffer,
+            packetBytes.byteOffset,
+            packetBytes.byteLength,
+        );
+        const headerLength = packetView.getUint32(0, false);
+        if (headerLength < 2 || 4 + headerLength > packetBytes.byteLength) return null;
 
         let header;
         try {
-            header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + headerLength)));
+            header = JSON.parse(
+                new TextDecoder().decode(packetBytes.subarray(4, 4 + headerLength))
+            );
         } catch (_error) {
-            return;
+            return null;
         }
 
         const viewId = header.view_id;
-        if (!viewId) return;
-
-        let stats = window.__vtkwebRemoteFrameStats.get(viewId);
-        if (!stats) {
-            stats = { framesSinceSample: 0, lastSampleTime: performance.now() };
-            window.__vtkwebRemoteFrameStats.set(viewId, stats);
-        }
-        stats.framesSinceSample += 1;
+        if (!viewId) return null;
 
         const generation = Number(header.generation || 0);
         const sequence = Number(header.sequence || 0);
-        const previous = window.__vtkwebRemoteLatestFrame.get(viewId);
+        const sizeRevision = Number(header.size_revision || 0);
+        const tileId = Number(header.tile_id || 0);
+        const frameKey = viewId + ':' + tileId;
+        const previous = window.__vtkwebRemoteLatestFrame.get(frameKey);
         if (previous && (
             generation < previous.generation ||
-            (generation === previous.generation && sequence <= previous.sequence)
-        )) return;
-        window.__vtkwebRemoteLatestFrame.set(viewId, { generation, sequence });
+            (generation === previous.generation && sizeRevision < previous.sizeRevision) ||
+            (generation === previous.generation &&
+             sizeRevision === previous.sizeRevision &&
+             sequence <= previous.sequence)
+        )) return null;
 
-        const imageBytes = bytes.slice(4 + headerLength);
+        const imageBytes = packetBytes.slice(4 + headerLength);
         const blob = new Blob([imageBytes], { type: header.mime_type || 'image/jpeg' });
 
         let bitmap;
         try {
             bitmap = await createImageBitmap(blob);
         } catch (_error) {
-            return;
+            return null;
         }
 
-        const latest = window.__vtkwebRemoteLatestFrame.get(viewId);
-        if (!latest || latest.generation !== generation || latest.sequence !== sequence) {
+        // Commit freshness only after the encoded image decoded successfully.
+        window.__vtkwebRemoteLatestFrame.set(
+            frameKey,
+            { generation, sequence, sizeRevision },
+        );
+        return { header, bitmap, viewId, tileId };
+    };
+
+    const drawRemoteBatch = (tiles) => {
+        const touchedViews = new Set();
+
+        // A batch may contain late tiles from a previous framebuffer size. For
+        // each view, choose the newest size revision represented in this batch
+        // (or already displayed) and never compose older revisions with it.
+        const targetRevision = new Map(window.__vtkwebRemoteSizeRevision);
+        for (const tile of tiles) {
+            if (!tile) continue;
+            const revision = Number(tile.header.size_revision || 0);
+            const previous = Number(targetRevision.get(tile.viewId) || 0);
+            if (revision > previous) targetRevision.set(tile.viewId, revision);
+        }
+
+        for (const tile of tiles) {
+            if (!tile) continue;
+            const { header, bitmap, viewId, tileId } = tile;
+            const canvas = document.getElementById('vtkweb-remote-canvas-' + viewId);
+            if (!canvas) {
+                bitmap.close();
+                continue;
+            }
+
+            const region = Array.isArray(header.region) ? header.region : null;
+            const fullSize = Array.isArray(header.full_size) ? header.full_size : null;
+            const targetWidth = fullSize ? Number(fullSize[0]) : bitmap.width;
+            const targetHeight = fullSize ? Number(fullSize[1]) : bitmap.height;
+            const sizeRevision = Number(header.size_revision || 0);
+            const newestRevision = Number(targetRevision.get(viewId) || 0);
+            if (sizeRevision < newestRevision) {
+                bitmap.close();
+                continue;
+            }
+
+            const displayedRevision = Number(
+                window.__vtkwebRemoteSizeRevision.get(viewId) || 0
+            );
+            if (
+                sizeRevision > displayedRevision ||
+                canvas.width !== targetWidth ||
+                canvas.height !== targetHeight
+            ) {
+                canvas.width = targetWidth;
+                canvas.height = targetHeight;
+                window.__vtkwebRemoteSizeRevision.set(viewId, sizeRevision);
+            }
+
+            const context = canvas.getContext('2d', { alpha: false });
+            const x = region ? Number(region[0]) : 0;
+            const y = region ? Number(region[1]) : 0;
+            context.drawImage(bitmap, x, y);
+
+            if (header.debug && region) {
+                const colors = [
+                    '#ff3b30', '#34c759', '#007aff', '#ffcc00',
+                    '#af52de', '#00c7be', '#ff9500', '#ff2d55',
+                ];
+                const lineWidth = 2;
+                const inset = lineWidth / 2;
+                const width = Number(region[2]);
+                const height = Number(region[3]);
+                context.save();
+                context.strokeStyle = colors[tileId % colors.length];
+                context.lineWidth = lineWidth;
+                context.strokeRect(
+                    x + inset, y + inset,
+                    Math.max(0, width - lineWidth),
+                    Math.max(0, height - lineWidth),
+                );
+                context.restore();
+            }
+
             bitmap.close();
-            return;
+            touchedViews.add(viewId);
         }
 
-        const canvas = document.getElementById('vtkweb-remote-canvas-' + viewId);
-        if (!canvas) {
-            bitmap.close();
-            return;
+        // FPS measures browser paint cadence rather than tile-message rate.
+        const now = performance.now();
+        for (const viewId of touchedViews) {
+            let stats = window.__vtkwebRemoteFrameStats.get(viewId);
+            if (!stats) {
+                stats = { framesSinceSample: 0, lastSampleTime: now };
+                window.__vtkwebRemoteFrameStats.set(viewId, stats);
+            }
+            stats.framesSinceSample += 1;
+        }
+    };
+
+    frameSocket.onmessage = async (event) => {
+        if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 8) return;
+
+        const bytes = new Uint8Array(event.data);
+        if (
+            bytes[0] !== 0x56 || bytes[1] !== 0x54 ||
+            bytes[2] !== 0x42 || bytes[3] !== 0x31
+        ) return; // "VTB1"
+
+        const batchView = new DataView(event.data);
+        const count = batchView.getUint32(4, false);
+        let offset = 8;
+        const packets = [];
+
+        for (let index = 0; index < count; index += 1) {
+            if (offset + 4 > bytes.byteLength) break;
+            const packetLength = batchView.getUint32(offset, false);
+            offset += 4;
+            if (packetLength < 4 || offset + packetLength > bytes.byteLength) break;
+            packets.push(bytes.slice(offset, offset + packetLength));
+            offset += packetLength;
         }
 
-        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-            canvas.width = bitmap.width;
-            canvas.height = bitmap.height;
-        }
-        const context = canvas.getContext('2d', { alpha: false });
-        context.drawImage(bitmap, 0, 0);
-        bitmap.close();
+        const decoded = await Promise.all(packets.map(decodeRemoteTile));
+        await new Promise((resolve) => {
+            window.requestAnimationFrame(() => {
+                drawRemoteBatch(decoded);
+                resolve();
+            });
+        });
+
+        // Return exactly one credit after this batch is painted. Rank 0 then
+        // sends only cache entries updated since the batch we just consumed.
+        sendFrameCredit();
     };
 })();
         """

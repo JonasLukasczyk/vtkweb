@@ -13,18 +13,68 @@ REPRESENTATION_KINDS = (
     "volume",
 )
 
-VIEW_PROPERTY_NAMES = (
-    "background_color",
-    "world_ambient_color",
-    "world_ambient_intensity",
-    "camera",
-)
-
-DEFAULT_VIEW_PROPERTIES = {
-    "background_color": "#1a1a1a",
-    "world_ambient_color": "#ffffff",
-    "world_ambient_intensity": 1.0,
+VIEW_PROPERTY_SPECS = {
+    "background_color": {
+        "name": "background_color",
+        "label": "Background",
+        "kind": "color",
+        "default": "#1a1a1a",
+    },
+    "world_ambient_color": {
+        "name": "world_ambient_color",
+        "label": "World Ambient Color",
+        "kind": "color",
+        "default": "#ffffff",
+    },
+    "world_ambient_intensity": {
+        "name": "world_ambient_intensity",
+        "label": "Ambient Intensity",
+        "kind": "float",
+        "default": 1.0,
+        "min": 0.0,
+        "step": 0.1,
+    },
+    "camera": {
+        "name": "camera",
+        "label": "Camera",
+        "kind": "camera",
+        "default": None,
+        "ui": False,
+    },
+    "debug": {
+        "name": "debug",
+        "label": "Debug",
+        "kind": "bool",
+        "default": False,
+    },
+    "fps_limit": {
+        "name": "fps_limit",
+        "label": "FPS Limit",
+        "kind": "int",
+        "default": 30,
+        "min": 1,
+        "step": 1,
+    },
+    "distributed": {
+        "name": "distributed",
+        "label": "Distributed Rendering",
+        "kind": "bool",
+        "default": False,
+    },
 }
+
+VIEW_PROPERTY_NAMES = tuple(VIEW_PROPERTY_SPECS)
+DEFAULT_VIEW_PROPERTIES = {
+    name: spec["default"] for name, spec in VIEW_PROPERTY_SPECS.items()
+}
+
+
+def view_property_state(name: str, value: Any) -> dict[str, Any]:
+    """Return serializable metadata and value for one view property."""
+    spec = dict(VIEW_PROPERTY_SPECS[name])
+    spec.pop("default", None)
+    spec["value"] = value
+    return spec
 
 
 @dataclass
@@ -87,4 +137,6 @@ class FrameRenderingBackend(Protocol):
 
     def set_render_size(self, view_id: str, width: int, height: int) -> bool: ...
     def has_renderable_scene(self, view_id: str) -> bool: ...
-    def render_frame(self, view_id: str) -> bytes | None: ...
+    def render_frame(
+        self, view_id: str, *, region=None, full_size=None
+    ) -> bytes | None: ...
