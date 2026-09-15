@@ -5,15 +5,33 @@ import shlex
 
 import graphviz
 
+# monkey patch trame_flow
+from trame.widgets.flow import NodeEditor
 from trame.widgets import flow, html
 
+
+def _fit_view(self, **options):
+    self.server.js_call(
+        self._NodeEditor__ref,
+        "fitView",
+        options or None,
+    )
+
+
+NodeEditor.fit_view = _fit_view
+#####################################################
 
 NODE_HEIGHT = 32.0
 NODE_MIN_WIDTH = 80.0
 NODE_HORIZONTAL_PADDING = 12.0
 NODE_BORDER_WIDTH = 2.0
 NODE_CHAR_WIDTH = 8.5
+
 GRAPHVIZ_SCALE = 40.0
+
+LAYOUT_DURATION = 0.2
+FIT_DURATION_MS = 300
+FIT_PADDING = 0.15
 
 
 PIPELINE_VIEW_STYLE = """
@@ -21,7 +39,7 @@ PIPELINE_VIEW_STYLE = """
     position: relative;
 
     display: inline-flex;
-    align-items: end;
+    align-items: center;
     justify-content: center;
 
     height: 32px;
@@ -30,7 +48,7 @@ PIPELINE_VIEW_STYLE = """
     box-sizing: border-box;
     overflow: visible !important;
 
-    background: #313844;
+    background: #ff0000;
     border: 2px solid transparent;
     border-radius: 4px;
 
@@ -46,11 +64,11 @@ PIPELINE_VIEW_STYLE = """
 }
 
 .vtkweb-pipeline-node-modified {
-    background: #313844;
+    background: #1c4673;
 }
 
 .vtkweb-pipeline-node-queued {
-    background: #536273;
+    background: #a24c00;
 }
 
 .vtkweb-pipeline-node-running {
@@ -72,12 +90,10 @@ PIPELINE_VIEW_STYLE = """
 
 .vtkweb-pipeline-node-failed {
     background: #6b3942;
-    color: #fff5f6;
 }
 
 .vtkweb-pipeline-node-success {
-    background: #3f554d;
-    color: #f4faf7;
+    background: #313844;
 }
 
 @keyframes vtkweb-running-gradient {
@@ -112,12 +128,12 @@ PIPELINE_VIEW_STYLE = """
 }
 
 .vue-flow__handle.vtkweb-input-handle {
-    top: -1px !important;
+    top: -2px !important;
     background: #777 !important;
 }
 
 .vue-flow__handle.vtkweb-output-handle {
-    bottom: -1px !important;
+    bottom: -2px !important;
 }
 
 .vue-flow__handle.vtkweb-output-visible {
@@ -153,12 +169,15 @@ def build_pipeline_view(state, ctrl):
             "data": {
                 "input_port_count": int(node["input_port_count"]),
                 "output_port_count": int(node["output_port_count"]),
-                "execution_state": node.get("execution_state", "modified"),
+                "execution_state": node.get(
+                    "execution_state",
+                    "modified",
+                ),
                 "width": node_width(node["name"]),
             },
             "position": {
                 "x": 100,
-                "y": 80 + index * 140,
+                "y": 80 + index * 100,
             },
         }
 
@@ -249,6 +268,7 @@ def build_pipeline_view(state, ctrl):
             node_id = fields[1]
 
             center_x = float(fields[2]) * GRAPHVIZ_SCALE
+
             center_y = (graph_height - float(fields[3])) * GRAPHVIZ_SCALE
 
             size = sizes[node_id]
@@ -263,9 +283,12 @@ def build_pipeline_view(state, ctrl):
     async def animate_positions(
         start_positions: dict[str, dict[str, float]],
         end_positions: dict[str, dict[str, float]],
-        duration: float = 0.2,
+        duration: float = LAYOUT_DURATION,
     ) -> None:
-        steps = max(1, round(duration * 60))
+        steps = max(
+            1,
+            round(duration * 60),
+        )
 
         for step in range(1, steps + 1):
             t = step / steps
@@ -280,8 +303,8 @@ def build_pipeline_view(state, ctrl):
                 node_editor.update_node(
                     node_id,
                     position={
-                        "x": start["x"] + (end["x"] - start["x"]) * alpha,
-                        "y": start["y"] + (end["y"] - start["y"]) * alpha,
+                        "x": (start["x"] + (end["x"] - start["x"]) * alpha),
+                        "y": (start["y"] + (end["y"] - start["y"]) * alpha),
                     },
                 )
 
@@ -293,14 +316,34 @@ def build_pipeline_view(state, ctrl):
                 position=position,
             )
 
-    async def relayout() -> None:
+    def fit_view() -> None:
+        try:
+            node_editor.fit_view(
+                padding=FIT_PADDING,
+                duration=FIT_DURATION_MS,
+            )
+        except TypeError:
+            # Older trame-vue-flow versions may not expose
+            # Vue Flow's padding/duration arguments.
+            node_editor.fit_view()
+
+    async def relayout(
+        *,
+        fit: bool = False,
+    ) -> None:
         await animate_positions(
             current_positions(),
             compute_layout_positions(),
         )
 
+        if fit:
+            # Allow Vue Flow to process the final node positions
+            # before calculating the viewport bounds.
+            await asyncio.sleep(0)
+            fit_view()
+
     def pipeline_view_space() -> None:
-        asyncio.create_task(relayout())
+        asyncio.create_task(relayout(fit=True))
 
     ctrl.trigger("pipeline_view_space")(pipeline_view_space)
 
@@ -310,12 +353,11 @@ def build_pipeline_view(state, ctrl):
         raw_attrs=[
             (
                 '@keydown.space="'
-                "['INPUT','TEXTAREA','SELECT','BUTTON'].includes("
-                "$event.target.tagName"
-                ") || ("
-                "$event.preventDefault(), "
-                "trigger('pipeline_view_space')"
-                ")"
+                "['INPUT','TEXTAREA','SELECT','BUTTON']"
+                ".includes($event.target.tagName)"
+                " || "
+                "($event.preventDefault(), "
+                "trigger('pipeline_view_space'))"
                 '"'
             ),
         ],
@@ -408,11 +450,13 @@ def build_pipeline_view(state, ctrl):
 
     sync_task: asyncio.Task | None = None
     sync_pending = False
+
     known_nodes: set[str] = set()
     known_edges: set[tuple[str, int, str, int]] = set()
 
     def schedule_sync() -> None:
-        nonlocal sync_task, sync_pending
+        nonlocal sync_task
+        nonlocal sync_pending
 
         sync_pending = True
 
@@ -435,11 +479,14 @@ def build_pipeline_view(state, ctrl):
                     edges = state.pipeline["edges"]
 
                     current_nodes = set(nodes)
+
                     current_edges = {edge_key(edge) for edge in edges}
 
-                    topology_changed = (
-                        current_nodes != known_nodes or current_edges != known_edges
-                    )
+                    nodes_changed = current_nodes != known_nodes
+
+                    edges_changed = current_edges != known_edges
+
+                    topology_changed = nodes_changed or edges_changed
 
                     for edge in known_edges - current_edges:
                         (
@@ -452,14 +499,17 @@ def build_pipeline_view(state, ctrl):
                         node_editor.remove_edge(
                             source,
                             target,
-                            source_handle=f"output-{source_port}",
-                            target_handle=f"input-{target_port}",
+                            source_handle=(f"output-{source_port}"),
+                            target_handle=(f"input-{target_port}"),
                         )
 
                     for node_id in known_nodes - current_nodes:
                         node_editor.remove_node(node_id)
 
-                    for index, (node_id, node) in enumerate(nodes.items()):
+                    for index, (
+                        node_id,
+                        node,
+                    ) in enumerate(nodes.items()):
                         serialized = node_data(
                             node_id,
                             node,
@@ -484,8 +534,13 @@ def build_pipeline_view(state, ctrl):
                     known_edges = current_edges
 
                     if topology_changed:
+                        # Let Vue Flow instantiate/remove the node DOM
+                        # before calculating the new layout.
                         await asyncio.sleep(0)
-                        await relayout()
+
+                        await relayout(
+                            fit=nodes_changed,
+                        )
 
             finally:
                 sync_task = None
@@ -504,7 +559,7 @@ def build_pipeline_view(state, ctrl):
 
         async def fit_after_sync() -> None:
             await asyncio.sleep(0.35)
-            node_editor.fit_view()
+            fit_view()
 
         asyncio.create_task(fit_after_sync())
 
