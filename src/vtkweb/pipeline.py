@@ -195,6 +195,32 @@ class PipelineGraph:
         if node_id in self.state.pipeline["nodes"] or node_id in self._processors:
             raise ValueError(f"Node ID already exists: {node_id}")
 
+        class_name = processor.GetClassName()
+
+        if name is None:
+            used_indices = set()
+
+            for node in self.state.pipeline["nodes"].values():
+                if node["class_name"] != class_name:
+                    continue
+
+                existing_name = node["name"]
+                prefix = class_name
+
+                if not existing_name.startswith(prefix):
+                    continue
+
+                suffix = existing_name[len(prefix) :]
+
+                if suffix.isdigit():
+                    used_indices.add(int(suffix))
+
+            index = 0
+            while index in used_indices:
+                index += 1
+
+            name = f"{class_name}{index}"
+
         self._processors[node_id] = processor
         self._modification_versions[node_id] = 1
 
@@ -202,28 +228,30 @@ class PipelineGraph:
         self._property_descriptors[node_id] = {
             descriptor.name: descriptor for descriptor in descriptors
         }
+
         properties = {
-            descriptor.name: self._property_state(descriptor, descriptor.value)
+            descriptor.name: self._property_state(
+                descriptor,
+                descriptor.value,
+            )
             for descriptor in descriptors
         }
 
         node = {
             "id": node_id,
-            "name": (name or processor.GetClassName()),
-            "class_name": (processor.GetClassName()),
-            "input_port_count": (processor.GetNumberOfInputPorts()),
-            "output_port_count": (processor.GetNumberOfOutputPorts()),
+            "name": name,
+            "class_name": class_name,
+            "input_port_count": processor.GetNumberOfInputPorts(),
+            "output_port_count": processor.GetNumberOfOutputPorts(),
             "properties": properties,
             "input_arrays": self._inspect_input_array_state(processor),
             "execution_state": "modified",
         }
 
         pipeline_state = dict(self.state.pipeline)
-
         nodes = dict(pipeline_state["nodes"])
 
         nodes[node_id] = node
-
         pipeline_state["nodes"] = nodes
 
         self.state.pipeline = pipeline_state

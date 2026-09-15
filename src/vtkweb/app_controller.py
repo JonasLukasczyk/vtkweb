@@ -55,7 +55,7 @@ def initialize_app_controller(
         processor = catalog.create(class_name)
         node = pipeline.add_node(
             processor,
-            name=name or descriptor.label,
+            name=name,
             node_id=node_id,
         )
         return node.id

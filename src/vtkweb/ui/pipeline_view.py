@@ -6,63 +6,55 @@ import shlex
 import graphviz
 
 from trame.widgets import flow, html
-from trame.widgets import vuetify3 as v3
+
+
+NODE_HEIGHT = 32.0
+NODE_MIN_WIDTH = 80.0
+NODE_HORIZONTAL_PADDING = 12.0
+NODE_BORDER_WIDTH = 2.0
+NODE_CHAR_WIDTH = 8.5
+GRAPHVIZ_SCALE = 40.0
 
 
 PIPELINE_VIEW_STYLE = """
-.vtkweb-flow-controls {
-    top: 10px !important;
-    left: 10px !important;
-    bottom: auto !important;
-    right: auto !important;
-}
+.vtkweb-pipeline-node {
+    position: relative;
 
-.vtkweb-flow-controls .vue-flow__controls-button {
+    display: inline-flex;
+    align-items: end;
+    justify-content: center;
+
+    height: 32px;
+    padding: 0 12px;
+
+    box-sizing: border-box;
+    overflow: visible !important;
+
+    background: #313844;
+    border: 2px solid transparent;
+    border-radius: 4px;
+
+    color: #f4f7fb;
+    font-family: monospace;
+    white-space: nowrap;
+
     cursor: pointer;
 }
 
-.vtkweb-pipeline-node {
-    position: relative;
-    background-color: #313844 !important;
-
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-
-    overflow: visible !important;
-
-    min-width: 0;
-    width: fit-content;
-
-    /* Keep execution-state styling from changing node geometry. Selection is
-       rendered with an inset shadow rather than a real border. */
-    border: none !important;
-    box-sizing: border-box;
-}
-
-/* Selection is orthogonal to execution state. Using an inset shadow makes it
-   look like a border without changing the node size or handle positions. */
 .vtkweb-pipeline-node-active {
-    box-shadow: inset 0 0 0 3px #58a6ff !important;
+    border-color: #58a6ff;
 }
 
-/* Modified/dirty nodes keep the normal dark pipeline-node appearance. */
 .vtkweb-pipeline-node-modified {
-    background-color: #313844 !important;
+    background: #313844;
 }
 
-/* Queued/scheduled nodes are intentionally quiet: they are waiting, not
-   actively doing work. */
 .vtkweb-pipeline-node-queued {
-    background-color: #536273 !important;
-    color: #f4f7fb !important;
+    background: #536273;
 }
 
-/* Running is the only animated execution state. The moving gradient lives on
-   the node background itself, so it cannot affect layout or handle geometry. */
 .vtkweb-pipeline-node-running {
-    color: #f7f9fc !important;
-    background-color: #536273 !important;
+    background-color: #536273;
     background-image: linear-gradient(
         110deg,
         #536273 0%,
@@ -72,29 +64,28 @@ PIPELINE_VIEW_STYLE = """
         #71849a 56%,
         #536273 68%,
         #536273 100%
-    ) !important;
-    background-repeat: no-repeat !important;
-    background-size: 220% 100% !important;
-    background-position: 100% 0;
-    animation: vtkweb-running-gradient 1.1s linear infinite !important;
-    will-change: background-position;
+    );
+    background-repeat: no-repeat;
+    background-size: 220% 100%;
+    animation: vtkweb-running-gradient 1.1s linear infinite;
 }
 
 .vtkweb-pipeline-node-failed {
-    background-color: #6b3942 !important;
-    color: #fff5f6 !important;
+    background: #6b3942;
+    color: #fff5f6;
 }
 
 .vtkweb-pipeline-node-success {
-    background-color: #3f554d !important;
-    color: #f4faf7 !important;
+    background: #3f554d;
+    color: #f4faf7;
 }
 
 @keyframes vtkweb-running-gradient {
-    0% {
+    from {
         background-position: 100% 0;
     }
-    100% {
+
+    to {
         background-position: -100% 0;
     }
 }
@@ -102,28 +93,31 @@ PIPELINE_VIEW_STYLE = """
 @media (prefers-reduced-motion: reduce) {
     .vtkweb-pipeline-node-running {
         animation: none;
-        background-color: #607184 !important;
-        background-image: none !important;
+        background: #607184;
     }
 }
 
 .vue-flow__handle.vtkweb-pipeline-handle {
-    width: 16px !important;
-    height: 16px !important;
+    width: 10px !important;
+    height: 10px !important;
 
-    min-width: 16px !important;
-    min-height: 16px !important;
+    min-width: 10px !important;
+    min-height: 10px !important;
 
-    border: 2px solid white !important;
+    border: 0 !important;
     border-radius: 50% !important;
 
     cursor: pointer !important;
-
     z-index: 20;
 }
 
 .vue-flow__handle.vtkweb-input-handle {
+    top: -1px !important;
     background: #777 !important;
+}
+
+.vue-flow__handle.vtkweb-output-handle {
+    bottom: -1px !important;
 }
 
 .vue-flow__handle.vtkweb-output-visible {
@@ -140,185 +134,27 @@ PIPELINE_VIEW_STYLE = """
 """
 
 
-def build_pipeline_view(
-    state,
-    ctrl,
-):
+def build_pipeline_view(state, ctrl):
     node_editor = None
-    space_task: asyncio.Task | None = None
 
-    def pipeline_view_space() -> None:
-        nonlocal space_task
+    def node_width(name: str) -> float:
+        return max(
+            NODE_MIN_WIDTH,
+            len(name) * NODE_CHAR_WIDTH
+            + 2 * NODE_HORIZONTAL_PADDING
+            + 2 * NODE_BORDER_WIDTH,
+        )
 
-        if space_task is not None and not space_task.done():
-            space_task.cancel()
-            space_task = None
-
-            async def relayout() -> None:
-                start_positions = current_positions()
-                end_positions = compute_layout_positions()
-                await animate_positions(start_positions, end_positions)
-
-            asyncio.create_task(relayout())
-            return
-
-        async def fit_after_delay() -> None:
-            nonlocal space_task
-            try:
-                await asyncio.sleep(0.25)
-                node_editor.fit_view()
-            finally:
-                space_task = None
-
-        space_task = asyncio.create_task(fit_after_delay())
-
-    ctrl.trigger("pipeline_view_space")(pipeline_view_space)
-
-    # -------------------------------------------------------------------------
-    # UI
-    # -------------------------------------------------------------------------
-
-    with html.Div(
-        classes="pa-2",
-        style=("height:100%;width:100%;min-width:0;min-height:0;outline:none;"),
-        tabindex=0,
-        raw_attrs=[
-            (
-                '@keydown.space="'
-                "['INPUT','TEXTAREA','SELECT','BUTTON'].includes("
-                "$event.target.tagName) || "
-                "($event.preventDefault(), trigger('pipeline_view_space'))"
-                '"'
-            ),
-        ],
-    ):
-        with v3.VCard(
-            style=("height:100%;width:100%;min-width:0;min-height:0;outline:none;"),
-        ):
-            with flow.NodeEditor(
-                style=("height:100%;width:100%;"),
-                node_origin=("[0.5, 0.5]",),
-            ) as node_editor:
-                flow.Background()
-
-                # -------------------------------------------------------------
-                # Custom node
-                # -------------------------------------------------------------
-
-                with flow.CustomNode(
-                    type="vtk-node",
-                    var_name="node",
-                ):
-                    with v3.VCard(
-                        classes=(
-                            (
-                                "'pa-1 vtkweb-pipeline-node ' + "
-                                "('vtkweb-pipeline-node-' + node.data.execution_state) + ' ' + "
-                                "("
-                                "node.id === active_node_id "
-                                "? 'vtkweb-pipeline-node-active' "
-                                ": ''"
-                                ")"
-                            ),
-                        ),
-                        click=(
-                            ctrl.set_active_node,
-                            "[node.id]",
-                        ),
-                    ):
-                        # -----------------------------------------------------
-                        # Input handles
-                        # -----------------------------------------------------
-
-                        flow.Handle(
-                            id=("`input-${port - 1}`",),
-                            key=("`input-${port - 1}`",),
-                            type="target",
-                            position="top",
-                            v_for="port in node.data.input_port_count",
-                            classes=("vtkweb-pipeline-handle vtkweb-input-handle"),
-                            style=(
-                                "{ "
-                                "'top': '0px', "
-                                "'left': "
-                                "((port / "
-                                "(node.data.input_port_count + 1)) "
-                                "* 100) + '%' "
-                                "}",
-                            ),
-                            click=(
-                                ctrl.set_active_node,
-                                "[node.id]",
-                            ),
-                        )
-
-                        # -----------------------------------------------------
-                        # Label
-                        # -----------------------------------------------------
-
-                        v3.VCardText(
-                            "{{ node.label }}",
-                            classes="pa-1",
-                            style=("white-space:nowrap;font-family:monospace;"),
-                        )
-
-                        # -----------------------------------------------------
-                        # Output handles
-                        # -----------------------------------------------------
-
-                        flow.Handle(
-                            id=("`output-${port - 1}`",),
-                            key=("`output-${port - 1}`",),
-                            type="source",
-                            position="bottom",
-                            v_for="port in node.data.output_port_count",
-                            classes=(
-                                (
-                                    "'vtkweb-pipeline-handle ' + "
-                                    "("
-                                    "Object.values(representations).some("
-                                    "rep => "
-                                    "rep.node_id === node.id && "
-                                    "rep.output_port === port - 1 && "
-                                    "rep.view_ids.includes(active_view_id)"
-                                    ") "
-                                    "? 'vtkweb-output-visible' "
-                                    ": 'vtkweb-output-hidden'"
-                                    ")"
-                                ),
-                            ),
-                            style=(
-                                "{ "
-                                "'bottom': '0px', "
-                                "'left': "
-                                "((port / "
-                                "(node.data.output_port_count + 1)) "
-                                "* 100) + '%' "
-                                "}",
-                            ),
-                            click=(
-                                ctrl.output_port_click,
-                                "[node.id, port - 1, $event.shiftKey]",
-                            ),
-                        )
-
-    # -------------------------------------------------------------------------
-    # Serialization from authoritative state
-    # -------------------------------------------------------------------------
-
-    def node_data(
-        node_id: str,
-        value: dict,
-        index: int,
-    ) -> dict:
+    def node_data(node_id: str, node: dict, index: int) -> dict:
         return {
             "id": node_id,
             "type": "vtk-node",
-            "label": value["name"],
+            "label": node["name"],
             "data": {
-                "input_port_count": int(value["input_port_count"]),
-                "output_port_count": int(value["output_port_count"]),
-                "execution_state": value.get("execution_state", "modified"),
+                "input_port_count": int(node["input_port_count"]),
+                "output_port_count": int(node["output_port_count"]),
+                "execution_state": node.get("execution_state", "modified"),
+                "width": node_width(node["name"]),
             },
             "position": {
                 "x": 100,
@@ -326,16 +162,17 @@ def build_pipeline_view(
             },
         }
 
-    def edge_key(value: dict) -> tuple[str, int, str, int]:
+    def edge_key(edge: dict) -> tuple[str, int, str, int]:
         return (
-            value["source_node_id"],
-            int(value["source_port"]),
-            value["target_node_id"],
-            int(value["target_port"]),
+            edge["source_node_id"],
+            int(edge["source_port"]),
+            edge["target_node_id"],
+            int(edge["target_port"]),
         )
 
-    def edge_data(value: dict) -> dict:
-        source, source_port, target, target_port = edge_key(value)
+    def edge_data(edge: dict) -> dict:
+        source, source_port, target, target_port = edge_key(edge)
+
         return {
             "id": f"{source}-{source_port}-{target}-{target_port}",
             "source": source,
@@ -345,44 +182,43 @@ def build_pipeline_view(
         }
 
     def current_positions() -> dict[str, dict[str, float]]:
-        result = {}
+        positions = {}
+
         for node_id in state.pipeline["nodes"]:
-            editor_node = node_editor.get_node(node_id)
-            if editor_node is None:
+            node = node_editor.get_node(node_id)
+
+            if not node:
                 continue
-            position = editor_node.get("position")
+
+            position = node.get("position")
+
             if position is None:
                 continue
-            result[node_id] = {
+
+            positions[node_id] = {
                 "x": float(position["x"]),
                 "y": float(position["y"]),
             }
-        return result
+
+        return positions
 
     def compute_layout_positions() -> dict[str, dict[str, float]]:
         graph = graphviz.Digraph(engine="dot")
-        scale = 40.0
-        padding = 20.0
-        char_width_px = 8.5
-        horizontal_padding_px = 24.0
-        node_height_px = 40.0
-        min_width_px = 80.0
-        node_sizes = {}
+        sizes = {}
 
         for node_id, node in state.pipeline["nodes"].items():
-            width_px = max(
-                min_width_px,
-                len(node["name"]) * char_width_px + horizontal_padding_px,
-            )
-            node_sizes[node_id] = {
-                "width": width_px,
-                "height": node_height_px,
+            width = node_width(node["name"])
+
+            sizes[node_id] = {
+                "width": width,
+                "height": NODE_HEIGHT,
             }
+
             graph.node(
                 node_id,
                 label="",
-                width=str(width_px / scale),
-                height=str(node_height_px / scale),
+                width=str(width / GRAPHVIZ_SCALE),
+                height=str(NODE_HEIGHT / GRAPHVIZ_SCALE),
                 fixedsize="true",
             )
 
@@ -392,27 +228,36 @@ def build_pipeline_view(
                 edge["target_node_id"],
             )
 
-        plain = graph.pipe(format="plain").decode("utf-8")
-        lines = plain.splitlines()
+        lines = graph.pipe(format="plain").decode("utf-8").splitlines()
+
         graph_height = 0.0
+
         if lines:
             fields = shlex.split(lines[0])
+
             if fields and fields[0] == "graph":
                 graph_height = float(fields[3])
 
         positions = {}
+
         for line in lines:
             fields = shlex.split(line)
+
             if not fields or fields[0] != "node":
                 continue
+
             node_id = fields[1]
-            center_x = float(fields[2])
-            center_y = float(fields[3])
-            size = node_sizes[node_id]
+
+            center_x = float(fields[2]) * GRAPHVIZ_SCALE
+            center_y = (graph_height - float(fields[3])) * GRAPHVIZ_SCALE
+
+            size = sizes[node_id]
+
             positions[node_id] = {
-                "x": padding + center_x * scale - size["width"] * 0.5,
-                "y": padding + (graph_height - center_y) * scale - size["height"] * 0.5,
+                "x": center_x - size["width"] * 0.5,
+                "y": center_y - size["height"] * 0.5,
             }
+
         return positions
 
     async def animate_positions(
@@ -420,14 +265,18 @@ def build_pipeline_view(
         end_positions: dict[str, dict[str, float]],
         duration: float = 0.2,
     ) -> None:
-        steps = max(1, round(duration * 60.0))
+        steps = max(1, round(duration * 60))
+
         for step in range(1, steps + 1):
             t = step / steps
-            alpha = t * t * (3.0 - 2.0 * t)
+            alpha = t * t * (3 - 2 * t)
+
             for node_id, end in end_positions.items():
                 start = start_positions.get(node_id)
+
                 if start is None:
                     continue
+
                 node_editor.update_node(
                     node_id,
                     position={
@@ -435,10 +284,127 @@ def build_pipeline_view(
                         "y": start["y"] + (end["y"] - start["y"]) * alpha,
                     },
                 )
-            await asyncio.sleep(1.0 / 60.0)
+
+            await asyncio.sleep(1 / 60)
 
         for node_id, position in end_positions.items():
-            node_editor.update_node(node_id, position=position)
+            node_editor.update_node(
+                node_id,
+                position=position,
+            )
+
+    async def relayout() -> None:
+        await animate_positions(
+            current_positions(),
+            compute_layout_positions(),
+        )
+
+    def pipeline_view_space() -> None:
+        asyncio.create_task(relayout())
+
+    ctrl.trigger("pipeline_view_space")(pipeline_view_space)
+
+    with html.Div(
+        style=("height:100%;width:100%;min-width:0;min-height:0;outline:none;"),
+        tabindex=0,
+        raw_attrs=[
+            (
+                '@keydown.space="'
+                "['INPUT','TEXTAREA','SELECT','BUTTON'].includes("
+                "$event.target.tagName"
+                ") || ("
+                "$event.preventDefault(), "
+                "trigger('pipeline_view_space')"
+                ")"
+                '"'
+            ),
+        ],
+    ):
+        with flow.NodeEditor(
+            style="height:100%;width:100%;",
+        ) as node_editor:
+            flow.Background()
+
+            with flow.CustomNode(
+                type="vtk-node",
+                var_name="node",
+            ):
+                with html.Div(
+                    "{{ node.label }}",
+                    classes=(
+                        (
+                            "'vtkweb-pipeline-node ' + "
+                            "'vtkweb-pipeline-node-' + "
+                            "node.data.execution_state + ' ' + "
+                            "("
+                            "node.id === active_node_id "
+                            "? 'vtkweb-pipeline-node-active' "
+                            ": ''"
+                            ")"
+                        ),
+                    ),
+                    style=("{'width': node.data.width + 'px'}"),
+                    click=(
+                        ctrl.set_active_node,
+                        "[node.id]",
+                    ),
+                ):
+                    flow.Handle(
+                        id=("`input-${port - 1}`",),
+                        key=("`input-${port - 1}`",),
+                        type="target",
+                        position="top",
+                        v_for="port in node.data.input_port_count",
+                        classes=("vtkweb-pipeline-handle vtkweb-input-handle"),
+                        style=(
+                            "{"
+                            "'left': "
+                            "(port / "
+                            "(node.data.input_port_count + 1) "
+                            "* 100) + '%'"
+                            "}"
+                        ),
+                        click=(
+                            ctrl.set_active_node,
+                            "[node.id]",
+                        ),
+                    )
+
+                    flow.Handle(
+                        id=("`output-${port - 1}`",),
+                        key=("`output-${port - 1}`",),
+                        type="source",
+                        position="bottom",
+                        v_for="port in node.data.output_port_count",
+                        classes=(
+                            (
+                                "'vtkweb-pipeline-handle "
+                                "vtkweb-output-handle ' + "
+                                "("
+                                "Object.values(representations).some("
+                                "rep => "
+                                "rep.node_id === node.id && "
+                                "rep.output_port === port - 1 && "
+                                "rep.view_ids.includes(active_view_id)"
+                                ") "
+                                "? 'vtkweb-output-visible' "
+                                ": 'vtkweb-output-hidden'"
+                                ")"
+                            ),
+                        ),
+                        style=(
+                            "{"
+                            "'left': "
+                            "(port / "
+                            "(node.data.output_port_count + 1) "
+                            "* 100) + '%'"
+                            "}"
+                        ),
+                        click=(
+                            ctrl.output_port_click,
+                            "[node.id, port - 1, $event.shiftKey]",
+                        ),
+                    )
 
     sync_task: asyncio.Task | None = None
     sync_pending = False
@@ -447,64 +413,87 @@ def build_pipeline_view(
 
     def schedule_sync() -> None:
         nonlocal sync_task, sync_pending
+
         sync_pending = True
+
         if sync_task is not None and not sync_task.done():
             return
 
-        async def sync_worker() -> None:
-            nonlocal sync_task, sync_pending, known_nodes, known_edges
+        async def sync() -> None:
+            nonlocal sync_task
+            nonlocal sync_pending
+            nonlocal known_nodes
+            nonlocal known_edges
+
             try:
                 while sync_pending:
                     sync_pending = False
+
                     await asyncio.sleep(0)
-                    pipeline_state = state.pipeline
-                    nodes = pipeline_state["nodes"]
-                    edges = pipeline_state["edges"]
+
+                    nodes = state.pipeline["nodes"]
+                    edges = state.pipeline["edges"]
+
                     current_nodes = set(nodes)
                     current_edges = {edge_key(edge) for edge in edges}
 
-                    for source, source_port, target, target_port in (
-                        known_edges - current_edges
-                    ):
+                    topology_changed = (
+                        current_nodes != known_nodes or current_edges != known_edges
+                    )
+
+                    for edge in known_edges - current_edges:
+                        (
+                            source,
+                            source_port,
+                            target,
+                            target_port,
+                        ) = edge
+
                         node_editor.remove_edge(
                             source,
                             target,
                             source_handle=f"output-{source_port}",
                             target_handle=f"input-{target_port}",
                         )
+
                     for node_id in known_nodes - current_nodes:
                         node_editor.remove_node(node_id)
 
-                    topology_changed = (
-                        current_nodes != known_nodes or current_edges != known_edges
-                    )
-                    for index, (node_id, value) in enumerate(nodes.items()):
-                        serialized = node_data(node_id, value, index)
+                    for index, (node_id, node) in enumerate(nodes.items()):
+                        serialized = node_data(
+                            node_id,
+                            node,
+                            index,
+                        )
+
                         if node_id not in known_nodes:
                             node_editor.add_node(serialized)
+
                         else:
                             node_editor.update_node(
                                 node_id,
                                 label=serialized["label"],
                                 data=serialized["data"],
                             )
+
                     for edge in edges:
                         if edge_key(edge) not in known_edges:
                             node_editor.add_edge(edge_data(edge))
 
                     known_nodes = current_nodes
                     known_edges = current_edges
+
                     if topology_changed:
                         await asyncio.sleep(0)
-                        start_positions = current_positions()
-                        end_positions = compute_layout_positions()
-                        await animate_positions(start_positions, end_positions)
+                        await relayout()
+
             finally:
                 sync_task = None
+
                 if sync_pending:
                     schedule_sync()
 
-        sync_task = asyncio.create_task(sync_worker())
+        sync_task = asyncio.create_task(sync())
 
     @state.change("pipeline")
     def on_pipeline_change(**_):
@@ -513,7 +502,7 @@ def build_pipeline_view(
     def initialize_graph() -> None:
         schedule_sync()
 
-        async def fit_after_sync():
+        async def fit_after_sync() -> None:
             await asyncio.sleep(0.35)
             node_editor.fit_view()
 
