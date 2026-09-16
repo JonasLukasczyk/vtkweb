@@ -43,8 +43,8 @@ def initialize_properties_tab(
         else:
             low, high = (cx, cy, zmin), (cx, cy, zmax)
 
-        pipeline.set_property(node_id, "LowPoint", low)
-        pipeline.set_property(node_id, "HighPoint", high)
+        ctrl.set_node_property(node_id, "LowPoint", low)
+        ctrl.set_node_property(node_id, "HighPoint", high)
 
     ctrl.set_elevation_axis = set_elevation_axis
 
