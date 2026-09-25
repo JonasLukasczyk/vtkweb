@@ -328,13 +328,48 @@ def build_representations_tab(
                     ("Specular", "specular", "0.05", "0", "1"),
                     ("Specular power", "specular_power", "1", "1", "100"),
                     (
-                        "Global illumination",
+                        "Global illumination reach",
                         "global_illumination_reach",
                         "0.05",
                         "0",
                         "1",
                     ),
-                    ("Scattering", "volumetric_scattering_blending", "0.05", "0", "1"),
+                    ("Scattering", "volumetric_scattering_blending", "0.05", "0", "2"),
+                    (
+                        "Scattering anisotropy",
+                        "scattering_anisotropy",
+                        "0.05",
+                        "-1",
+                        "1",
+                    ),
+                    (
+                        "Environment scatter strength",
+                        "environment_scattering_strength",
+                        "0.05",
+                        "0",
+                        "4",
+                    ),
+                    (
+                        "Environment bake directions",
+                        "environment_scattering_samples",
+                        "1",
+                        "0",
+                        "256",
+                    ),
+                    (
+                        "Environment lighting resolution factor",
+                        "environment_scattering_step_factor",
+                        "0.5",
+                        "1",
+                        "32",
+                    ),
+                    (
+                        "Volume depth opacity threshold",
+                        "volume_depth_opacity_threshold",
+                        "0.01",
+                        "0.01",
+                        "1",
+                    ),
                 ):
                     with html.Label(classes="vtkweb-input-box mt-1"):
                         html.Span(label, classes="vtkweb-control-label")

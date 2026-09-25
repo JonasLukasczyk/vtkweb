@@ -36,7 +36,7 @@ workspace = WorkspaceManager(server.state)
 # Bootstrap IDs must be identical on every rank because subsequent replicated
 # mutations refer to logical view IDs, not rank-local runtime objects.
 root_container = workspace.create_workspace(container_id="root")
-default_view = views.create_view("vtk", name="View 1", view_id="default-view")
+default_view = views.create_view("mitsuba", name="View 1", view_id="default-view")
 # The bootstrap view is the cluster-rendered primary view. Newly-created views
 # default to rank-0-only rendering until Distributed Rendering is enabled.
 rendering.set_view_property(default_view, "distributed", distributed.enabled)

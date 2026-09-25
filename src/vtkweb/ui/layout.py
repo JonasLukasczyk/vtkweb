@@ -62,6 +62,7 @@ MAIN_LAYOUT_STYLE = """
 .vtkweb-main-layout {
     width: 100%;
     height: 100%;
+    max-height: 100%;
 
     display: flex;
 
@@ -69,11 +70,14 @@ MAIN_LAYOUT_STYLE = """
     min-height: 0;
 
     overflow: hidden;
+    box-sizing: border-box;
 }
 
 .vtkweb-left-pane {
     width: 33%;
     height: 100%;
+    max-height: 100%;
+    flex: 0 0 33%;
 
     min-width: 240px;
     min-height: 0;
@@ -82,17 +86,51 @@ MAIN_LAYOUT_STYLE = """
     flex-direction: column;
 
     overflow: hidden;
+    box-sizing: border-box;
+}
+
+.vtkweb-pipeline-pane {
+    flex: 0 0 30%;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.vtkweb-inspector-pane {
+    position: relative;
+    flex: 1 1 70%;
+    min-height: 0;
+    max-height: 70%;
+    overflow: hidden;
+}
+
+/* The inspector content must never participate in sizing the outer column.
+ * Vuetify descendants can otherwise propagate their intrinsic content height
+ * through nested wrappers even when the flex item itself has min-height: 0.
+ * Pin the builder's first wrapper to the already-sized inspector pane instead. */
+.vtkweb-inspector-pane > div {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    box-sizing: border-box;
 }
 
 .vtkweb-right-pane {
     flex: 1 1 auto;
 
     height: 100%;
+    max-height: 100%;
 
     min-width: 0;
     min-height: 0;
 
     overflow: hidden;
+    box-sizing: border-box;
 }
 
 .vtkweb-main-splitter {
@@ -288,7 +326,7 @@ def build_ui(
                             tag === 'select' ||
                             target?.isContentEditable;
 
-                        if (event.ctrlKey && event.code === 'Space' && !event.repeat) {
+                        if (event.altKey && event.code === 'Space' && !event.repeat) {
                             event.preventDefault();
                             trigger('global_ctrl_space');
                             return;
@@ -517,7 +555,7 @@ def build_ui(
                 ):
                     # Pipeline
                     with html.Div(
-                        style=("height:30%;min-height:0;overflow:hidden;"),
+                        classes="vtkweb-pipeline-pane",
                     ):
                         build_pipeline_view(
                             state,
@@ -526,7 +564,7 @@ def build_ui(
 
                     # Inspector
                     with html.Div(
-                        style=("height:70%;min-height:0;overflow:hidden;"),
+                        classes="vtkweb-inspector-pane",
                     ):
                         build_inspector_view(
                             ctrl,

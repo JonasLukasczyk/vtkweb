@@ -1,7 +1,30 @@
 from __future__ import annotations
 
-from trame.widgets import html
+from trame.widgets import client, html
 from trame.widgets import vuetify3 as v3
+from trame_client.widgets.core import HtmlElement
+
+
+class _SvgTag(HtmlElement):
+    def __init__(self, tag, children=None, **kwargs):
+        super().__init__(tag, children, **kwargs)
+        self._attr_names += [
+            ["classes", "class"],
+            ["key", ":key"],
+            ["v_for", "v-for"],
+            "x",
+            "y",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "width",
+            "height",
+            "points",
+            "cx",
+            "cy",
+            "r",
+        ]
 
 
 def initialize_transfer_tab(state, ctrl) -> None:
@@ -40,7 +63,92 @@ def initialize_transfer_tab(state, ctrl) -> None:
     update_items()
 
 
+def _mapping_range_row(ctrl, mapping_name: str) -> None:
+    with html.Div(classes="vtkweb-range-row"):
+        html.Input(
+            type="number",
+            step="any",
+            value=(
+                f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[0] ?? 0",
+            ),
+            classes="vtkweb-range-input",
+            change=(
+                ctrl.set_tf_mapping_range,
+                f"[active_transfer_function,'{mapping_name}',Number($event.target.value),"
+                f"transfer_functions[active_transfer_function].{mapping_name}.range[1]]",
+            ),
+        )
+        html.Input(
+            type="number",
+            step="any",
+            value=(
+                f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[1] ?? 1",
+            ),
+            classes="vtkweb-range-input",
+            change=(
+                ctrl.set_tf_mapping_range,
+                f"[active_transfer_function,'{mapping_name}',"
+                f"transfer_functions[active_transfer_function].{mapping_name}.range[0],"
+                "Number($event.target.value)]",
+            ),
+        )
+        v3.VBtn(
+            "Rescale",
+            size="small",
+            click=(
+                ctrl.rescale_tf_mapping,
+                f"[active_transfer_function,'{mapping_name}']",
+            ),
+        )
+
+
 def build_transfer_tab(ctrl) -> None:
+    client.ClientTriggers(
+        mounted=r"""
+            window.__vtkwebTfEditorCoords = (svg, event) => {
+                const rect = svg.getBoundingClientRect();
+                const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(rect.width, 1)));
+                const y = Math.max(0, Math.min(1, 1 - (event.clientY - rect.top) / Math.max(rect.height, 1)));
+                return [x, y];
+            };
+
+            window.__vtkwebAddOpacityPoint = (arrayName, event) => {
+                if (!arrayName || event.target !== event.currentTarget) return;
+                const [x, opacity] = window.__vtkwebTfEditorCoords(event.currentTarget, event);
+                trigger('add_tf_opacity_control_point', [arrayName, x, opacity]);
+            };
+
+            window.__vtkwebStartOpacityDrag = (arrayName, pointIndex, event) => {
+                if (!arrayName || event.button !== 0) return;
+                event.preventDefault();
+                event.stopPropagation();
+                trigger('set_tf_interacting', [true]);
+                const svg = event.currentTarget.ownerSVGElement;
+                if (!svg) return;
+
+                const move = (moveEvent) => {
+                    const [x, opacity] = window.__vtkwebTfEditorCoords(svg, moveEvent);
+                    trigger('set_tf_opacity_control_point', [arrayName, pointIndex, x, opacity]);
+                };
+                const up = () => {
+                    window.removeEventListener('pointermove', move);
+                    window.removeEventListener('pointerup', up);
+                    window.removeEventListener('pointercancel', up);
+                    trigger('set_tf_interacting', [false]);
+                };
+
+                window.addEventListener('pointermove', move);
+                window.addEventListener('pointerup', up);
+                window.addEventListener('pointercancel', up);
+            };
+        """,
+        before_unmount=r"""
+            delete window.__vtkwebTfEditorCoords;
+            delete window.__vtkwebAddOpacityPoint;
+            delete window.__vtkwebStartOpacityDrag;
+        """,
+    )
+
     html.Div(
         "No transfer functions",
         v_if=("transfer_function_items.length === 0"),
@@ -62,7 +170,8 @@ def build_transfer_tab(ctrl) -> None:
                 update_modelValue=(ctrl.set_active_transfer_function, "[$event]"),
             )
 
-        with html.Div(classes="vtkweb-select-box mt-2"):
+        html.Div("Color", classes="vtkweb-tf-section-title")
+        with html.Div(classes="vtkweb-select-box mt-1"):
             html.Span("Preset", classes="vtkweb-control-label")
             v3.VSelect(
                 classes="vtkweb-compact-select",
@@ -81,68 +190,22 @@ def build_transfer_tab(ctrl) -> None:
                 ),
             )
 
-        with html.Div(classes="vtkweb-range-row mt-2"):
-            html.Input(
-                type="number",
-                step="any",
-                value=(
-                    "transfer_functions[active_transfer_function]?.control_points?.[0]?.[0] ?? 0",
-                ),
-                classes="vtkweb-range-input",
-                change=(
-                    ctrl.set_tf_range,
-                    "[active_transfer_function,Number($event.target.value),"
-                    "transfer_functions[active_transfer_function].control_points[transfer_functions[active_transfer_function].control_points.length - 1][0]]",
-                ),
-            )
-            html.Input(
-                type="number",
-                step="any",
-                value=(
-                    "transfer_functions[active_transfer_function]?.control_points?.[transfer_functions[active_transfer_function]?.control_points?.length - 1]?.[0] ?? 1",
-                ),
-                classes="vtkweb-range-input",
-                change=(
-                    ctrl.set_tf_range,
-                    "[active_transfer_function,"
-                    "transfer_functions[active_transfer_function].control_points[0][0],"
-                    "Number($event.target.value)]",
-                ),
-            )
-            v3.VBtn(
-                "Rescale",
-                size="small",
-                click=(ctrl.rescale_tf, "[active_transfer_function]"),
-            )
+        _mapping_range_row(ctrl, "color")
 
-        with html.Table(
-            classes="mt-3",
-            style="width:100%;border-collapse:collapse;font-size:12px;",
-        ):
+        with html.Table(classes="vtkweb-tf-table"):
             with html.Thead():
                 with html.Tr():
-                    for label in ("Value", "R", "G", "B", "O", ""):
-                        html.Th(label, style="padding:2px;text-align:left;")
+                    for label in ("X", "R", "G", "B", ""):
+                        html.Th(label)
             with html.Tbody():
                 with html.Tr(
                     v_for=(
-                        "(point,index) in (transfer_functions[active_transfer_function]?.control_points || [])"
+                        "(point,index) in (transfer_functions[active_transfer_function]?.color?.control_points || [])",
                     ),
                     key=("index",),
                 ):
-                    with html.Td(style="padding:2px;"):
-                        html.Input(
-                            type="number",
-                            step="any",
-                            value=("point[0]",),
-                            classes="vtkweb-range-input",
-                            change=(
-                                ctrl.set_tf_control_point_component,
-                                "[active_transfer_function,index,0,Number($event.target.value)]",
-                            ),
-                        )
-                    for component_index in range(1, 5):
-                        with html.Td(style="padding:2px;"):
+                    for component_index in range(4):
+                        with html.Td():
                             html.Input(
                                 type="number",
                                 min="0",
@@ -151,26 +214,95 @@ def build_transfer_tab(ctrl) -> None:
                                 value=(f"point[{component_index}]",),
                                 classes="vtkweb-range-input",
                                 change=(
-                                    ctrl.set_tf_control_point_component,
+                                    ctrl.set_tf_color_control_point_component,
                                     f"[active_transfer_function,index,{component_index},Number($event.target.value)]",
                                 ),
                             )
-                    with html.Td(style="padding:2px;"):
+                    with html.Td():
                         v3.VBtn(
-                            "Delete",
+                            "×",
                             size="x-small",
                             disabled=(
-                                "transfer_functions[active_transfer_function].control_points.length <= 2",
+                                "transfer_functions[active_transfer_function].color.control_points.length <= 2",
                             ),
                             click=(
-                                ctrl.remove_tf_control_point,
+                                ctrl.remove_tf_color_control_point,
                                 "[active_transfer_function,index]",
                             ),
                         )
 
         v3.VBtn(
-            "Add Point",
-            classes="mt-2",
+            "Add color point",
+            classes="mt-1",
             size="small",
-            click=(ctrl.add_tf_control_point, "[active_transfer_function]"),
+            click=(ctrl.add_tf_color_control_point, "[active_transfer_function]"),
+        )
+
+        html.Div("Opacity", classes="vtkweb-tf-section-title")
+        _mapping_range_row(ctrl, "opacity")
+        html.Div(
+            "Click to add a point. Drag points to edit opacity; endpoint x positions stay fixed.",
+            classes="vtkweb-tf-help",
+        )
+
+        with html.Svg(
+            classes="vtkweb-opacity-editor",
+            raw_attrs=[
+                'viewBox="0 0 300 140"',
+                'preserveAspectRatio="none"',
+                '@click="window.__vtkwebAddOpacityPoint(active_transfer_function, $event)"',
+            ],
+        ):
+            _SvgTag(
+                "rect",
+                x="0",
+                y="0",
+                width="300",
+                height="140",
+                classes="vtkweb-opacity-bg",
+            )
+            _SvgTag(
+                "line",
+                x1="0",
+                y1="70",
+                x2="300",
+                y2="70",
+                classes="vtkweb-opacity-grid",
+            )
+            _SvgTag(
+                "line",
+                x1="150",
+                y1="0",
+                x2="150",
+                y2="140",
+                classes="vtkweb-opacity-grid",
+            )
+            _SvgTag(
+                "polyline",
+                points=(
+                    "(transfer_functions[active_transfer_function]?.opacity?.control_points || [])"
+                    ".map(p => `${p[0] * 300},${(1 - p[1]) * 140}`).join(' ')",
+                ),
+                classes="vtkweb-opacity-line",
+            )
+            _SvgTag(
+                "circle",
+                v_for=(
+                    "(point,index) in (transfer_functions[active_transfer_function]?.opacity?.control_points || [])",
+                ),
+                key=("index",),
+                cx=("point[0] * 300",),
+                cy=("(1 - point[1]) * 140",),
+                r="5",
+                classes="vtkweb-opacity-point",
+                raw_attrs=[
+                    '@pointerdown="window.__vtkwebStartOpacityDrag(active_transfer_function, index, $event)"',
+                    "@click.stop",
+                    "@dblclick.stop=\"trigger('remove_tf_opacity_control_point', [active_transfer_function,index])\"",
+                ],
+            )
+
+        html.Div(
+            "Double-click an interior opacity point to remove it.",
+            classes="vtkweb-tf-help",
         )

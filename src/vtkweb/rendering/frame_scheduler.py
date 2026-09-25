@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from vtkweb.rendering.base import FrameRenderingBackend
+from vtkweb.rendering.base import EncodedFrame, FrameRenderingBackend
 from vtkweb.rendering.frame_transport import FrameTransport
 from vtkweb.distributed import TileRegion, context
 
@@ -37,6 +37,7 @@ class FrameRenderManager:
         self._render_sizes: dict[str, tuple[int, int]] = {}
         self._size_revision: dict[str, int] = {}
         self._debug: dict[str, bool] = {}
+        self._ssao: dict[str, dict[str, float | int]] = {}
         self._fps_limit: dict[str, float] = {}
         self._distributed: dict[str, bool] = {}
 
@@ -73,6 +74,7 @@ class FrameRenderManager:
                 discard(view_id)
         self._frame_sequence.pop(view_id, None)
         self._fps_limit.pop(view_id, None)
+        self._ssao.pop(view_id, None)
         self._distributed.pop(view_id, None)
         self._render_sizes.pop(view_id, None)
         self._size_revision.pop(view_id, None)
@@ -95,6 +97,24 @@ class FrameRenderManager:
 
     def set_debug(self, view_id: str, enabled: bool) -> None:
         self._debug[view_id] = bool(enabled)
+
+    def set_ssao(
+        self,
+        view_id: str,
+        *,
+        slices: int,
+        steps: int,
+        radius: float,
+        strength: float,
+        thickness: float,
+    ) -> None:
+        self._ssao[view_id] = {
+            "slices": max(0, min(8, int(slices))),
+            "steps": max(1, min(32, int(steps))),
+            "radius": max(0.0, float(radius)),
+            "strength": max(0.0, float(strength)),
+            "thickness": max(1.0e-6, float(thickness)),
+        }
 
     def set_fps_limit(self, view_id: str, fps_limit: float) -> None:
         """Set the continuous-rendering limit for one logical view on this rank."""
@@ -230,9 +250,40 @@ class FrameRenderManager:
                 if frame and self.frame_transport is not None:
                     sequence = self._frame_sequence.get(view_id, 0) + 1
                     self._frame_sequence[view_id] = sequence
+                    if isinstance(frame, EncodedFrame):
+                        image = frame.image
+                        mime_type = frame.mime_type
+                        depth = frame.depth
+                        depth_near = frame.depth_near
+                        depth_far = frame.depth_far
+                        depth_encoding = frame.depth_encoding
+                    else:
+                        image = frame
+                        mime_type = "image/jpeg"
+                        depth = None
+                        depth_near = None
+                        depth_far = None
+                        depth_encoding = None
+                    ssao = self._ssao.get(view_id, {})
+                    ssao_slices = int(ssao.get("slices", 0))
+                    ssao_steps = int(ssao.get("steps", 6))
+                    ssao_radius = float(ssao.get("radius", 10.0))
+                    ssao_strength = float(ssao.get("strength", 1.0))
+                    ssao_thickness = float(ssao.get("thickness", 0.4))
+                    get_property = getattr(
+                        frame_view.backend, "get_view_property", None
+                    )
+                    if callable(get_property):
+                        camera_state = (
+                            get_property(frame_view.backend_view_id, "camera") or {}
+                        )
+                        camera_fov = float(camera_state.get("fov", 30.0))
+                    else:
+                        camera_fov = 30.0
                     await self.frame_transport.publish(
                         view_id,
-                        frame,
+                        image,
+                        mime_type=mime_type,
                         generation=stream_generation,
                         sequence=sequence,
                         region=(tile.x, tile.y, tile.width, tile.height),
@@ -240,6 +291,16 @@ class FrameRenderManager:
                         tile_id=tile.tile_id,
                         debug=self._debug.get(view_id, False),
                         size_revision=size_revision,
+                        depth=depth,
+                        depth_near=depth_near,
+                        depth_far=depth_far,
+                        depth_encoding=depth_encoding,
+                        ssao_slices=ssao_slices,
+                        ssao_steps=ssao_steps,
+                        ssao_radius=ssao_radius,
+                        ssao_strength=ssao_strength,
+                        ssao_thickness=ssao_thickness,
+                        camera_fov=camera_fov,
                     )
 
                 # Every backend uses the same per-view FPS limit. The limit is

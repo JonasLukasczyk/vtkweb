@@ -42,6 +42,16 @@ class FrameTransport(Protocol):
         tile_id: int = 0,
         debug: bool = False,
         size_revision: int = 0,
+        depth: bytes | None = None,
+        depth_near: float | None = None,
+        depth_far: float | None = None,
+        depth_encoding: str | None = None,
+        ssao_slices: int = 0,
+        ssao_steps: int = 6,
+        ssao_radius: float = 10.0,
+        ssao_strength: float = 1.0,
+        ssao_thickness: float = 0.4,
+        camera_fov: float = 30.0,
     ) -> None: ...
 
 
@@ -135,13 +145,44 @@ class WebSocketFrameTransport:
         tile_id: int,
         debug: bool,
         size_revision: int,
+        depth: bytes | None,
+        depth_near: float | None,
+        depth_far: float | None,
+        depth_encoding: str | None,
+        ssao_slices: int,
+        ssao_steps: int,
+        ssao_radius: float,
+        ssao_strength: float,
+        ssao_thickness: float,
+        camera_fov: float,
     ) -> bytes:
+        depth_bytes = depth or b""
         header = json.dumps(
             {
                 "view_id": view_id,
                 "mime_type": mime_type,
                 "generation": int(generation),
                 "sequence": int(sequence),
+                "image_length": len(image),
+                "depth_length": len(depth_bytes),
+                "ssao_slices": int(ssao_slices),
+                "ssao_steps": int(ssao_steps),
+                "ssao_radius": float(ssao_radius),
+                "ssao_strength": float(ssao_strength),
+                "ssao_thickness": float(ssao_thickness),
+                "camera_fov": float(camera_fov),
+                **(
+                    {
+                        "depth_encoding": str(depth_encoding),
+                        "depth_near": float(depth_near),
+                        "depth_far": float(depth_far),
+                    }
+                    if depth_bytes
+                    and depth_encoding is not None
+                    and depth_near is not None
+                    and depth_far is not None
+                    else {}
+                ),
                 **(
                     {
                         "region": list(region),
@@ -156,7 +197,7 @@ class WebSocketFrameTransport:
             },
             separators=(",", ":"),
         ).encode("utf-8")
-        return struct.pack(">I", len(header)) + header + image
+        return struct.pack(">I", len(header)) + header + image + depth_bytes
 
     @staticmethod
     def _encode_batch(packets: list[bytes]) -> bytes:
@@ -239,6 +280,16 @@ class WebSocketFrameTransport:
         tile_id: int = 0,
         debug: bool = False,
         size_revision: int = 0,
+        depth: bytes | None = None,
+        depth_near: float | None = None,
+        depth_far: float | None = None,
+        depth_encoding: str | None = None,
+        ssao_slices: int = 0,
+        ssao_steps: int = 6,
+        ssao_radius: float = 10.0,
+        ssao_strength: float = 1.0,
+        ssao_thickness: float = 0.4,
+        camera_fov: float = 30.0,
     ) -> None:
         if not image:
             return
@@ -254,6 +305,16 @@ class WebSocketFrameTransport:
             tile_id=tile_id,
             debug=debug,
             size_revision=size_revision,
+            depth=depth,
+            depth_near=depth_near,
+            depth_far=depth_far,
+            depth_encoding=depth_encoding,
+            ssao_slices=ssao_slices,
+            ssao_steps=ssao_steps,
+            ssao_radius=ssao_radius,
+            ssao_strength=ssao_strength,
+            ssao_thickness=ssao_thickness,
+            camera_fov=camera_fov,
         )
         key = (str(view_id), int(tile_id))
         self._revision += 1

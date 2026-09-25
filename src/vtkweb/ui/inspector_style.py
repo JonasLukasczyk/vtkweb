@@ -543,4 +543,76 @@ INSPECTOR_STYLE = """
     opacity: 1;
 }
 
+
+.vtkweb-tf-section-title {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(128,128,128,0.25);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.vtkweb-tf-table {
+    width: 100%;
+    margin-top: 8px;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.vtkweb-tf-table th,
+.vtkweb-tf-table td {
+    padding: 2px;
+    text-align: left;
+}
+
+.vtkweb-tf-help {
+    margin: 6px 0;
+    font-size: 11px;
+    line-height: 1.35;
+    opacity: 0.7;
+}
+
+.vtkweb-opacity-editor {
+    width: 100%;
+    height: 150px;
+    display: block;
+    border: 1px solid rgba(128,128,128,0.45);
+    border-radius: 4px;
+    box-sizing: border-box;
+    touch-action: none;
+    cursor: crosshair;
+}
+
+.vtkweb-opacity-bg {
+    fill: rgba(128,128,128,0.06);
+    pointer-events: none;
+}
+
+.vtkweb-opacity-grid {
+    stroke: rgba(128,128,128,0.2);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+}
+
+.vtkweb-opacity-line {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+}
+
+.vtkweb-opacity-point {
+    fill: currentColor;
+    stroke: rgba(255,255,255,0.75);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+    cursor: grab;
+}
+
+.vtkweb-opacity-point:active {
+    cursor: grabbing;
+}
+
 """

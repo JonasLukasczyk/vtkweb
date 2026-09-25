@@ -493,6 +493,10 @@ def initialize_app_controller(
         distributed.replicate("set_render_size", view_id, int(width), int(height))
         rendering.set_render_size(view_id, width, height)
 
+    def set_tf_interacting(active) -> None:
+        distributed.replicate("set_tf_interacting", bool(active))
+        rendering.set_tf_interacting(bool(active))
+
     def set_tf_data(array_name, value) -> None:
         distributed.replicate("set_tf_data", array_name, value)
         rendering.transfer_functions.set_data(array_name, value)
@@ -501,35 +505,59 @@ def initialize_app_controller(
         distributed.replicate("apply_tf_preset", array_name, preset_name)
         rendering.transfer_functions.apply_preset(array_name, preset_name)
 
-    def set_tf_range(array_name, minimum, maximum) -> None:
-        distributed.replicate("set_tf_range", array_name, minimum, maximum)
-        rendering.transfer_functions.set_range(array_name, minimum, maximum)
+    def set_tf_mapping_range(array_name, mapping_name, minimum, maximum) -> None:
+        distributed.replicate(
+            "set_tf_mapping_range", array_name, mapping_name, minimum, maximum
+        )
+        rendering.transfer_functions.set_mapping_range(
+            array_name, mapping_name, minimum, maximum
+        )
 
-    def rescale_tf(array_name) -> None:
-        distributed.replicate("rescale_tf", array_name)
-        rendering.transfer_functions.rescale(array_name)
+    def rescale_tf_mapping(array_name, mapping_name) -> None:
+        distributed.replicate("rescale_tf_mapping", array_name, mapping_name)
+        rendering.transfer_functions.rescale_mapping(array_name, mapping_name)
 
-    def set_tf_control_point_component(
+    def set_tf_color_control_point_component(
         array_name, point_index, component_index, value
     ) -> None:
         distributed.replicate(
-            "set_tf_control_point_component",
+            "set_tf_color_control_point_component",
             array_name,
             point_index,
             component_index,
             value,
         )
-        rendering.transfer_functions.set_control_point_component(
+        rendering.transfer_functions.set_color_control_point_component(
             array_name, point_index, component_index, value
         )
 
-    def add_tf_control_point(array_name) -> None:
-        distributed.replicate("add_tf_control_point", array_name)
-        rendering.transfer_functions.add_control_point(array_name)
+    def add_tf_color_control_point(array_name) -> None:
+        distributed.replicate("add_tf_color_control_point", array_name)
+        rendering.transfer_functions.add_color_control_point(array_name)
 
-    def remove_tf_control_point(array_name, point_index) -> None:
-        distributed.replicate("remove_tf_control_point", array_name, point_index)
-        rendering.transfer_functions.remove_control_point(array_name, point_index)
+    def remove_tf_color_control_point(array_name, point_index) -> None:
+        distributed.replicate("remove_tf_color_control_point", array_name, point_index)
+        rendering.transfer_functions.remove_color_control_point(array_name, point_index)
+
+    def set_tf_opacity_control_point(array_name, point_index, x, opacity) -> None:
+        distributed.replicate(
+            "set_tf_opacity_control_point", array_name, point_index, x, opacity
+        )
+        rendering.transfer_functions.set_opacity_control_point(
+            array_name, point_index, x, opacity
+        )
+
+    def add_tf_opacity_control_point(array_name, x, opacity) -> None:
+        distributed.replicate("add_tf_opacity_control_point", array_name, x, opacity)
+        rendering.transfer_functions.add_opacity_control_point(array_name, x, opacity)
+
+    def remove_tf_opacity_control_point(array_name, point_index) -> None:
+        distributed.replicate(
+            "remove_tf_opacity_control_point", array_name, point_index
+        )
+        rendering.transfer_functions.remove_opacity_control_point(
+            array_name, point_index
+        )
 
     # -------------------------------------------------------------------------
     # Controller
@@ -544,13 +572,17 @@ def initialize_app_controller(
     ctrl.set_representation_kind = set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
     ctrl.set_representation_property = set_representation_property
+    ctrl.set_tf_interacting = set_tf_interacting
     ctrl.set_tf_data = set_tf_data
     ctrl.apply_tf_preset = apply_tf_preset
-    ctrl.set_tf_range = set_tf_range
-    ctrl.rescale_tf = rescale_tf
-    ctrl.set_tf_control_point_component = set_tf_control_point_component
-    ctrl.add_tf_control_point = add_tf_control_point
-    ctrl.remove_tf_control_point = remove_tf_control_point
+    ctrl.set_tf_mapping_range = set_tf_mapping_range
+    ctrl.rescale_tf_mapping = rescale_tf_mapping
+    ctrl.set_tf_color_control_point_component = set_tf_color_control_point_component
+    ctrl.add_tf_color_control_point = add_tf_color_control_point
+    ctrl.remove_tf_color_control_point = remove_tf_color_control_point
+    ctrl.set_tf_opacity_control_point = set_tf_opacity_control_point
+    ctrl.add_tf_opacity_control_point = add_tf_opacity_control_point
+    ctrl.remove_tf_opacity_control_point = remove_tf_opacity_control_point
     ctrl.create_view = create_view
     ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
@@ -581,6 +613,9 @@ def initialize_app_controller(
     ctrl.trigger("interact_view_camera")(interact_view_camera)
     ctrl.trigger("set_render_size")(set_render_size)
     ctrl.trigger("set_split_ratio")(set_split_ratio)
+    ctrl.trigger("set_tf_opacity_control_point")(set_tf_opacity_control_point)
+    ctrl.trigger("add_tf_opacity_control_point")(add_tf_opacity_control_point)
+    ctrl.trigger("remove_tf_opacity_control_point")(remove_tf_opacity_control_point)
 
     distributed.register("create_node", create_node)
     distributed.register("connect_nodes", connect_nodes)
@@ -599,15 +634,22 @@ def initialize_app_controller(
     distributed.register("reset_camera", reset_camera)
     distributed.register("interact_view_camera", interact_view_camera)
     distributed.register("set_render_size", set_render_size)
+    distributed.register("set_tf_interacting", set_tf_interacting)
     distributed.register("set_tf_data", set_tf_data)
     distributed.register("apply_tf_preset", apply_tf_preset)
-    distributed.register("set_tf_range", set_tf_range)
-    distributed.register("rescale_tf", rescale_tf)
+    distributed.register("set_tf_mapping_range", set_tf_mapping_range)
+    distributed.register("rescale_tf_mapping", rescale_tf_mapping)
     distributed.register(
-        "set_tf_control_point_component", set_tf_control_point_component
+        "set_tf_color_control_point_component",
+        set_tf_color_control_point_component,
     )
-    distributed.register("add_tf_control_point", add_tf_control_point)
-    distributed.register("remove_tf_control_point", remove_tf_control_point)
+    distributed.register("add_tf_color_control_point", add_tf_color_control_point)
+    distributed.register("remove_tf_color_control_point", remove_tf_color_control_point)
+    distributed.register("set_tf_opacity_control_point", set_tf_opacity_control_point)
+    distributed.register("add_tf_opacity_control_point", add_tf_opacity_control_point)
+    distributed.register(
+        "remove_tf_opacity_control_point", remove_tf_opacity_control_point
+    )
     distributed.register("set_active_node", set_active_node)
     distributed.register("delete_node", delete_node)
     distributed.register("clear_state", clear_state)

@@ -10,10 +10,20 @@ from matplotlib import colormaps
 
 
 DEFAULT_TRANSFER_FUNCTION = {
-    "control_points": [
-        [0.0, 0.0, 0.0, 0.0, 1.0],
-        [1.0, 1.0, 1.0, 1.0, 1.0],
-    ],
+    "color": {
+        "range": [0.0, 1.0],
+        "control_points": [
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ],
+    },
+    "opacity": {
+        "range": [0.0, 1.0],
+        "control_points": [
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ],
+    },
 }
 
 
@@ -53,28 +63,14 @@ def _preset_preview_uri(name: str, samples: int = 24) -> str:
     return f"data:image/svg+xml;base64,{encoded}"
 
 
-def transfer_function_from_colormap(
-    name: str,
-    data_range: tuple[float, float] | list[float] = (0.0, 1.0),
-    samples: int = 16,
-) -> dict[str, Any]:
-    """Sample a Matplotlib colormap directly into scalar-space TF points."""
-    minimum, maximum = map(float, data_range)
-    width = maximum - minimum
+def color_points_from_colormap(name: str, samples: int = 16) -> list[list[float]]:
+    """Sample a Matplotlib colormap into normalized color control points."""
     cmap = colormaps[name]
     points = []
     for t in np.linspace(0.0, 1.0, max(2, int(samples))):
         r, g, b, _ = cmap(float(t))
-        points.append(
-            [
-                minimum + float(t) * width,
-                float(r),
-                float(g),
-                float(b),
-                1.0,
-            ]
-        )
-    return {"control_points": points}
+        points.append([float(t), float(r), float(g), float(b)])
+    return points
 
 
 class TransferFunctionManager:
@@ -102,16 +98,11 @@ class TransferFunctionManager:
         if current is not None:
             return deepcopy(current)
 
-        if data_range is None:
-            value = deepcopy(DEFAULT_TRANSFER_FUNCTION)
-        else:
-            minimum, maximum = map(float, data_range)
-            value = {
-                "control_points": [
-                    [minimum, 0.0, 0.0, 0.0, 1.0],
-                    [maximum, 1.0, 1.0, 1.0, 1.0],
-                ]
-            }
+        value = deepcopy(DEFAULT_TRANSFER_FUNCTION)
+        if data_range is not None:
+            mapping_range = [float(data_range[0]), float(data_range[1])]
+            value["color"]["range"] = list(mapping_range)
+            value["opacity"]["range"] = list(mapping_range)
         self.set_data(array_name, value)
         return self.get(array_name) or deepcopy(value)
 
@@ -124,39 +115,27 @@ class TransferFunctionManager:
 
     def apply_preset(self, array_name: str, preset_name: str) -> None:
         current = self.ensure(array_name)
-        self.set_data(
-            array_name,
-            transfer_function_from_colormap(preset_name, _point_range(current)),
-        )
-
-    def set_range(self, array_name: str, minimum: float, maximum: float) -> None:
-        current = self.ensure(array_name)
-        points = [list(point) for point in current["control_points"]]
-        old_minimum, old_maximum = _point_range(current)
-        minimum = float(minimum)
-        maximum = float(maximum)
-        old_width = old_maximum - old_minimum
-        new_width = maximum - minimum
-
-        if abs(old_width) < 1.0e-20:
-            count = len(points) - 1
-            for index, point in enumerate(points):
-                t = index / count if count else 0.0
-                point[0] = minimum + t * new_width
-        else:
-            for point in points:
-                t = (float(point[0]) - old_minimum) / old_width
-                point[0] = minimum + t * new_width
-
-        current["control_points"] = points
+        current["color"]["control_points"] = color_points_from_colormap(preset_name)
         self.set_data(array_name, current)
 
-    def rescale(self, array_name: str) -> None:
+    def set_mapping_range(
+        self,
+        array_name: str,
+        mapping_name: str,
+        minimum: float,
+        maximum: float,
+    ) -> None:
+        current = self.ensure(array_name)
+        mapping = _mapping(current, mapping_name)
+        mapping["range"] = _normalize_range([minimum, maximum])
+        self.set_data(array_name, current)
+
+    def rescale_mapping(self, array_name: str, mapping_name: str) -> None:
         data_range = self.rendering.get_global_array_range(array_name)
         if data_range is not None:
-            self.set_range(array_name, *data_range)
+            self.set_mapping_range(array_name, mapping_name, *data_range)
 
-    def set_control_point_component(
+    def set_color_control_point_component(
         self,
         array_name: str,
         point_index: int,
@@ -164,48 +143,99 @@ class TransferFunctionManager:
         value: float,
     ) -> None:
         current = self.ensure(array_name)
-        points = [list(point) for point in current["control_points"]]
+        points = [list(point) for point in current["color"]["control_points"]]
         point_index = int(point_index)
         component_index = int(component_index)
-        if not (0 <= point_index < len(points)):
+        if not (0 <= point_index < len(points)) or not (0 <= component_index <= 3):
             return
-        if not (0 <= component_index <= 4):
-            return
-        points[point_index][component_index] = (
-            _finite_float(value) if component_index == 0 else _clamp01(value)
-        )
+        points[point_index][component_index] = _clamp01(value)
         points.sort(key=lambda point: point[0])
-        current["control_points"] = points
+        current["color"]["control_points"] = points
         self.set_data(array_name, current)
 
-    def add_control_point(self, array_name: str) -> None:
+    def add_color_control_point(self, array_name: str) -> None:
         current = self.ensure(array_name)
-        points = [list(point) for point in current["control_points"]]
+        points = [list(point) for point in current["color"]["control_points"]]
         points.sort(key=lambda point: point[0])
-
         gap_index = max(
             range(len(points) - 1),
             key=lambda i: points[i + 1][0] - points[i][0],
         )
         left = points[gap_index]
         right = points[gap_index + 1]
-        midpoint = [(a + b) * 0.5 for a, b in zip(left, right)]
-        midpoint[4] = 1.0 if left[4] == right[4] == 1.0 else midpoint[4]
-        points.append(midpoint)
+        points.append([(a + b) * 0.5 for a, b in zip(left, right)])
         points.sort(key=lambda point: point[0])
-        current["control_points"] = points
+        current["color"]["control_points"] = points
         self.set_data(array_name, current)
 
-    def remove_control_point(self, array_name: str, point_index: int) -> None:
+    def remove_color_control_point(self, array_name: str, point_index: int) -> None:
         current = self.ensure(array_name)
-        points = [list(point) for point in current["control_points"]]
+        points = [list(point) for point in current["color"]["control_points"]]
         if len(points) <= 2:
             return
         point_index = int(point_index)
         if 0 <= point_index < len(points):
             points.pop(point_index)
-            current["control_points"] = points
+            current["color"]["control_points"] = points
             self.set_data(array_name, current)
+
+    def set_opacity_control_point(
+        self,
+        array_name: str,
+        point_index: int,
+        x: float,
+        opacity: float,
+    ) -> None:
+        current = self.ensure(array_name)
+        points = [list(point) for point in current["opacity"]["control_points"]]
+        point_index = int(point_index)
+        if not (0 <= point_index < len(points)):
+            return
+
+        x = _clamp01(x)
+        opacity = _clamp01(opacity)
+        if point_index == 0:
+            x = 0.0
+        elif point_index == len(points) - 1:
+            x = 1.0
+        else:
+            epsilon = 1.0e-6
+            x = max(points[point_index - 1][0] + epsilon, x)
+            x = min(points[point_index + 1][0] - epsilon, x)
+
+        points[point_index] = [x, opacity]
+        current["opacity"]["control_points"] = points
+        self.set_data(array_name, current)
+
+    def add_opacity_control_point(
+        self,
+        array_name: str,
+        x: float,
+        opacity: float,
+    ) -> None:
+        current = self.ensure(array_name)
+        points = [list(point) for point in current["opacity"]["control_points"]]
+        x = _clamp01(x)
+        opacity = _clamp01(opacity)
+        epsilon = 1.0e-6
+        if x <= epsilon or x >= 1.0 - epsilon:
+            return
+        if any(abs(point[0] - x) <= epsilon for point in points):
+            return
+        points.append([x, opacity])
+        points.sort(key=lambda point: point[0])
+        current["opacity"]["control_points"] = points
+        self.set_data(array_name, current)
+
+    def remove_opacity_control_point(self, array_name: str, point_index: int) -> None:
+        current = self.ensure(array_name)
+        points = [list(point) for point in current["opacity"]["control_points"]]
+        point_index = int(point_index)
+        if point_index <= 0 or point_index >= len(points) - 1:
+            return
+        points.pop(point_index)
+        current["opacity"]["control_points"] = points
+        self.set_data(array_name, current)
 
     def discover_node_outputs(self, node_id: str) -> None:
         node = self.rendering.pipeline.nodes[node_id]
@@ -231,39 +261,80 @@ class TransferFunctionManager:
                 self.rendering.refresh_representation(representation.id)
 
 
-def _point_range(value: dict[str, Any]) -> tuple[float, float]:
-    points = value["control_points"]
-    return float(points[0][0]), float(points[-1][0])
+def _mapping(value: dict[str, Any], name: str) -> dict[str, Any]:
+    if name not in {"color", "opacity"}:
+        raise ValueError(f"Unknown transfer-function mapping: {name}")
+    return value[name]
 
 
 def _normalize_tf(value: dict[str, Any]) -> dict[str, Any]:
-    raw_points = value.get("control_points", [])
-    if len(raw_points) < 2:
-        raise ValueError("transfer function requires at least two control points")
-
-    points = []
-    for raw_point in raw_points:
-        if len(raw_point) != 5:
-            raise ValueError("control points must have format [value, r, g, b, o]")
-        points.append(
-            [
-                _finite_float(raw_point[0]),
-                _clamp01(raw_point[1]),
-                _clamp01(raw_point[2]),
-                _clamp01(raw_point[3]),
-                _clamp01(raw_point[4]),
-            ]
+    if set(value) != {"color", "opacity"}:
+        raise ValueError(
+            "transfer function must contain exactly color and opacity mappings"
         )
+
+    color = value["color"]
+    opacity = value["opacity"]
+    return {
+        "color": {
+            "range": _normalize_range(color.get("range")),
+            "control_points": _normalize_points(
+                color.get("control_points"), 4, "color"
+            ),
+        },
+        "opacity": {
+            "range": _normalize_range(opacity.get("range")),
+            "control_points": _normalize_opacity_points(opacity.get("control_points")),
+        },
+    }
+
+
+def _normalize_range(value) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("mapping range must be [minimum, maximum]")
+    minimum = _finite_float(value[0])
+    maximum = _finite_float(value[1])
+    if maximum <= minimum:
+        raise ValueError("mapping range maximum must be greater than minimum")
+    return [minimum, maximum]
+
+
+def _normalize_points(value, width: int, label: str) -> list[list[float]]:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        raise ValueError(f"{label} mapping requires at least two control points")
+    points = []
+    for raw_point in value:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != width:
+            raise ValueError(f"{label} control points must have {width} components")
+        points.append([_clamp01(component) for component in raw_point])
     points.sort(key=lambda point: point[0])
-    return {"control_points": points}
+    return points
+
+
+def _normalize_opacity_points(value) -> list[list[float]]:
+    points = _normalize_points(value, 2, "opacity")
+    points[0][0] = 0.0
+    points[-1][0] = 1.0
+    for index in range(1, len(points)):
+        if points[index][0] <= points[index - 1][0]:
+            raise ValueError(
+                "opacity control-point x coordinates must be strictly increasing"
+            )
+    return points
 
 
 def _finite_float(value: float) -> float:
     result = float(value)
     if not isfinite(result):
-        raise ValueError("transfer-function scalar positions must be finite")
+        raise ValueError("transfer-function values must be finite")
     return result
 
 
 def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
+    return max(0.0, min(1.0, _finite_float(value)))
+
+
+def mapping_scalar(mapping: dict[str, Any], x: float) -> float:
+    """Convert a normalized mapping coordinate to scalar space."""
+    minimum, maximum = mapping["range"]
+    return float(minimum) + float(x) * (float(maximum) - float(minimum))

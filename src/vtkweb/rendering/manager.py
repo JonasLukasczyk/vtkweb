@@ -40,6 +40,11 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
     "specular_power": 10.0,
     "global_illumination_reach": 0.0,
     "volumetric_scattering_blending": 0.0,
+    "scattering_anisotropy": 0.0,
+    "environment_scattering_strength": 1.0,
+    "environment_scattering_samples": 0,
+    "environment_scattering_step_factor": 4.0,
+    "volume_depth_opacity_threshold": 0.95,
     "auto_adjust_sample_distances": True,
     "sample_distance": 1.0,
 }
@@ -591,6 +596,24 @@ class RenderManager:
         self._update_representation(representation_id)
         self._notify_render()
 
+    def set_tf_interacting(self, active: bool) -> None:
+        """Toggle transient transfer-function drag mode on rendering backends.
+
+        While active, Mitsuba avoids expensive opacity-dependent lighting bakes.
+        Ending interaction refreshes volume representations once so their cached
+        lighting fields are rebuilt from the final opacity mapping.
+        """
+        active = bool(active)
+        for backend in tuple(self._backends.values()):
+            setter = getattr(backend, "set_tf_interacting", None)
+            if setter is not None:
+                setter(active)
+        if not active:
+            for representation in tuple(self.representations):
+                if representation.kind == "volume":
+                    self._update_representation(representation.id)
+            self._notify_render()
+
     def discover_transfer_functions(self, node_id: str) -> None:
         self.transfer_functions.discover_node_outputs(node_id)
 
@@ -712,6 +735,18 @@ class RenderManager:
             value = _rgb_to_hex(tuple(map(float, value)))
         elif name == "world_ambient_intensity":
             value = max(0.0, float(value))
+        elif name == "camera_focal_length_mm":
+            value = max(1.0, float(value))
+        elif name in {"camera_focus_distance", "camera_aperture_radius"}:
+            value = max(0.0, float(value))
+        elif name == "ssao_slices":
+            value = max(0, min(8, int(round(float(value)))))
+        elif name == "ssao_steps":
+            value = max(1, min(32, int(round(float(value)))))
+        elif name in {"ssao_radius", "ssao_strength"}:
+            value = max(0.0, float(value))
+        elif name == "ssao_thickness":
+            value = max(1.0e-6, float(value))
         elif name == "fps_limit":
             value = max(1, int(round(float(value))))
         elif name in {"debug", "distributed"}:
@@ -726,6 +761,24 @@ class RenderManager:
         property_state = dict(properties[name])
         property_state["value"] = value
         properties[name] = property_state
+
+        # Keep the canonical camera field-of-view synchronized with the
+        # photographic focal-length control used by the Mitsuba thin-lens
+        # sensor. A 24 mm film height matches the 35 mm-equivalent convention.
+        if name == "camera_focal_length_mm":
+            camera_state = dict(properties["camera"].get("value") or {})
+            camera_state["fov"] = math.degrees(
+                2.0 * math.atan(12.0 / max(float(value), 1.0e-12))
+            )
+            camera_property = dict(properties["camera"])
+            camera_property["value"] = _normalize_camera(camera_state)
+            properties["camera"] = camera_property
+        elif name == "camera" and value.get("fov") is not None:
+            focal_property = dict(properties["camera_focal_length_mm"])
+            half = 0.5 * math.radians(max(float(value["fov"]), 1.0e-6))
+            focal_property["value"] = 12.0 / max(math.tan(half), 1.0e-12)
+            properties["camera_focal_length_mm"] = focal_property
+
         view["properties"] = properties
         self.state.views = {**self.state.views, view_id: view}
 
@@ -745,6 +798,22 @@ class RenderManager:
         if name == "debug":
             if self._is_view_materialized(view_id):
                 self.frames.set_debug(view_id, value)
+        elif name in {
+            "ssao_slices",
+            "ssao_steps",
+            "ssao_radius",
+            "ssao_strength",
+            "ssao_thickness",
+        }:
+            if self._is_view_materialized(view_id):
+                self.frames.set_ssao(
+                    view_id,
+                    slices=self.get_view_property(view_id, "ssao_slices"),
+                    steps=self.get_view_property(view_id, "ssao_steps"),
+                    radius=self.get_view_property(view_id, "ssao_radius"),
+                    strength=self.get_view_property(view_id, "ssao_strength"),
+                    thickness=self.get_view_property(view_id, "ssao_thickness"),
+                )
         elif name == "fps_limit":
             if self._is_view_materialized(view_id):
                 self.frames.set_fps_limit(view_id, float(value))
@@ -909,6 +978,14 @@ class RenderManager:
             )
 
         self.frames.set_debug(view_id, bool(self.get_view_property(view_id, "debug")))
+        self.frames.set_ssao(
+            view_id,
+            slices=self.get_view_property(view_id, "ssao_slices"),
+            steps=self.get_view_property(view_id, "ssao_steps"),
+            radius=self.get_view_property(view_id, "ssao_radius"),
+            strength=self.get_view_property(view_id, "ssao_strength"),
+            thickness=self.get_view_property(view_id, "ssao_thickness"),
+        )
         self.frames.set_fps_limit(
             view_id, float(self.get_view_property(view_id, "fps_limit"))
         )

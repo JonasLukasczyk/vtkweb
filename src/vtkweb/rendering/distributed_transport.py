@@ -65,6 +65,16 @@ class DistributedFrameTransport:
             tile_id=packet.get("tile_id", packet.get("rank", 0)),
             debug=packet.get("debug", False),
             size_revision=packet.get("size_revision", 0),
+            depth=packet.get("depth"),
+            depth_near=packet.get("depth_near"),
+            depth_far=packet.get("depth_far"),
+            depth_encoding=packet.get("depth_encoding"),
+            ssao_slices=int(packet.get("ssao_slices", 0)),
+            ssao_steps=int(packet.get("ssao_steps", 6)),
+            ssao_radius=float(packet.get("ssao_radius", 10.0)),
+            ssao_strength=float(packet.get("ssao_strength", 1.0)),
+            ssao_thickness=float(packet.get("ssao_thickness", 0.4)),
+            camera_fov=float(packet.get("camera_fov", 30.0)),
         )
 
     def set_view_distributed(self, view_id: str, enabled: bool) -> None:
@@ -95,6 +105,16 @@ class DistributedFrameTransport:
         tile_id: int = 0,
         debug: bool = False,
         size_revision: int = 0,
+        depth: bytes | None = None,
+        depth_near: float | None = None,
+        depth_far: float | None = None,
+        depth_encoding: str | None = None,
+        ssao_slices: int = 0,
+        ssao_steps: int = 6,
+        ssao_radius: float = 10.0,
+        ssao_strength: float = 1.0,
+        ssao_thickness: float = 0.4,
+        camera_fov: float = 30.0,
     ) -> None:
         if not image:
             return
@@ -106,6 +126,21 @@ class DistributedFrameTransport:
                     mime_type=mime_type,
                     generation=generation,
                     sequence=sequence,
+                    region=region,
+                    full_size=full_size,
+                    tile_id=tile_id,
+                    debug=debug,
+                    size_revision=size_revision,
+                    depth=depth,
+                    depth_near=depth_near,
+                    depth_far=depth_far,
+                    depth_encoding=depth_encoding,
+                    ssao_slices=ssao_slices,
+                    ssao_steps=ssao_steps,
+                    ssao_radius=ssao_radius,
+                    ssao_strength=ssao_strength,
+                    ssao_thickness=ssao_thickness,
+                    camera_fov=camera_fov,
                 )
             return
 
@@ -123,6 +158,16 @@ class DistributedFrameTransport:
                     tile_id=tile_id,
                     debug=debug,
                     size_revision=size_revision,
+                    depth=depth,
+                    depth_near=depth_near,
+                    depth_far=depth_far,
+                    depth_encoding=depth_encoding,
+                    ssao_slices=ssao_slices,
+                    ssao_steps=ssao_steps,
+                    ssao_radius=ssao_radius,
+                    ssao_strength=ssao_strength,
+                    ssao_thickness=ssao_thickness,
+                    camera_fov=camera_fov,
                 )
             return
 
@@ -138,5 +183,15 @@ class DistributedFrameTransport:
                 "tile_id": int(tile_id),
                 "debug": bool(debug),
                 "size_revision": int(size_revision),
+                "depth": depth,
+                "depth_near": depth_near,
+                "depth_far": depth_far,
+                "depth_encoding": depth_encoding,
+                "ssao_slices": int(ssao_slices),
+                "ssao_steps": int(ssao_steps),
+                "ssao_radius": float(ssao_radius),
+                "ssao_strength": float(ssao_strength),
+                "ssao_thickness": float(ssao_thickness),
+                "camera_fov": float(camera_fov),
             }
         )

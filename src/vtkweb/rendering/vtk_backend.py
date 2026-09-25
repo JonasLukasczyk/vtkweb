@@ -8,6 +8,8 @@ import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
+from vtkweb.transfer_functions import mapping_scalar
+
 from vtkweb.rendering.base import RenderView, RenderingBackend, Representation
 
 
@@ -388,6 +390,24 @@ class VTKRenderingBackend(RenderingBackend):
             volume_property.SetSpecularPower(
                 float(properties.get("specular_power", 10.0))
             )
+            volume_property.SetScatteringAnisotropy(
+                max(-1.0, min(1.0, float(properties.get("scattering_anisotropy", 0.0))))
+            )
+            mapper.SetGlobalIlluminationReach(
+                max(
+                    0.0,
+                    min(1.0, float(properties.get("global_illumination_reach", 0.0))),
+                )
+            )
+            mapper.SetVolumetricScatteringBlending(
+                max(
+                    0.0,
+                    min(
+                        2.0,
+                        float(properties.get("volumetric_scattering_blending", 0.0)),
+                    ),
+                )
+            )
 
             blend_mode = properties.get("blend_mode", "composite")
             if blend_mode == "maximum":
@@ -439,10 +459,7 @@ class VTKRenderingBackend(RenderingBackend):
                 mapper.SetScalarModeToUseCellFieldData()
             mapper.SelectColorArray(selected_array_name)
             mapper.SetLookupTable(_build_surface_color_map(tf))
-            mapper.SetScalarRange(
-                float(tf["control_points"][0][0]),
-                float(tf["control_points"][-1][0]),
-            )
+            mapper.SetScalarRange(*map(float, tf["color"]["range"]))
             mapper.SetColorModeToMapScalars()
             mapper.UseLookupTableScalarRangeOn()
         mapper.Modified()
@@ -486,8 +503,9 @@ def _build_surface_color_map(tf: dict[str, Any]) -> vtk.vtkColorTransferFunction
     color_map = vtk.vtkColorTransferFunction()
     color_map.SetColorSpaceToRGB()
     color_map.SetClamping(True)
-    for value, r, g, b, _opacity in tf["control_points"]:
-        color_map.AddRGBPoint(float(value), float(r), float(g), float(b))
+    mapping = tf["color"]
+    for x, r, g, b in mapping["control_points"]:
+        color_map.AddRGBPoint(mapping_scalar(mapping, x), float(r), float(g), float(b))
     return color_map
 
 
@@ -496,15 +514,22 @@ def _apply_volume_transfer_function(
     opacity_function: vtk.vtkPiecewiseFunction | None,
     tf: dict[str, Any],
 ) -> None:
+    color_mapping = tf["color"]
+    opacity_mapping = tf["opacity"]
     if color_function is not None:
         color_function.RemoveAllPoints()
+        color_function.SetClamping(True)
+        for x, r, g, b in color_mapping["control_points"]:
+            color_function.AddRGBPoint(
+                mapping_scalar(color_mapping, x), float(r), float(g), float(b)
+            )
     if opacity_function is not None:
         opacity_function.RemoveAllPoints()
-    for value, r, g, b, opacity in tf["control_points"]:
-        if color_function is not None:
-            color_function.AddRGBPoint(float(value), float(r), float(g), float(b))
-        if opacity_function is not None:
-            opacity_function.AddPoint(float(value), float(opacity))
+        opacity_function.SetClamping(True)
+        for x, opacity in opacity_mapping["control_points"]:
+            opacity_function.AddPoint(
+                mapping_scalar(opacity_mapping, x), float(opacity)
+            )
 
 
 def _apply_fixed_volume_color(
