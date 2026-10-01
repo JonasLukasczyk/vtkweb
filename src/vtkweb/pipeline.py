@@ -103,6 +103,7 @@ class PipelineGraph:
         }
 
         self.state.active_node_id = None
+        self.state.pipeline_execution = {}
         self._modification_versions: dict[str, int] = {}
         self._property_descriptors: dict[str, dict[str, object]] = {}
 
@@ -177,6 +178,7 @@ class PipelineGraph:
             "nodes": {},
             "edges": [],
         }
+        self.state.pipeline_execution = {}
         self.state.active_node_id = None
 
     # -------------------------------------------------------------------------
@@ -245,7 +247,6 @@ class PipelineGraph:
             "output_port_count": processor.GetNumberOfOutputPorts(),
             "properties": properties,
             "input_arrays": self._inspect_input_array_state(processor),
-            "execution_state": "modified",
         }
 
         pipeline_state = dict(self.state.pipeline)
@@ -255,6 +256,10 @@ class PipelineGraph:
         pipeline_state["nodes"] = nodes
 
         self.state.pipeline = pipeline_state
+        self.state.pipeline_execution = {
+            **self.state.pipeline_execution,
+            node_id: "modified",
+        }
 
         if self.active_node_id is None:
             self.state.active_node_id = node_id
@@ -302,6 +307,9 @@ class PipelineGraph:
         )
         self._modification_versions.pop(node_id, None)
         self._property_descriptors.pop(node_id, None)
+        execution = dict(self.state.pipeline_execution)
+        execution.pop(node_id, None)
+        self.state.pipeline_execution = execution
 
         for target_node_id in affected_targets:
             if target_node_id in nodes:
@@ -585,7 +593,7 @@ class PipelineGraph:
     # -------------------------------------------------------------------------
 
     def execution_state(self, node_id: str) -> str:
-        return self.node_state(node_id).get("execution_state", "modified")
+        return self.state.pipeline_execution.get(node_id, "modified")
 
     def has_valid_output(self, node_id: str) -> bool:
         return self.execution_state(node_id) == "success"
@@ -594,49 +602,39 @@ class PipelineGraph:
         return self._modification_versions.get(node_id, 0)
 
     def set_execution_state(self, node_id: str, execution_state: str) -> None:
-        pipeline_state = dict(self.state.pipeline)
-        nodes = dict(pipeline_state["nodes"])
-        node = dict(nodes[node_id])
-        node["execution_state"] = execution_state
-        nodes[node_id] = node
-        pipeline_state["nodes"] = nodes
-        self.state.pipeline = pipeline_state
+        self.state.pipeline_execution = {
+            **self.state.pipeline_execution,
+            node_id: execution_state,
+        }
 
     def set_execution_states(self, node_ids, execution_state: str) -> None:
-        node_ids = list(node_ids)
-        if not node_ids:
-            return
-        pipeline_state = dict(self.state.pipeline)
-        nodes = dict(pipeline_state["nodes"])
-        for node_id in node_ids:
-            if node_id not in nodes:
-                continue
-            node = dict(nodes[node_id])
-            node["execution_state"] = execution_state
-            nodes[node_id] = node
-        pipeline_state["nodes"] = nodes
-        self.state.pipeline = pipeline_state
+        updates = {
+            node_id: execution_state
+            for node_id in node_ids
+            if node_id in self.state.pipeline["nodes"]
+        }
+        if updates:
+            self.state.pipeline_execution = {
+                **self.state.pipeline_execution,
+                **updates,
+            }
 
     def mark_modified(self, node_id: str, *, include_downstream: bool = True) -> None:
         affected = (
             self.downstream_subgraph(node_id) if include_downstream else {node_id}
         )
-        pipeline_state = dict(self.state.pipeline)
-        nodes = dict(pipeline_state["nodes"])
+        execution = dict(self.state.pipeline_execution)
         for affected_id in affected:
-            if affected_id not in nodes:
+            if affected_id not in self.state.pipeline["nodes"]:
                 continue
             self._modification_versions[affected_id] = (
                 self.modification_version(affected_id) + 1
             )
-            node = dict(nodes[affected_id])
             # Preserve running so the UI keeps showing execution; the version
             # makes the scheduler return it to modified after Update().
-            if node.get("execution_state") != "running":
-                node["execution_state"] = "modified"
-            nodes[affected_id] = node
-        pipeline_state["nodes"] = nodes
-        self.state.pipeline = pipeline_state
+            if execution.get(affected_id) != "running":
+                execution[affected_id] = "modified"
+        self.state.pipeline_execution = execution
 
     def modified_node_ids(self) -> list[str]:
         return [

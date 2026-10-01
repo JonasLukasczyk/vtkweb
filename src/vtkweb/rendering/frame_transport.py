@@ -37,7 +37,7 @@ class _ViewStream:
     """All mutable transport state for one logical view."""
 
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
-    clients: set[int] = field(default_factory=set)
+    clients: dict[int, web.WebSocketResponse] = field(default_factory=dict)
     pending_clients: set[int] = field(default_factory=set)
     frame: _CompositeFrame | None = None
     encoded: _EncodedFrame | None = None
@@ -50,6 +50,8 @@ class _ViewStream:
     stats_rank_frames: dict[int, int] = field(default_factory=dict)
     stats_known_ranks: set[int] = field(default_factory=set)
     stats_composite_frames: int = 0
+    stats_encoded_frames: int = 0
+    stats_delivered_frames: int = 0
     stats_bytes: int = 0
 
 
@@ -83,12 +85,11 @@ class H264WebSocketFrameTransport:
     """
 
     route = "/vtkweb/video/{view_id}"
-    _packet_header = struct.Struct("!BQ")  # keyframe flag, timestamp_us
+    _packet_header = struct.Struct("!BQQ")  # keyframe flag, sequence, timestamp_us
 
     def __init__(self, server) -> None:
         self.server = server
         self._streams: dict[str, _ViewStream] = {}
-        self.server.state.render_stats = {}
         self._next_client_id = 1
         server.controller.on_server_bind.add(self._on_server_bind)
 
@@ -193,6 +194,7 @@ class H264WebSocketFrameTransport:
         stream.sequence = sequence
         stream.encoded_revision = stream.frame_revision
         stream.encoded = encoded
+        stream.stats_encoded_frames += 1
         # Only clients present at encode time must consume this access unit.
         stream.pending_clients = set(stream.clients)
         return True
@@ -214,30 +216,51 @@ class H264WebSocketFrameTransport:
             {"rank": rank_id, "fps": stream.stats_rank_frames.get(rank_id, 0) / elapsed}
             for rank_id in sorted(stream.stats_known_ranks)
         ]
-        current = dict(self.server.state.render_stats or {})
-        current[str(view_id)] = {
-            "rank_fps": rank_fps,
-            "composite_fps": stream.stats_composite_frames / elapsed,
-            "data_mib_s": stream.stats_bytes / elapsed / (1024.0 * 1024.0),
-        }
-        self.server.state.render_stats = current
-        # Stats are produced outside a Trame RPC callback. Publish only this key
-        # instead of calling state.flush(), which would also push unrelated
-        # pending UI state and can overwrite controls while the user is editing.
-        protocol = self.server.protocol
-        if protocol is not None:
-            payload = self.server.state.translator.translate_dict(
-                {"render_stats": current}
-            )
-            protocol.push_state_change(payload)
-            # Mark this one key as committed so a later normal Trame flush does
-            # not resend it together with unrelated state.
-            self.server.state.clean("render_stats")
+        self.publish_message(
+            str(view_id),
+            {
+                "type": "stats",
+                "rank_fps": rank_fps,
+                "composite_fps": stream.stats_composite_frames / elapsed,
+                "encoded_fps": stream.stats_encoded_frames / elapsed,
+                "delivered_fps": stream.stats_delivered_frames / elapsed,
+                "data_mib_s": stream.stats_bytes / elapsed / (1024.0 * 1024.0),
+            },
+        )
 
         stream.stats_started_at = now
         stream.stats_rank_frames.clear()
         stream.stats_composite_frames = 0
+        stream.stats_encoded_frames = 0
+        stream.stats_delivered_frames = 0
         stream.stats_bytes = 0
+
+
+    def publish_message(self, view_id: str, message: dict) -> None:
+        """Send render telemetry directly over the per-view video socket.
+
+        This intentionally bypasses Trame state so high-frequency telemetry
+        cannot trigger Vue updates while a user is editing an unrelated widget.
+        """
+        stream = self._streams.get(str(view_id))
+        if stream is None or not stream.clients:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        payload = json.dumps(message, separators=(",", ":"))
+        loop.create_task(self._broadcast_text(stream, payload))
+
+    @staticmethod
+    async def _broadcast_text(stream: _ViewStream, payload: str) -> None:
+        for ws in list(stream.clients.values()):
+            if ws.closed:
+                continue
+            try:
+                await ws.send_str(payload)
+            except (ConnectionResetError, RuntimeError):
+                pass
 
     def reset_stats(self, view_id: str) -> None:
         """Start a fresh measurement window for one view.
@@ -251,6 +274,8 @@ class H264WebSocketFrameTransport:
         stream.stats_started_at = time.monotonic()
         stream.stats_rank_frames.clear()
         stream.stats_composite_frames = 0
+        stream.stats_encoded_frames = 0
+        stream.stats_delivered_frames = 0
         stream.stats_bytes = 0
 
     @staticmethod
@@ -341,6 +366,7 @@ class H264WebSocketFrameTransport:
         if stream.pending_clients:
             return
 
+        stream.stats_delivered_frames += 1
         stream.encoded = None
         if self._encode_latest(stream):
             await self._notify(stream)
@@ -381,7 +407,7 @@ class H264WebSocketFrameTransport:
         stream = self._stream(view_id)
         client_id = self._next_client_id
         self._next_client_id += 1
-        stream.clients.add(client_id)
+        stream.clients[client_id] = ws
 
         # A new WebCodecs decoder must start on a keyframe. Restarting the
         # shared encoder makes the next access unit a fresh GOP for the newcomer.
@@ -422,17 +448,42 @@ class H264WebSocketFrameTransport:
 
                 header = self._packet_header.pack(
                     1 if frame.keyframe else 0,
+                    frame.sequence,
                     frame.timestamp_us,
                 )
                 await ws.send_bytes(header + frame.payload)
-                await self._mark_delivered(stream, client_id, frame.sequence)
+
+                # Do not release this H.264 access unit until the browser has
+                # decoded and drawn it. This bounds the browser decoder queue
+                # without dropping inter-frame packets after x264.
+                while not ws.closed:
+                    message = await ws.receive()
+                    if message.type == web.WSMsgType.TEXT:
+                        try:
+                            ack = json.loads(message.data)
+                        except json.JSONDecodeError:
+                            continue
+                        if (
+                            ack.get("type") == "ack"
+                            and int(ack.get("sequence", -1)) == frame.sequence
+                        ):
+                            await self._mark_delivered(
+                                stream, client_id, frame.sequence
+                            )
+                            break
+                    elif message.type in {
+                        web.WSMsgType.CLOSE,
+                        web.WSMsgType.CLOSED,
+                        web.WSMsgType.ERROR,
+                    }:
+                        break
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         except Exception as exc:
             if not ws.closed:
                 await ws.send_str(json.dumps({"type": "error", "message": str(exc)}))
         finally:
-            stream.clients.discard(client_id)
+            stream.clients.pop(client_id, None)
             # Do not let a disconnected client hold the in-flight access unit.
             if stream.encoded is not None:
                 await self._mark_delivered(stream, client_id, stream.encoded.sequence)

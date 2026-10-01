@@ -8,11 +8,14 @@ from vtkweb.distributed import context
 class DistributedFrameTransport:
     """Forward raw RGB tiles to rank 0 for immediate CPU composition/encoding."""
 
-    def __init__(self, root_transport=None) -> None:
+    def __init__(self, root_transport=None, activity_reporter=None) -> None:
         self.root_transport = root_transport
+        self.activity_reporter = activity_reporter
         self._receiver_task: asyncio.Task | None = None
 
     def ensure_receiver(self) -> None:
+        if self.activity_reporter is not None:
+            self.activity_reporter.ensure_receiver()
         if not context.enabled or not context.is_root or self.root_transport is None:
             return
         if self._receiver_task is None or self._receiver_task.done():

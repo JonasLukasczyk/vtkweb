@@ -153,8 +153,104 @@ WORKSPACE_STYLE = """
     pointer-events: none;
 }
 
-.vtkweb-render-stats-ranks {
+.vtkweb-render-stats-ranks,
+.vtkweb-client-video-stats {
     margin-top: 2px;
+}
+
+.vtkweb-server-render-stats,
+.vtkweb-render-stats-ranks,
+.vtkweb-client-video-stats {
+    white-space: pre-line;
+}
+
+
+.vtkweb-render-activities {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 30;
+    width: min(360px, calc(100% - 20px));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    pointer-events: none;
+}
+
+.vtkweb-render-activity {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.62);
+    color: rgba(255, 255, 255, 0.95);
+    font: 11px/1.35 monospace;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+.vtkweb-render-activity-title {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.vtkweb-render-activity-details {
+    opacity: 0.72;
+    margin-bottom: 4px;
+}
+
+.vtkweb-render-activity-progress {
+    height: 5px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.16);
+}
+
+.vtkweb-render-activity-progress > div {
+    height: 100%;
+    min-width: 2px;
+    background: rgba(120, 190, 255, 0.78);
+    transition: width 120ms linear;
+}
+
+.vtkweb-render-activity.complete {
+    overflow: hidden;
+    animation: vtkweb-activity-complete-hide 220ms ease 2.8s forwards;
+}
+
+.vtkweb-render-activity.complete .vtkweb-render-activity-progress > div {
+    background: rgba(120, 220, 155, 0.98);
+}
+
+.vtkweb-render-activity.indeterminate .vtkweb-render-activity-progress > div {
+    width: 38% !important;
+    animation: vtkweb-activity-slide 1s ease-in-out infinite alternate;
+}
+
+.vtkweb-render-activity-values {
+    margin-top: 4px;
+    opacity: 0.9;
+}
+
+@keyframes vtkweb-activity-slide {
+    from { transform: translateX(-20%); }
+    to { transform: translateX(180%); }
+}
+
+@keyframes vtkweb-activity-complete-hide {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+        max-height: 160px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+    to {
+        opacity: 0;
+        transform: translateY(4px);
+        max-height: 0;
+        padding-top: 0;
+        padding-bottom: 0;
+    }
 }
 
 .vtkweb-tile-splitter {
@@ -260,20 +356,136 @@ def build_render_view(
         const socket = new WebSocket(url);
         socket.binaryType = 'arraybuffer';
 
+        const clientStats = {
+            startedAt: performance.now(),
+            received: 0,
+            decoded: 0,
+            displayed: 0,
+            queueSize: 0,
+        };
+
+        const publishClientStats = () => {
+            const now = performance.now();
+            const elapsed = (now - clientStats.startedAt) / 1000.0;
+            if (elapsed < 1.0) return;
+            const element = document.getElementById(`vtkweb-client-video-stats-${viewId}`);
+            if (element) {
+                element.textContent =
+                    `Video recv: ${(clientStats.received / elapsed).toFixed(1)} fps\n` +
+                    `Decoded: ${(clientStats.decoded / elapsed).toFixed(1)} fps\n` +
+                    `Displayed: ${(clientStats.displayed / elapsed).toFixed(1)} fps\n` +
+                    `Decode queue: ${clientStats.queueSize}`;
+            }
+            clientStats.startedAt = now;
+            clientStats.received = 0;
+            clientStats.decoded = 0;
+            clientStats.displayed = 0;
+        };
+
+        const updateServerStats = (message) => {
+            const element = document.getElementById(`vtkweb-server-render-stats-${viewId}`);
+            if (element) {
+                element.textContent =
+                    `Composite: ${(message.composite_fps || 0).toFixed(1)} fps\n` +
+                    `Encode: ${(message.encoded_fps || 0).toFixed(1)} fps\n` +
+                    `Delivered: ${(message.delivered_fps || 0).toFixed(1)} fps\n` +
+                    `Data: ${(message.data_mib_s || 0).toFixed(2)} MiB/s`;
+            }
+            const ranks = document.getElementById(`vtkweb-server-render-ranks-${viewId}`);
+            if (ranks) {
+                ranks.textContent = (message.rank_fps || [])
+                    .map((rank) => `Rank ${rank.rank}: ${(rank.fps || 0).toFixed(1)} fps`)
+                    .join('\n');
+            }
+        };
+
+        const renderActivities = (activities) => {
+            const container = document.getElementById(`vtkweb-render-activities-${viewId}`);
+            if (!container) return;
+            const incoming = new Map((activities || []).map((activity) => [activity.key, activity]));
+
+            for (const child of Array.from(container.children)) {
+                if (!incoming.has(child.dataset.activityKey)) child.remove();
+            }
+
+            for (const activity of activities || []) {
+                let card = Array.from(container.children).find(
+                    (child) => child.dataset.activityKey === activity.key
+                );
+                if (!card) {
+                    card = document.createElement('div');
+                    card.dataset.activityKey = activity.key;
+                    container.appendChild(card);
+                }
+                card.className = 'vtkweb-render-activity' +
+                    (activity.complete ? ' complete' : '') +
+                    (!activity.determinate && !activity.complete ? ' indeterminate' : '');
+                card.innerHTML = '';
+
+                const title = document.createElement('div');
+                title.className = 'vtkweb-render-activity-title';
+                const label = document.createElement('span');
+                label.textContent = activity.label || '';
+                const elapsed = document.createElement('span');
+                elapsed.textContent = activity.complete ? '' : `${(activity.elapsed || 0).toFixed(2)}s`;
+                title.append(label, elapsed);
+                card.appendChild(title);
+
+                const details = document.createElement('div');
+                details.className = 'vtkweb-render-activity-details';
+                for (const line of activity.details || []) {
+                    const detail = document.createElement('div');
+                    detail.textContent = line;
+                    details.appendChild(detail);
+                }
+                card.appendChild(details);
+
+                const progress = document.createElement('div');
+                progress.className = 'vtkweb-render-activity-progress';
+                const bar = document.createElement('div');
+                bar.style.width = `${100 * (activity.complete ? 1 : (activity.progress || 0))}%`;
+                progress.appendChild(bar);
+                card.appendChild(progress);
+
+                const values = document.createElement('div');
+                values.className = 'vtkweb-render-activity-values';
+                const list = activity.complete ? activity.duration_values : activity.progress_values;
+                values.textContent = `[${(list || []).join('|')}]`;
+                card.appendChild(values);
+            }
+        };
+
         const decoder = new VideoDecoder({
             output: (frame) => {
+                const sequence = stream.pendingSequence;
                 try {
+                    clientStats.decoded += 1;
                     // VideoFrame remains browser/native memory. No copyTo(),
                     // getImageData(), or JS-visible pixel readback is performed.
                     ctx.drawImage(frame, 0, 0);
+                    clientStats.displayed += 1;
                 } finally {
                     frame.close();
                 }
+
+                clientStats.queueSize = decoder.decodeQueueSize;
+                publishClientStats();
+
+                // ACK only after decode + draw. The server keeps the encoded
+                // access unit in flight until this arrives, and coalesces newer
+                // raw framebuffer updates in the meantime.
+                if (sequence !== null && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'ack', sequence }));
+                    stream.pendingSequence = null;
+                }
             },
-            error: (error) => console.error(`vtkweb H.264 decoder ${viewId}:`, error),
+            error: (error) => {
+                console.error(`vtkweb H.264 decoder ${viewId}:`, error);
+                socket.close();
+            },
         });
 
-        const stream = { socket, decoder };
+        const stream = { socket, decoder, pendingSequence: null };
         streams.set(viewId, stream);
 
         socket.onopen = () => console.log(`vtkweb H.264 ${viewId}: video socket connected`);
@@ -288,6 +500,14 @@ def build_render_view(
                 const message = JSON.parse(event.data);
                 if (message.type === 'error') {
                     console.error(`vtkweb video ${viewId}: ${message.message}`);
+                    return;
+                }
+                if (message.type === 'stats') {
+                    updateServerStats(message);
+                    return;
+                }
+                if (message.type === 'activities') {
+                    renderActivities(message.activities);
                     return;
                 }
                 if (message.type !== 'config') return;
@@ -311,16 +531,22 @@ def build_render_view(
 
             if (decoder.state !== 'configured') return;
             const bytes = new Uint8Array(event.data);
-            if (bytes.byteLength <= 9) return;
+            if (bytes.byteLength <= 17) return;
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             const keyframe = view.getUint8(0) !== 0;
-            const timestamp = Number(view.getBigUint64(1, false));
-            const payload = bytes.subarray(9);
+            const sequence = Number(view.getBigUint64(1, false));
+            const timestamp = Number(view.getBigUint64(9, false));
+            const payload = bytes.subarray(17);
+
+            clientStats.received += 1;
+            stream.pendingSequence = sequence;
             decoder.decode(new EncodedVideoChunk({
                 type: keyframe ? 'key' : 'delta',
                 timestamp,
                 data: payload,
             }));
+            clientStats.queueSize = decoder.decodeQueueSize;
+            publishClientStats();
         };
     };
 
@@ -571,24 +797,28 @@ def build_render_view(
                     classes="vtkweb-remote-frame",
                     id=("'vtkweb-remote-frame-' + tile.view_id",),
                 )
-                with html.Div(
-                    classes="vtkweb-render-stats",
-                    v_if=("render_stats[tile.view_id]",),
-                ):
+                with html.Div(classes="vtkweb-render-stats"):
                     html.Div(
-                        "Composite: {{ render_stats[tile.view_id].composite_fps.toFixed(1) }} fps"
+                        "",
+                        id=("'vtkweb-server-render-stats-' + tile.view_id",),
+                        classes="vtkweb-server-render-stats",
                     )
                     html.Div(
-                        "Data: {{ render_stats[tile.view_id].data_mib_s.toFixed(2) }} MiB/s"
+                        "",
+                        id=("'vtkweb-client-video-stats-' + tile.view_id",),
+                        classes="vtkweb-client-video-stats",
                     )
-                    with html.Div(classes="vtkweb-render-stats-ranks"):
-                        html.Div(
-                            "Rank {{ rank.rank }}: {{ rank.fps.toFixed(1) }} fps",
-                            v_for=(
-                                "rank in render_stats[tile.view_id].rank_fps",
-                                "rank.rank",
-                            ),
-                        )
+                    html.Div(
+                        "",
+                        id=("'vtkweb-server-render-ranks-' + tile.view_id",),
+                        classes="vtkweb-render-stats-ranks",
+                    )
+
+                html.Div(
+                    "",
+                    id=("'vtkweb-render-activities-' + tile.view_id",),
+                    classes="vtkweb-render-activities",
+                )
 
             with html.Div(
                 v_if=("!tile.view_id",),

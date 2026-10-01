@@ -81,10 +81,12 @@ class RenderManager:
         pipeline: PipelineGraph,
         backend: RenderingBackend | None = None,
         frame_transport=None,
+        activity_reporter=None,
     ) -> None:
         self.state = state
         self.pipeline = pipeline
         self.frames = FrameRenderManager(frame_transport)
+        self.activity_reporter = activity_reporter
         self.transfer_functions = TransferFunctionManager(state, self)
         vtk_backend = backend or VTKRenderingBackend(self.transfer_functions.get)
         self._backends: dict[str, RenderingBackend] = {"vtk": vtk_backend}
@@ -599,8 +601,8 @@ class RenderManager:
         self._update_representation(representation_id)
         self._notify_render()
 
-    def discover_transfer_functions(self, node_id: str) -> None:
-        self.transfer_functions.discover_node_outputs(node_id)
+    def discover_transfer_functions(self, node_id: str) -> bool:
+        return self.transfer_functions.discover_node_outputs(node_id)
 
     # -------------------------------------------------------------------------
     # Output data
@@ -1003,7 +1005,9 @@ class RenderManager:
         if view_type == "mitsuba":
             from vtkweb.rendering.mitsuba_backend import MitsubaRenderingBackend
 
-            backend = MitsubaRenderingBackend(self.transfer_functions.get)
+            backend = MitsubaRenderingBackend(
+                self.transfer_functions.get, activity_reporter=self.activity_reporter
+            )
             self._backends[view_type] = backend
             return backend
 

@@ -169,8 +169,8 @@ def build_pipeline_view(state, ctrl):
             "data": {
                 "input_port_count": int(node["input_port_count"]),
                 "output_port_count": int(node["output_port_count"]),
-                "execution_state": node.get(
-                    "execution_state",
+                "execution_state": state.pipeline_execution.get(
+                    node_id,
                     "modified",
                 ),
                 "width": node_width(node["name"]),
@@ -550,7 +550,7 @@ def build_pipeline_view(state, ctrl):
 
         sync_task = asyncio.create_task(sync())
 
-    @state.change("pipeline")
+    @state.change("pipeline", "pipeline_execution")
     def on_pipeline_change(**_):
         schedule_sync()
 

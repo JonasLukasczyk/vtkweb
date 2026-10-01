@@ -25,7 +25,7 @@ def initialize_app_controller(
 ) -> None:
     state = server.state
     ctrl = server.controller
-    execution = PipelineExecutionManager(state, pipeline, rendering)
+    execution = PipelineExecutionManager(server, pipeline, rendering)
     execution_task: asyncio.Task | None = None
 
     # -------------------------------------------------------------------------
@@ -166,10 +166,6 @@ def initialize_app_controller(
             view_id=view_id,
             **kwargs,
         )
-
-    def switch_view_type(view_id: str, view_type: str) -> None:
-        distributed.replicate("switch_view_type", view_id, view_type)
-        rendering.switch_view_type(view_id, view_type)
 
     def create_view_in_container(container_id: str, view_type: str) -> str:
         """Create a selected view backend in an empty workspace tile."""
@@ -430,29 +426,40 @@ def initialize_app_controller(
         )
         return str(path)
 
-    # MPI-replicated rendering mutations.  These wrappers keep MPI details out
-    # of the rendering/public APIs and preserve the same call path on workers.
-    def remove_representation(representation_id: str) -> None:
-        distributed.replicate("remove_representation", representation_id)
-        rendering.remove_representation(representation_id)
-
-    def set_representation_kind(representation_id: str, kind: str) -> None:
-        distributed.replicate("set_representation_kind", representation_id, kind)
-        rendering.set_representation_kind(representation_id, kind)
-
-    def set_representation_property(representation_id: str, name: str, value) -> None:
-        distributed.replicate(
-            "set_representation_property", representation_id, name, value
-        )
-        rendering.set_representation_property(representation_id, name, value)
-
-    def set_active_view(view_id: str) -> None:
-        distributed.replicate("set_active_view", view_id)
-        rendering.set_active_view(view_id)
-
-    def set_view_property(view_id: str, name: str, value) -> None:
-        distributed.replicate("set_view_property", view_id, name, value)
-        rendering.set_view_property(view_id, name, value)
+    # Simple distributed mutations are declared once. The controller method,
+    # MPI method, and target method share the same name.
+    rendering_methods = distributed.expose(
+        ctrl,
+        "rendering",
+        rendering,
+        {
+            "remove_representation",
+            "set_representation_kind",
+            "set_representation_property",
+            "switch_view_type",
+            "set_active_view",
+            "set_view_property",
+            "interact_view_camera",
+            "set_render_size",
+        },
+    )
+    tf_methods = distributed.expose(
+        ctrl,
+        "transfer_functions",
+        rendering.transfer_functions,
+        {
+            "set_tf_data",
+            "apply_tf_preset",
+            "set_tf_mapping_range",
+            "rescale_tf_mapping",
+            "set_tf_color_control_point_component",
+            "add_tf_color_control_point",
+            "remove_tf_color_control_point",
+            "set_tf_opacity_control_point",
+            "add_tf_opacity_control_point",
+            "remove_tf_opacity_control_point",
+        },
+    )
 
     def reset_camera(view_id: str | None = None) -> None:
         if view_id is None:
@@ -463,7 +470,8 @@ def initialize_app_controller(
         # value. State-only worker views have no backend to compute bounds from.
         if distributed.is_root:
             rendering.reset_camera(view_id)
-            distributed.replicate(
+            distributed.replicate_call(
+                "rendering",
                 "set_view_property",
                 view_id,
                 "camera",
@@ -471,78 +479,6 @@ def initialize_app_controller(
             )
         else:
             rendering.reset_camera(view_id)
-
-    def interact_view_camera(view_id, mode, dx, dy, viewport_height) -> None:
-        distributed.replicate(
-            "interact_view_camera", view_id, mode, dx, dy, viewport_height
-        )
-        rendering.interact_view_camera(view_id, mode, dx, dy, viewport_height)
-
-    def set_render_size(view_id: str, width: int, height: int) -> None:
-        distributed.replicate("set_render_size", view_id, int(width), int(height))
-        rendering.set_render_size(view_id, width, height)
-
-    def set_tf_data(array_name, value) -> None:
-        distributed.replicate("set_tf_data", array_name, value)
-        rendering.transfer_functions.set_data(array_name, value)
-
-    def apply_tf_preset(array_name, preset_name) -> None:
-        distributed.replicate("apply_tf_preset", array_name, preset_name)
-        rendering.transfer_functions.apply_preset(array_name, preset_name)
-
-    def set_tf_mapping_range(array_name, mapping_name, minimum, maximum) -> None:
-        distributed.replicate(
-            "set_tf_mapping_range", array_name, mapping_name, minimum, maximum
-        )
-        rendering.transfer_functions.set_mapping_range(
-            array_name, mapping_name, minimum, maximum
-        )
-
-    def rescale_tf_mapping(array_name, mapping_name) -> None:
-        distributed.replicate("rescale_tf_mapping", array_name, mapping_name)
-        rendering.transfer_functions.rescale_mapping(array_name, mapping_name)
-
-    def set_tf_color_control_point_component(
-        array_name, point_index, component_index, value
-    ) -> None:
-        distributed.replicate(
-            "set_tf_color_control_point_component",
-            array_name,
-            point_index,
-            component_index,
-            value,
-        )
-        rendering.transfer_functions.set_color_control_point_component(
-            array_name, point_index, component_index, value
-        )
-
-    def add_tf_color_control_point(array_name) -> None:
-        distributed.replicate("add_tf_color_control_point", array_name)
-        rendering.transfer_functions.add_color_control_point(array_name)
-
-    def remove_tf_color_control_point(array_name, point_index) -> None:
-        distributed.replicate("remove_tf_color_control_point", array_name, point_index)
-        rendering.transfer_functions.remove_color_control_point(array_name, point_index)
-
-    def set_tf_opacity_control_point(array_name, point_index, x, opacity) -> None:
-        distributed.replicate(
-            "set_tf_opacity_control_point", array_name, point_index, x, opacity
-        )
-        rendering.transfer_functions.set_opacity_control_point(
-            array_name, point_index, x, opacity
-        )
-
-    def add_tf_opacity_control_point(array_name, x, opacity) -> None:
-        distributed.replicate(
-            "add_tf_opacity_control_point", array_name, x, opacity
-        )
-        rendering.transfer_functions.add_opacity_control_point(array_name, x, opacity)
-
-    def remove_tf_opacity_control_point(array_name, point_index) -> None:
-        distributed.replicate(
-            "remove_tf_opacity_control_point", array_name, point_index
-        )
-        rendering.transfer_functions.remove_opacity_control_point(array_name, point_index)
 
     # -------------------------------------------------------------------------
     # Controller
@@ -553,30 +489,14 @@ def initialize_app_controller(
     ctrl.set_node_property = set_node_property
     ctrl.set_node_input_array = set_node_input_array
     ctrl.add_representation = add_representation
-    ctrl.remove_representation = remove_representation
-    ctrl.set_representation_kind = set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
-    ctrl.set_representation_property = set_representation_property
-    ctrl.set_tf_data = set_tf_data
-    ctrl.apply_tf_preset = apply_tf_preset
-    ctrl.set_tf_mapping_range = set_tf_mapping_range
-    ctrl.rescale_tf_mapping = rescale_tf_mapping
-    ctrl.set_tf_color_control_point_component = set_tf_color_control_point_component
-    ctrl.add_tf_color_control_point = add_tf_color_control_point
-    ctrl.remove_tf_color_control_point = remove_tf_color_control_point
-    ctrl.set_tf_opacity_control_point = set_tf_opacity_control_point
-    ctrl.add_tf_opacity_control_point = add_tf_opacity_control_point
-    ctrl.remove_tf_opacity_control_point = remove_tf_opacity_control_point
     ctrl.create_view = create_view
     ctrl.create_view_in_container = create_view_in_container
     ctrl.remove_view = remove_view
-    ctrl.switch_view_type = switch_view_type
     ctrl.create_workspace = create_workspace
     ctrl.split_container = split_container
     ctrl.assign_view_to_container = assign_view_to_container
     ctrl.split_view_container = split_view_container
-    ctrl.set_active_view = set_active_view
-    ctrl.set_view_property = set_view_property
     ctrl.reset_camera = reset_camera
     ctrl.set_active_node = set_active_node
     ctrl.output_port_click = output_port_click
@@ -593,47 +513,22 @@ def initialize_app_controller(
 
     # Client-to-server render/workspace RPCs. UI code emits these events but
     # application/controller ownership stays here.
-    ctrl.trigger("interact_view_camera")(interact_view_camera)
-    ctrl.trigger("set_render_size")(set_render_size)
+    ctrl.trigger("interact_view_camera")(rendering_methods["interact_view_camera"])
+    ctrl.trigger("set_render_size")(rendering_methods["set_render_size"])
     ctrl.trigger("set_split_ratio")(set_split_ratio)
-    ctrl.trigger("set_tf_opacity_control_point")(set_tf_opacity_control_point)
-    ctrl.trigger("add_tf_opacity_control_point")(add_tf_opacity_control_point)
-    ctrl.trigger("remove_tf_opacity_control_point")(remove_tf_opacity_control_point)
+    ctrl.trigger("set_tf_opacity_control_point")(tf_methods["set_tf_opacity_control_point"])
+    ctrl.trigger("add_tf_opacity_control_point")(tf_methods["add_tf_opacity_control_point"])
+    ctrl.trigger("remove_tf_opacity_control_point")(tf_methods["remove_tf_opacity_control_point"])
 
     distributed.register("create_node", create_node)
     distributed.register("connect_nodes", connect_nodes)
     distributed.register("set_node_property", set_node_property)
     distributed.register("set_node_input_array", set_node_input_array)
     distributed.register("add_representation", add_representation)
-    distributed.register("remove_representation", remove_representation)
-    distributed.register("set_representation_kind", set_representation_kind)
-    distributed.register("set_representation_property", set_representation_property)
     distributed.register("toggle_representation_in_view", toggle_representation_in_view)
     distributed.register("create_view", create_view)
     distributed.register("remove_view", remove_view)
-    distributed.register("switch_view_type", switch_view_type)
-    distributed.register("set_active_view", set_active_view)
-    distributed.register("set_view_property", set_view_property)
     distributed.register("reset_camera", reset_camera)
-    distributed.register("interact_view_camera", interact_view_camera)
-    distributed.register("set_render_size", set_render_size)
-    distributed.register("set_tf_data", set_tf_data)
-    distributed.register("apply_tf_preset", apply_tf_preset)
-    distributed.register("set_tf_mapping_range", set_tf_mapping_range)
-    distributed.register("rescale_tf_mapping", rescale_tf_mapping)
-    distributed.register(
-        "set_tf_color_control_point_component",
-        set_tf_color_control_point_component,
-    )
-    distributed.register("add_tf_color_control_point", add_tf_color_control_point)
-    distributed.register(
-        "remove_tf_color_control_point", remove_tf_color_control_point
-    )
-    distributed.register("set_tf_opacity_control_point", set_tf_opacity_control_point)
-    distributed.register("add_tf_opacity_control_point", add_tf_opacity_control_point)
-    distributed.register(
-        "remove_tf_opacity_control_point", remove_tf_opacity_control_point
-    )
     distributed.register("set_active_node", set_active_node)
     distributed.register("delete_node", delete_node)
     distributed.register("clear_state", clear_state)

@@ -8,13 +8,15 @@ import vtk
 
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.distributed import context as distributed
+from vtkweb.transfer_functions import sync_transfer_function_ui_state
 
 
 class PipelineExecutionManager:
     """Explicit, application-level scheduler for the VTK pipeline graph."""
 
-    def __init__(self, state, pipeline: PipelineGraph, rendering) -> None:
-        self.state = state
+    def __init__(self, server, pipeline: PipelineGraph, rendering) -> None:
+        self.server = server
+        self.state = server.state
         self.pipeline = pipeline
         self.rendering = rendering
         self._abort_requested = False
@@ -122,8 +124,10 @@ class PipelineExecutionManager:
                 )
                 if final_state == "success":
                     self.pipeline.bind_downstream_inputs(node_id)
-                    self.rendering.discover_transfer_functions(node_id)
+                    tf_changed = self.rendering.discover_transfer_functions(node_id)
                     self.rendering.ensure_output_representations(node_id)
+                    if tf_changed:
+                        self._publish_transfer_functions()
                 self.rendering.refresh_node(node_id)
                 self._flush_state()
         finally:
@@ -252,8 +256,10 @@ class PipelineExecutionManager:
                     # output. Missing output representations are
                     # created only after the node has succeeded at least once.
                     if final_state == "success":
-                        self.rendering.discover_transfer_functions(node_id)
+                        tf_changed = self.rendering.discover_transfer_functions(node_id)
                         self.rendering.ensure_output_representations(node_id)
+                        if tf_changed:
+                            self._publish_transfer_functions()
                     self.rendering.refresh_node(node_id)
                     self._flush_state()
 
@@ -275,9 +281,45 @@ class PipelineExecutionManager:
             self.state.pipeline_executing = False
             self._flush_state()
 
+    def _publish_transfer_functions(self) -> None:
+        """Publish transfer-function UI state created by async execution.
+
+        Pipeline execution runs outside a normal Trame RPC transaction, so newly
+        discovered transfer functions are not automatically committed to the
+        browser.  Push only the transfer-function keys; never flush unrelated
+        editable application state.
+        """
+        if not distributed.is_root:
+            return
+        protocol = self.server.protocol
+        if protocol is None:
+            return
+        sync_transfer_function_ui_state(self.state)
+        keys = (
+            "transfer_functions",
+            "transfer_function_items",
+            "active_transfer_function",
+            "active_tf_preset",
+        )
+        values = {key: getattr(self.state, key) for key in keys}
+        protocol.push_state_change(self.state.translator.translate_dict(values))
+        self.state.clean(*keys)
+
     def _flush_state(self) -> None:
-        """Push async scheduler state changes to Trame immediately."""
-        self.state.flush()
+        """Publish only execution status from the async scheduler.
+
+        Never flush the complete Trame state here: editable UI values may still
+        be pending on the server while the browser is actively changing them.
+        """
+        protocol = self.server.protocol
+        if protocol is None:
+            return
+        values = {
+            "pipeline_execution": self.state.pipeline_execution,
+            "pipeline_executing": self.state.pipeline_executing,
+        }
+        protocol.push_state_change(self.state.translator.translate_dict(values))
+        self.state.clean(*values)
 
     def _node_label(self, node_id: str) -> str:
         """Return a stable, human-readable node label for debug output."""

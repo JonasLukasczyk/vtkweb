@@ -11,6 +11,7 @@ from typing import Any, Callable
 COMMAND_TAG = 41001
 FRAME_TAG = 41002
 STOP_TAG = 41003
+ACTIVITY_TAG = 41004
 
 
 @dataclass(frozen=True)
@@ -37,11 +38,13 @@ class DistributedContext:
         self.rank = 0
         self.size = 1
         self._handlers: dict[str, Callable[..., Any]] = {}
+        self._targets: dict[str, dict[str, Callable[..., Any]]] = {}
         self._pending = []
         # Keep nonblocking frame-send requests (and their packet objects) alive
         # until MPI reports completion. Dropping an mpi4py object-mode isend
         # request early can invalidate the serialized send buffer under load.
         self._frame_pending: list[tuple[Any, dict[str, Any]]] = []
+        self._activity_pending: list[tuple[Any, dict[str, Any]]] = []
         self._mpi_lock = threading.Lock()
         try:
             from mpi4py import MPI
@@ -75,13 +78,62 @@ class DistributedContext:
         return self.size > 1
 
     def register(self, operation: str, handler: Callable[..., Any]) -> None:
+        """Register an explicit distributed workflow operation."""
         self._handlers[str(operation)] = handler
+
+    def expose(
+        self,
+        controller,
+        target_name: str,
+        target,
+        methods: set[str] | tuple[str, ...] | list[str],
+    ) -> dict[str, Callable[..., Any]]:
+        """Expose simple target mutations through one distributed declaration.
+
+        The controller method, MPI method name, and target method name are
+        intentionally identical. Root calls are replicated to workers and then
+        applied locally; workers dispatch directly to the registered target.
+        """
+        target_name = str(target_name)
+        exposed: dict[str, Callable[..., Any]] = {}
+        registered = self._targets.setdefault(target_name, {})
+
+        for method_name in methods:
+            method_name = str(method_name)
+            method = getattr(target, method_name)
+            registered[method_name] = method
+
+            def wrapper(*args, _target=target_name, _name=method_name, _method=method, **kwargs):
+                self.replicate_call(_target, _name, *args, **kwargs)
+                return _method(*args, **kwargs)
+
+            wrapper.__name__ = method_name
+            setattr(controller, method_name, wrapper)
+            exposed[method_name] = wrapper
+
+        return exposed
+
+    def replicate_call(self, target_name: str, method_name: str, *args, **kwargs) -> None:
+        """Replicate one exposed target method from root to all workers."""
+        if not self.enabled or not self.is_root:
+            return
+        packet = {
+            "target": str(target_name),
+            "method": str(method_name),
+            "args": args,
+            "kwargs": kwargs,
+        }
+        self._send_command(packet)
 
     def replicate(self, operation: str, *args, **kwargs) -> None:
         """Asynchronously enqueue one root-originated mutation on all workers."""
         if not self.enabled or not self.is_root:
             return
-        packet = {"operation": str(operation), "args": args, "kwargs": kwargs}
+        self._send_command(
+            {"operation": str(operation), "args": args, "kwargs": kwargs}
+        )
+
+    def _send_command(self, packet: dict[str, Any]) -> None:
         with self._mpi_lock:
             self._pending = [request for request in self._pending if not request.Test()]
             for destination in range(1, self.size):
@@ -105,12 +157,18 @@ class DistributedContext:
                 await asyncio.sleep(0.001)
                 continue
 
-            operation = packet["operation"]
-            handler = self._handlers.get(operation)
+            target_name = packet.get("target")
+            method_name = packet.get("method")
+            if target_name is not None and method_name is not None:
+                handler = self._targets.get(str(target_name), {}).get(str(method_name))
+                label = f"{target_name}.{method_name}"
+            else:
+                operation = str(packet.get("operation", ""))
+                handler = self._handlers.get(operation)
+                label = operation
+
             if handler is None:
-                print(
-                    f"[mpi rank {self.rank}] unknown operation: {operation}", flush=True
-                )
+                print(f"[mpi rank {self.rank}] unknown operation: {label}", flush=True)
                 continue
             try:
                 result = handler(*packet.get("args", ()), **packet.get("kwargs", {}))
@@ -118,7 +176,7 @@ class DistributedContext:
                     await result
             except Exception as exc:
                 print(
-                    f"[mpi rank {self.rank}] operation {operation!r} failed: {exc}",
+                    f"[mpi rank {self.rank}] operation {label!r} failed: {exc}",
                     flush=True,
                 )
 
@@ -177,6 +235,29 @@ class DistributedContext:
                 return
             request = self.mpi_comm.isend(packet, dest=0, tag=FRAME_TAG)
             self._frame_pending.append((request, packet))
+
+
+    def send_activity(self, event: dict[str, Any]) -> None:
+        if not self.enabled or self.is_root:
+            return
+        packet = dict(event)
+        packet["rank"] = self.rank
+        with self._mpi_lock:
+            self._activity_pending = [
+                (request, pending_event)
+                for request, pending_event in self._activity_pending
+                if not request.Test()
+            ]
+            request = self.mpi_comm.isend(packet, dest=0, tag=ACTIVITY_TAG)
+            self._activity_pending.append((request, packet))
+
+    def poll_activity(self) -> dict[str, Any] | None:
+        if not self.enabled or not self.is_root:
+            return None
+        with self._mpi_lock:
+            if not self.mpi_comm.Iprobe(source=self._mpi.ANY_SOURCE, tag=ACTIVITY_TAG):
+                return None
+            return self.mpi_comm.recv(source=self._mpi.ANY_SOURCE, tag=ACTIVITY_TAG)
 
     def shutdown_workers(self) -> None:
         if not self.enabled or not self.is_root:

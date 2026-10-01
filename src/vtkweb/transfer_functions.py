@@ -73,6 +73,21 @@ def color_points_from_colormap(name: str, samples: int = 16) -> list[list[float]
     return points
 
 
+def sync_transfer_function_ui_state(state) -> None:
+    """Keep the transfer-function selector state consistent with TF data."""
+    names = sorted((getattr(state, "transfer_functions", None) or {}).keys())
+    state.transfer_function_items = [
+        {"title": name, "value": name} for name in names
+    ]
+    active = getattr(state, "active_transfer_function", None)
+    if not names:
+        state.active_transfer_function = None
+        state.active_tf_preset = None
+    elif active not in names:
+        state.active_transfer_function = names[0]
+        state.active_tf_preset = None
+
+
 class TransferFunctionManager:
     """Global transfer functions keyed only by array name."""
 
@@ -103,22 +118,22 @@ class TransferFunctionManager:
             mapping_range = [float(data_range[0]), float(data_range[1])]
             value["color"]["range"] = list(mapping_range)
             value["opacity"]["range"] = list(mapping_range)
-        self.set_data(array_name, value)
+        self.set_tf_data(array_name, value)
         return self.get(array_name) or deepcopy(value)
 
-    def set_data(self, array_name: str, value: dict[str, Any]) -> None:
+    def set_tf_data(self, array_name: str, value: dict[str, Any]) -> None:
         normalized = _normalize_tf(value)
         transfer_functions = dict(self.state.transfer_functions)
         transfer_functions[str(array_name)] = normalized
         self.state.transfer_functions = transfer_functions
         self._refresh(str(array_name))
 
-    def apply_preset(self, array_name: str, preset_name: str) -> None:
+    def apply_tf_preset(self, array_name: str, preset_name: str) -> None:
         current = self.ensure(array_name)
         current["color"]["control_points"] = color_points_from_colormap(preset_name)
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def set_mapping_range(
+    def set_tf_mapping_range(
         self,
         array_name: str,
         mapping_name: str,
@@ -128,14 +143,14 @@ class TransferFunctionManager:
         current = self.ensure(array_name)
         mapping = _mapping(current, mapping_name)
         mapping["range"] = _normalize_range([minimum, maximum])
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def rescale_mapping(self, array_name: str, mapping_name: str) -> None:
+    def rescale_tf_mapping(self, array_name: str, mapping_name: str) -> None:
         data_range = self.rendering.get_global_array_range(array_name)
         if data_range is not None:
-            self.set_mapping_range(array_name, mapping_name, *data_range)
+            self.set_tf_mapping_range(array_name, mapping_name, *data_range)
 
-    def set_color_control_point_component(
+    def set_tf_color_control_point_component(
         self,
         array_name: str,
         point_index: int,
@@ -151,9 +166,9 @@ class TransferFunctionManager:
         points[point_index][component_index] = _clamp01(value)
         points.sort(key=lambda point: point[0])
         current["color"]["control_points"] = points
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def add_color_control_point(self, array_name: str) -> None:
+    def add_tf_color_control_point(self, array_name: str) -> None:
         current = self.ensure(array_name)
         points = [list(point) for point in current["color"]["control_points"]]
         points.sort(key=lambda point: point[0])
@@ -166,9 +181,9 @@ class TransferFunctionManager:
         points.append([(a + b) * 0.5 for a, b in zip(left, right)])
         points.sort(key=lambda point: point[0])
         current["color"]["control_points"] = points
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def remove_color_control_point(self, array_name: str, point_index: int) -> None:
+    def remove_tf_color_control_point(self, array_name: str, point_index: int) -> None:
         current = self.ensure(array_name)
         points = [list(point) for point in current["color"]["control_points"]]
         if len(points) <= 2:
@@ -177,9 +192,9 @@ class TransferFunctionManager:
         if 0 <= point_index < len(points):
             points.pop(point_index)
             current["color"]["control_points"] = points
-            self.set_data(array_name, current)
+            self.set_tf_data(array_name, current)
 
-    def set_opacity_control_point(
+    def set_tf_opacity_control_point(
         self,
         array_name: str,
         point_index: int,
@@ -205,9 +220,9 @@ class TransferFunctionManager:
 
         points[point_index] = [x, opacity]
         current["opacity"]["control_points"] = points
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def add_opacity_control_point(
+    def add_tf_opacity_control_point(
         self,
         array_name: str,
         x: float,
@@ -225,9 +240,9 @@ class TransferFunctionManager:
         points.append([x, opacity])
         points.sort(key=lambda point: point[0])
         current["opacity"]["control_points"] = points
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def remove_opacity_control_point(self, array_name: str, point_index: int) -> None:
+    def remove_tf_opacity_control_point(self, array_name: str, point_index: int) -> None:
         current = self.ensure(array_name)
         points = [list(point) for point in current["opacity"]["control_points"]]
         point_index = int(point_index)
@@ -235,9 +250,10 @@ class TransferFunctionManager:
             return
         points.pop(point_index)
         current["opacity"]["control_points"] = points
-        self.set_data(array_name, current)
+        self.set_tf_data(array_name, current)
 
-    def discover_node_outputs(self, node_id: str) -> None:
+    def discover_node_outputs(self, node_id: str) -> bool:
+        changed = False
         node = self.rendering.pipeline.nodes[node_id]
         for output_port in range(node.processor.GetNumberOfOutputPorts()):
             arrays = self.rendering.get_arrays(node_id, output_port)
@@ -253,6 +269,8 @@ class TransferFunctionManager:
                     )
                     if data_range is not None:
                         self.ensure(array_name, data_range)
+                        changed = True
+        return changed
 
     def _refresh(self, array_name: str) -> None:
         for representation in tuple(self.rendering.representations):

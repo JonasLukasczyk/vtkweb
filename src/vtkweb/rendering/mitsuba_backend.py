@@ -48,6 +48,8 @@ class MitsubaViewHandle:
 @dataclass
 class MitsubaRepresentationHandle:
     kind: str
+    activity_scope: str = ""
+    activity_view_id: str = ""
     scene_object: Any | None = None
     bounds: tuple[float, float, float, float, float, float] | None = None
     scalar_volume: Any | None = None
@@ -55,6 +57,7 @@ class MitsubaRepresentationHandle:
     color_mapping: dict[str, Any] | None = None
     opacity_mapping: dict[str, Any] | None = None
     sample_distance: float = 1.0
+    opacity_reference_distance: float = 1.0
     gradient_step: tuple[float, float, float] = (1.0, 1.0, 1.0)
     gradient_volume: Any | None = None
     gradient_volume_key: tuple[Any, ...] | None = None
@@ -92,13 +95,14 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         return tuple(convert(channel) for channel in color)
 
-    def __init__(self, transfer_function_provider=None) -> None:
+    def __init__(self, transfer_function_provider=None, activity_reporter=None) -> None:
         import drjit as dr
         import mitsuba as mi
 
         self._transfer_function_provider = transfer_function_provider or (
             lambda _name: None
         )
+        self._activity = activity_reporter
         self.mi = mi
         self.dr = dr
 
@@ -163,6 +167,35 @@ class MitsubaRenderingBackend(RenderingBackend):
     # ------------------------------------------------------------------
     # Views
     # ------------------------------------------------------------------
+
+    def _activity_start(
+        self,
+        key: str,
+        label: str,
+        *,
+        view_id: str,
+        details: dict[str, Any] | None = None,
+        determinate: bool = True,
+    ) -> float:
+        if self._activity is None:
+            return time.monotonic()
+        return self._activity.start(
+            key,
+            label,
+            view_id=view_id,
+            details=details,
+            determinate=determinate,
+        )
+
+    def _activity_progress(self, key: str, progress: float) -> None:
+        if self._activity is not None:
+            self._activity.progress(key, progress)
+
+    def _activity_done(
+        self, key: str, started_at: float, *, details: dict[str, Any] | None = None
+    ) -> None:
+        if self._activity is not None:
+            self._activity.done(key, started_at, details=details)
 
     def add_view(self, view: RenderView) -> None:
         with self._state_lock:
@@ -396,7 +429,9 @@ class MitsubaRenderingBackend(RenderingBackend):
         with self._state_lock:
             if key in self._representations:
                 return
-        rep_handle = self._create_handle(representation, source)
+        rep_handle = self._create_handle(
+            representation, source, activity_view_id=view.id
+        )
         with self._state_lock:
             self._representations[key] = rep_handle
             self._views[view.id].render_revision += 1
@@ -409,7 +444,12 @@ class MitsubaRenderingBackend(RenderingBackend):
     ) -> None:
         with self._state_lock:
             previous = self._representations.get((representation.id, view.id))
-        rep_handle = self._create_handle(representation, source, previous=previous)
+        rep_handle = self._create_handle(
+            representation,
+            source,
+            previous=previous,
+            activity_view_id=view.id,
+        )
         with self._state_lock:
             self._representations[(representation.id, view.id)] = rep_handle
             self._views[view.id].render_revision += 1
@@ -426,6 +466,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         source: Any,
         *,
         previous: MitsubaRepresentationHandle | None = None,
+        activity_view_id: str = "",
     ) -> MitsubaRepresentationHandle:
         if representation.kind == "surface":
             return self._create_surface_handle(representation, source)
@@ -434,7 +475,12 @@ class MitsubaRenderingBackend(RenderingBackend):
         if representation.kind == "outline":
             return self._create_outline_handle(representation, source)
         if representation.kind == "volume":
-            return self._create_volume_handle(representation, source, previous=previous)
+            return self._create_volume_handle(
+                representation,
+                source,
+                previous=previous,
+                activity_view_id=activity_view_id,
+            )
 
         print(
             "Mitsuba backend: representation kind "
@@ -632,6 +678,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         source: Any,
         *,
         previous: MitsubaRepresentationHandle | None = None,
+        activity_view_id: str = "",
     ) -> MitsubaRepresentationHandle:
         """Create the persistent scalar grid used by the direct-volume integrator.
 
@@ -698,12 +745,15 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         handle = MitsubaRepresentationHandle(
             kind="volume",
+            activity_scope=f"{activity_view_id}:{representation.id}",
+            activity_view_id=str(activity_view_id),
             bounds=bounds,
             scalar_volume=scalar_volume,
             scalar_volume_key=scalar_key,
             color_mapping=transfer_function["color"],
             opacity_mapping=transfer_function["opacity"],
             sample_distance=_volume_sample_distance(data, representation.properties),
+            opacity_reference_distance=_volume_opacity_reference_distance(data),
             gradient_step=_volume_gradient_step(data),
             shade=bool(representation.properties.get("shade", True)),
             ambient=float(representation.properties.get("ambient", 0.1)),
@@ -765,6 +815,13 @@ class MitsubaRenderingBackend(RenderingBackend):
             return
 
         start = time.perf_counter()
+        activity_key = f"gradient:{volume.activity_scope}"
+        activity_started = self._activity_start(
+            activity_key,
+            "Baking gradient volume",
+            view_id=volume.activity_view_id,
+            details={"shape": tuple(int(v) for v in scalars.shape), "dtype": "float32"},
+        )
         print(
             f"Mitsuba bake gradient: start shape={tuple(int(v) for v in scalars.shape)} dtype=float32"
         )
@@ -779,11 +836,13 @@ class MitsubaRenderingBackend(RenderingBackend):
             np.float32(hx),
             edge_order=1,
         )
+        self._activity_progress(activity_key, 0.60)
         gradient = np.empty((*scalars.shape, 3), dtype=np.float32)
         gradient[..., 0] = np.asarray(gx, dtype=np.float32)
         gradient[..., 1] = np.asarray(gy, dtype=np.float32)
         gradient[..., 2] = np.asarray(gz, dtype=np.float32)
         gradient = np.ascontiguousarray(gradient, dtype=np.float32)
+        self._activity_progress(activity_key, 0.82)
 
         with self._render_lock:
             volume.gradient_volume = self.mi.load_dict(
@@ -797,7 +856,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 }
             )
         volume.gradient_volume_key = key
+        self._activity_progress(activity_key, 0.98)
         elapsed = time.perf_counter() - start
+        self._activity_done(activity_key, activity_started)
         print(f"Mitsuba bake gradient: end {elapsed:.3f}s")
 
     def _build_directional_shadow_field(
@@ -805,7 +866,7 @@ class MitsubaRenderingBackend(RenderingBackend):
     ) -> None:
         """Bake one high-quality +Z optical-depth field and cache it.
 
-        The field depends on the scalar data, opacity mapping, sample distance,
+        The field depends on the scalar data, opacity mapping, opacity reference distance,
         and bake quadrature quality, but not on the camera. Rendering therefore
         only samples the cached field until one of those inputs changes.
         """
@@ -833,7 +894,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         shadow_key = (
             volume.scalar_volume_key,
             opacity_signature,
-            float(volume.sample_distance),
+            float(volume.opacity_reference_distance),
             (0.0, 0.0, 1.0),  # fixed directional-light direction
             tuple(float(v) for v in bounds),
         )
@@ -841,6 +902,17 @@ class MitsubaRenderingBackend(RenderingBackend):
             return
 
         start = time.perf_counter()
+        activity_key = f"shadow:{volume.activity_scope}"
+        activity_started = self._activity_start(
+            activity_key,
+            "Baking shadow volume",
+            view_id=volume.activity_view_id,
+            details={
+                "shape": tuple(int(v) for v in scalars.shape),
+                "q": sample_count,
+                "dtype": "float32",
+            },
+        )
         print(
             f"Mitsuba bake directional shadow: start shape={tuple(int(v) for v in scalars.shape)} "
             f"quadrature_samples={sample_count} dtype=float32"
@@ -855,13 +927,20 @@ class MitsubaRenderingBackend(RenderingBackend):
         u_values = np.asarray(0.5 * (nodes + 1.0), dtype=np.float32)
         weights = np.asarray(0.5 * weights, dtype=np.float32)
         mean_sigma = np.zeros((nz - 1, ny, nx), dtype=np.float32)
-        sample_distance = np.float32(max(float(volume.sample_distance), 1.0e-12))
-        for u, weight in zip(u_values, weights):
+        opacity_reference_distance = np.float32(
+            max(float(volume.opacity_reference_distance), 1.0e-12)
+        )
+        for sample_index, (u, weight) in enumerate(zip(u_values, weights), start=1):
             sample_scalars = lower + u * (upper - lower)
             alpha = _evaluate_opacity_mapping(mapping, sample_scalars)
             alpha = np.clip(alpha, np.float32(0.0), np.float32(1.0 - 1.0e-6))
-            sigma = np.asarray(-np.log1p(-alpha) / sample_distance, dtype=np.float32)
+            sigma = np.asarray(
+                -np.log1p(-alpha) / opacity_reference_distance, dtype=np.float32
+            )
             mean_sigma += weight * sigma
+            self._activity_progress(
+                activity_key, 0.10 + 0.50 * sample_index / max(1, sample_count)
+            )
 
         zmin, zmax = float(bounds[4]), float(bounds[5])
         dz = np.float32((zmax - zmin) / float(max(nz - 1, 1)))
@@ -871,6 +950,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         # plane lies on the light-facing boundary and therefore has tau=0.
         tau = np.zeros((nz, ny, nx), dtype=np.float32)
         tau[:-1] = np.cumsum(segment_tau[::-1], axis=0, dtype=np.float32)[::-1]
+        self._activity_progress(activity_key, 0.88)
 
         with self._render_lock:
             volume.shadow_volume = self.mi.load_dict(
@@ -884,7 +964,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 }
             )
         volume.shadow_volume_key = shadow_key
+        self._activity_progress(activity_key, 0.98)
         elapsed = time.perf_counter() - start
+        self._activity_done(activity_key, activity_started)
         print(f"Mitsuba bake directional shadow: end {elapsed:.3f}s")
 
     @staticmethod
@@ -967,7 +1049,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         dy = ymax - ymin
         dz = zmax - zmin
         max_extent = math.sqrt(dx * dx + dy * dy + dz * dz)
-        min_extent = min(float(volume.sample_distance), max_extent)
+        min_extent = min(float(volume.opacity_reference_distance), max_extent)
         reach = max(0.0, min(1.0, float(volume.global_illumination_reach)))
         return (min_extent - max_extent) * ((1.0 - reach) ** 0.33) + max_extent
 
@@ -985,7 +1067,8 @@ class MitsubaRenderingBackend(RenderingBackend):
         alpha_full = _evaluate_opacity_mapping(mapping, np.asarray(scalars, dtype=np.float32))
         alpha_full = np.clip(alpha_full, np.float32(0.0), np.float32(1.0 - 1.0e-6))
         sigma_full = np.asarray(
-            -np.log1p(-alpha_full) / np.float32(max(float(volume.sample_distance), 1.0e-12)),
+            -np.log1p(-alpha_full)
+            / np.float32(max(float(volume.opacity_reference_distance), 1.0e-12)),
             dtype=np.float32,
         )
 
@@ -1094,7 +1177,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         key = (
             volume.scalar_volume_key,
             opacity_signature,
-            float(volume.sample_distance),
+            float(volume.opacity_reference_distance),
             float(volume.global_illumination_reach),
             direction_count,
             resolution_factor,
@@ -1105,6 +1188,18 @@ class MitsubaRenderingBackend(RenderingBackend):
             return
 
         start = time.perf_counter()
+        activity_key = f"environment:{volume.activity_scope}"
+        activity_started = self._activity_start(
+            activity_key,
+            "Baking environment lighting",
+            view_id=volume.activity_view_id,
+            details={
+                "shape": tuple(int(v) for v in volume.scalar_values.shape),
+                "directions": direction_count,
+                "resolution_factor": resolution_factor,
+                "dtype": "float32",
+            },
+        )
         print(
             f"Mitsuba bake environment lighting: start shape={tuple(int(v) for v in volume.scalar_values.shape)} "
             f"directions={direction_count} resolution_factor={resolution_factor} dtype=float32"
@@ -1115,13 +1210,16 @@ class MitsubaRenderingBackend(RenderingBackend):
             volume.environment_lighting_volumes = ()
             volume.environment_lighting_key = None
             elapsed = time.perf_counter() - start
+            self._activity_done(activity_key, activity_started)
             print(f"Mitsuba bake environment lighting: end {elapsed:.3f}s no-extinction")
             return
+        self._activity_progress(activity_key, 0.08)
         coeffs = None
         weight = 4.0 * math.pi / float(direction_count)
         reach = self._shadow_extent_for_volume(volume)
+        report_stride = max(1, int(math.ceil(max(1, len(directions)) / 10.0)))
 
-        for direction in directions:
+        for direction_index, direction in enumerate(directions, start=1):
             tau = self._build_environment_shadow_array(volume, direction, sigma)
             if tau is None:
                 continue
@@ -1141,11 +1239,17 @@ class MitsubaRenderingBackend(RenderingBackend):
                 coeffs = [np.zeros_like(visibility, dtype=np.float32) for _ in basis]
             for index, value in enumerate(basis):
                 coeffs[index] += np.float32(weight * value) * visibility
+            if direction_index % report_stride == 0 or direction_index == len(directions):
+                self._activity_progress(
+                    activity_key,
+                    0.08 + 0.82 * direction_index / max(1, len(directions)),
+                )
 
         if not coeffs:
             volume.environment_lighting_volumes = ()
             volume.environment_lighting_key = None
             elapsed = time.perf_counter() - start
+            self._activity_done(activity_key, activity_started)
             print(f"Mitsuba bake environment lighting: end {elapsed:.3f}s no-data")
             return
 
@@ -1154,6 +1258,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         # eval_6() + eval_3() instead of nine scalar texture lookups.
         packed6 = np.ascontiguousarray(np.stack(coeffs[:6], axis=-1), dtype=np.float32)
         packed3 = np.ascontiguousarray(np.stack(coeffs[6:9], axis=-1), dtype=np.float32)
+        self._activity_progress(activity_key, 0.94)
         built = []
         with self._render_lock:
             transform = _image_volume_transform(self.mi, volume.bounds)
@@ -1172,6 +1277,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 )
         volume.environment_lighting_volumes = tuple(built)
         volume.environment_lighting_key = key
+        self._activity_progress(activity_key, 0.98)
         elapsed = time.perf_counter() - start
         metadata = []
         for index, field in enumerate(built):
@@ -1181,6 +1287,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 )
             except Exception as exc:
                 metadata.append(f"field{index}:metadata-error={exc}")
+        self._activity_done(activity_key, activity_started)
         print(
             f"Mitsuba bake environment lighting: end {elapsed:.3f}s " + " ".join(metadata),
             flush=True,
@@ -1411,6 +1518,21 @@ class MitsubaRenderingBackend(RenderingBackend):
             )
             if integrator is None or previous_key != integrator_key:
                 mode = "cached" if caching else "live"
+                kernel_activity_key = f"kernel:{view_id}:{mode}"
+                kernel_activity_started = self._activity_start(
+                    kernel_activity_key,
+                    f"Building {mode} rendering kernel",
+                    view_id=view_id,
+                    details={
+                        "volumes": len(snapshot["volumes"]),
+                        "surfaces": bool(snapshot["objects"]),
+                        "env": [
+                            int(v.environment_scattering_samples)
+                            for v in snapshot["volumes"]
+                        ],
+                    },
+                    determinate=False,
+                )
                 print(
                     f"[Mitsuba] {mode} integrator rebuild: view={view_id} "
                     f"volumes={len(snapshot['volumes'])} surfaces={bool(snapshot['objects'])} "
@@ -1424,6 +1546,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                         volume.color_mapping,
                         volume.opacity_mapping,
                         volume.sample_distance,
+                        volume.opacity_reference_distance,
                         volume.gradient_step,
                         volume.gradient_volume,
                         volume.shade,
@@ -1455,6 +1578,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 else:
                     handle.live_integrator = integrator
                     handle.live_integrator_key = integrator_key
+                self._activity_done(kernel_activity_key, kernel_activity_started)
             else:
                 integrator.update(
                     snapshot["volumes"],
@@ -1746,6 +1870,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             color_mapping: dict[str, Any],
             opacity_mapping: dict[str, Any],
             sample_distance: float,
+            opacity_reference_distance: float,
             gradient_step: tuple[float, float, float],
             gradient_volume,
             shade: bool,
@@ -1767,6 +1892,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             self.scalar_volume = scalar_volume
             self.bounds = tuple(map(float, bounds))
             self.sample_distance = max(float(sample_distance), 1.0e-12)
+            self.opacity_reference_distance = max(float(opacity_reference_distance), 1.0e-12)
             self.gradient_step = tuple(max(abs(float(v)), 1.0e-12) for v in gradient_step)
             self.gradient_volume = gradient_volume
             self.shade = bool(shade)
@@ -1828,6 +1954,9 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
                 self._opacity_mapping_signature = opacity_signature
 
             self.sample_distance = max(float(volume.sample_distance), 1.0e-12)
+            self.opacity_reference_distance = max(
+                float(volume.opacity_reference_distance), 1.0e-12
+            )
             self.gradient_step = tuple(
                 max(abs(float(v)), 1.0e-12) for v in volume.gradient_step
             )
@@ -1950,7 +2079,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             dy = ymax - ymin
             dz = zmax - zmin
             max_extent = math.sqrt(dx * dx + dy * dy + dz * dz)
-            min_extent = min(self.sample_distance, max_extent)
+            min_extent = min(self.opacity_reference_distance, max_extent)
             reach = self.global_illumination_reach
             # VTK maps [0, 1] non-linearly from roughly one primary sample
             # to the full volume diagonal. Preserve that behavior in world space.
@@ -1960,7 +2089,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             scalar = self._sample_scalar(position, active)
             opacity_x = self._normalized_scalar(scalar, self.opacity)
             alpha = self._opacity(opacity_x, self.opacity, active)
-            ratio = step_distance / self.sample_distance
+            ratio = step_distance / self.opacity_reference_distance
             transmission = dr.maximum(1.0 - alpha, 1.0e-6)
             return dr.clip(1.0 - dr.power(transmission, ratio), 0.0, 1.0)
 
@@ -2227,7 +2356,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             scalar = self._sample_scalar(position, active)
             opacity_x = self._normalized_scalar(scalar, self.opacity)
             alpha = self._opacity(opacity_x, self.opacity, active)
-            ratio = step_distance / self.sample_distance
+            ratio = step_distance / self.opacity_reference_distance
             transmission = dr.maximum(1.0 - alpha, 1.0e-6)
             return dr.clip(1.0 - dr.power(transmission, ratio), 0.0, 1.0)
 
@@ -2246,9 +2375,9 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             alpha = self._opacity(opacity_x, self.opacity, active)
             color = self._color(color_x, self.color, active)
 
-            # TF opacity is defined for the representation's reference sample
-            # distance. Correct it if the marcher later uses a different step.
-            ratio = step_distance / self.sample_distance
+            # TF opacity is defined for a fixed physical reference distance
+            # derived from the voxel spacing. The marcher step is independent.
+            ratio = step_distance / self.opacity_reference_distance
             transmission = dr.maximum(1.0 - alpha, 1.0e-6)
             alpha = 1.0 - dr.power(transmission, ratio)
             alpha = dr.clip(alpha, 0.0, 1.0)
@@ -2495,6 +2624,20 @@ def _volume_gradient_step(image: vtk.vtkImageData) -> tuple[float, float, float]
     spacing = tuple(abs(float(value)) for value in image.GetSpacing())
     fallback = _volume_sample_distance(image, {"auto_adjust_sample_distances": True})
     return tuple(value if value > 0.0 else fallback for value in spacing)
+
+def _volume_opacity_reference_distance(image: vtk.vtkImageData) -> float:
+    """Physical distance for which transfer-function opacity is defined.
+
+    Keep this independent of the user-controlled ray-march step so changing
+    sample_distance changes integration accuracy, not material extinction.
+    The minimum non-zero voxel spacing preserves the previous appearance at
+    the default auto-adjusted sample distance.
+    """
+    spacing = [abs(float(value)) for value in image.GetSpacing() if abs(float(value)) > 0]
+    if spacing:
+        return min(spacing)
+    return 1.0
+
 
 def _volume_sample_distance(
     image: vtk.vtkImageData,

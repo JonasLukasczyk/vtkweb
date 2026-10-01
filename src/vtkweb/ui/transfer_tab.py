@@ -4,6 +4,8 @@ from trame.widgets import client, html
 from trame.widgets import vuetify3 as v3
 from trame_client.widgets.core import HtmlElement
 
+from vtkweb.transfer_functions import sync_transfer_function_ui_state
+
 
 class _SvgTag(HtmlElement):
     def __init__(self, tag, children=None, **kwargs):
@@ -24,16 +26,7 @@ def initialize_transfer_tab(state, ctrl) -> None:
     state.transfer_function_items = []
 
     def update_items(**_):
-        names = sorted(state.transfer_functions or {})
-        state.transfer_function_items = [
-            {"title": name, "value": name} for name in names
-        ]
-        if not names:
-            state.active_transfer_function = None
-            state.active_tf_preset = None
-        elif state.active_transfer_function not in names:
-            state.active_transfer_function = names[0]
-            state.active_tf_preset = None
+        sync_transfer_function_ui_state(state)
 
     @state.change("transfer_functions")
     def on_transfer_functions_change(**_):
