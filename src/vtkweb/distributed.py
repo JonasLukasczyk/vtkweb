@@ -21,7 +21,6 @@ class TileRegion:
     height: int
     full_width: int
     full_height: int
-    tile_id: int
 
 
 class DistributedContext:
@@ -128,7 +127,7 @@ class DistributedContext:
         width = max(1, int(width))
         height = max(1, int(height))
         if not self.enabled:
-            return TileRegion(0, 0, width, height, width, height, 0)
+            return TileRegion(0, 0, width, height, width, height)
 
         columns = int(math.ceil(math.sqrt(self.size)))
         rows = int(math.ceil(self.size / columns))
@@ -140,7 +139,7 @@ class DistributedContext:
         y0 = (height * row) // rows
         y1 = (height * (row + 1)) // rows
         return TileRegion(
-            x0, y0, max(1, x1 - x0), max(1, y1 - y0), width, height, self.rank
+            x0, y0, max(1, x1 - x0), max(1, y1 - y0), width, height
         )
 
     def execution_success(self, local_ok: bool, local_error: str | None = None):
@@ -195,12 +194,7 @@ class DistributedContext:
         with self._mpi_lock:
             if not self.mpi_comm.Iprobe(source=self._mpi.ANY_SOURCE, tag=FRAME_TAG):
                 return None
-            status = self._mpi.Status()
-            packet = self.mpi_comm.recv(
-                source=self._mpi.ANY_SOURCE, tag=FRAME_TAG, status=status
-            )
-        packet.setdefault("rank", int(status.Get_source()))
-        return packet
+            return self.mpi_comm.recv(source=self._mpi.ANY_SOURCE, tag=FRAME_TAG)
 
 
 context = DistributedContext()

@@ -28,15 +28,6 @@ def initialize_app_controller(
     execution = PipelineExecutionManager(state, pipeline, rendering)
     execution_task: asyncio.Task | None = None
 
-    # Server -> client request token for transient remote viewport dimensions.
-    # The dimensions themselves remain outside serialized application state.
-    state.remote_render_size_request_epoch = 0
-
-    def request_render_sizes() -> None:
-        state.remote_render_size_request_epoch = (
-            int(state.remote_render_size_request_epoch or 0) + 1
-        )
-
     # -------------------------------------------------------------------------
     # Primitive application commands
     # -------------------------------------------------------------------------
@@ -179,7 +170,6 @@ def initialize_app_controller(
     def switch_view_type(view_id: str, view_type: str) -> None:
         distributed.replicate("switch_view_type", view_id, view_type)
         rendering.switch_view_type(view_id, view_type)
-        request_render_sizes()
 
     def create_view_in_container(container_id: str, view_type: str) -> str:
         """Create a selected view backend in an empty workspace tile."""
@@ -369,9 +359,9 @@ def initialize_app_controller(
         """Finalize reconstructed state without executing the pipeline.
 
         Loading restores configuration only. Pipeline execution remains an
-        explicit user action. The browser may keep the same render DOM nodes
-        across reconstruction, so ask it to re-report the actual viewport
-        dimensions even when no ResizeObserver event occurs.
+        explicit user action. Transient viewport sizes are preserved for view IDs
+        that survive reconstruction and newly-created DOM views report their own
+        size through the normal ResizeObserver path.
         """
 
         for node_id in pipeline.nodes:
@@ -379,7 +369,6 @@ def initialize_app_controller(
             pipeline.refresh_runtime_metadata(node_id)
 
         rendering.prune_render_sizes()
-        request_render_sizes()
 
     def _start_execution_plan(node_order) -> None:
         nonlocal execution_task
@@ -493,10 +482,6 @@ def initialize_app_controller(
         distributed.replicate("set_render_size", view_id, int(width), int(height))
         rendering.set_render_size(view_id, width, height)
 
-    def set_tf_interacting(active) -> None:
-        distributed.replicate("set_tf_interacting", bool(active))
-        rendering.set_tf_interacting(bool(active))
-
     def set_tf_data(array_name, value) -> None:
         distributed.replicate("set_tf_data", array_name, value)
         rendering.transfer_functions.set_data(array_name, value)
@@ -548,16 +533,16 @@ def initialize_app_controller(
         )
 
     def add_tf_opacity_control_point(array_name, x, opacity) -> None:
-        distributed.replicate("add_tf_opacity_control_point", array_name, x, opacity)
+        distributed.replicate(
+            "add_tf_opacity_control_point", array_name, x, opacity
+        )
         rendering.transfer_functions.add_opacity_control_point(array_name, x, opacity)
 
     def remove_tf_opacity_control_point(array_name, point_index) -> None:
         distributed.replicate(
             "remove_tf_opacity_control_point", array_name, point_index
         )
-        rendering.transfer_functions.remove_opacity_control_point(
-            array_name, point_index
-        )
+        rendering.transfer_functions.remove_opacity_control_point(array_name, point_index)
 
     # -------------------------------------------------------------------------
     # Controller
@@ -572,7 +557,6 @@ def initialize_app_controller(
     ctrl.set_representation_kind = set_representation_kind
     ctrl.toggle_representation_in_view = toggle_representation_in_view
     ctrl.set_representation_property = set_representation_property
-    ctrl.set_tf_interacting = set_tf_interacting
     ctrl.set_tf_data = set_tf_data
     ctrl.apply_tf_preset = apply_tf_preset
     ctrl.set_tf_mapping_range = set_tf_mapping_range
@@ -600,7 +584,6 @@ def initialize_app_controller(
     ctrl.delete_node = delete_node
     ctrl.clear_state = clear_state
     ctrl.finish_state_load = finish_state_load
-    ctrl.request_render_sizes = request_render_sizes
     ctrl.export_python_state = export_state_source
     ctrl.load_python_state = load_state_source
     ctrl.save_python_state_file = save_python_state_file
@@ -634,7 +617,6 @@ def initialize_app_controller(
     distributed.register("reset_camera", reset_camera)
     distributed.register("interact_view_camera", interact_view_camera)
     distributed.register("set_render_size", set_render_size)
-    distributed.register("set_tf_interacting", set_tf_interacting)
     distributed.register("set_tf_data", set_tf_data)
     distributed.register("apply_tf_preset", apply_tf_preset)
     distributed.register("set_tf_mapping_range", set_tf_mapping_range)
@@ -644,7 +626,9 @@ def initialize_app_controller(
         set_tf_color_control_point_component,
     )
     distributed.register("add_tf_color_control_point", add_tf_color_control_point)
-    distributed.register("remove_tf_color_control_point", remove_tf_color_control_point)
+    distributed.register(
+        "remove_tf_color_control_point", remove_tf_color_control_point
+    )
     distributed.register("set_tf_opacity_control_point", set_tf_opacity_control_point)
     distributed.register("add_tf_opacity_control_point", add_tf_opacity_control_point)
     distributed.register(

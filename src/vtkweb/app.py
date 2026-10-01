@@ -10,7 +10,7 @@ from vtkweb.distributed import context as distributed
 from vtkweb.pipeline import PipelineGraph
 from vtkweb.rendering import RenderManager
 from vtkweb.rendering.distributed_transport import DistributedFrameTransport
-from vtkweb.rendering.frame_transport import WebSocketFrameTransport
+from vtkweb.rendering.frame_transport import H264WebSocketFrameTransport
 from vtkweb.views import ViewManager
 from vtkweb.workspace import WorkspaceManager
 
@@ -27,8 +27,8 @@ if distributed.is_root:
     )
 
 pipeline = PipelineGraph(server.state)
-websocket_transport = WebSocketFrameTransport(server) if distributed.is_root else None
-frame_transport = DistributedFrameTransport(websocket_transport)
+video_transport = H264WebSocketFrameTransport(server) if distributed.is_root else None
+frame_transport = DistributedFrameTransport(video_transport)
 rendering = RenderManager(server.state, pipeline, frame_transport=frame_transport)
 views = ViewManager(server.state, rendering)
 workspace = WorkspaceManager(server.state)

@@ -68,6 +68,29 @@ def build_view_tab(
                 ),
             )
 
+
+        with html.Label(
+            v_if="property.ui !== false && property.kind === 'choice'",
+            classes="vtkweb-input-box mt-1",
+        ):
+            html.Span(
+                "{{ property.label }}",
+                classes="vtkweb-control-label",
+            )
+            with html.Select(
+                value=("property.value",),
+                change=(
+                    ctrl.set_view_property,
+                    "[active_view_id,property.name,$event.target.value]",
+                ),
+            ):
+                html.Option(
+                    "{{ option.label }}",
+                    v_for="option in property.options || []",
+                    key=("option.value",),
+                    value=("option.value",),
+                )
+
         with html.Label(
             v_if="property.ui !== false && property.kind === 'str'",
             classes="vtkweb-input-box mt-1",

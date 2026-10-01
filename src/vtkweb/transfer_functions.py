@@ -269,9 +269,7 @@ def _mapping(value: dict[str, Any], name: str) -> dict[str, Any]:
 
 def _normalize_tf(value: dict[str, Any]) -> dict[str, Any]:
     if set(value) != {"color", "opacity"}:
-        raise ValueError(
-            "transfer function must contain exactly color and opacity mappings"
-        )
+        raise ValueError("transfer function must contain exactly color and opacity mappings")
 
     color = value["color"]
     opacity = value["opacity"]
@@ -317,9 +315,7 @@ def _normalize_opacity_points(value) -> list[list[float]]:
     points[-1][0] = 1.0
     for index in range(1, len(points)):
         if points[index][0] <= points[index - 1][0]:
-            raise ValueError(
-                "opacity control-point x coordinates must be strictly increasing"
-            )
+            raise ValueError("opacity control-point x coordinates must be strictly increasing")
     return points
 
 

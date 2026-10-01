@@ -3,327 +3,440 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import time
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Protocol
 
-from aiohttp import WSMsgType, web
-
-_BATCH_MAGIC = b"VTB1"
-
-
-@dataclass
-class _CachedTile:
-    packet: bytes
-    revision: int
+import numpy as np
+from aiohttp import web
 
 
 @dataclass
-class _Client:
-    websocket: web.WebSocketResponse
-    credit: bool = False
-    last_sent: dict[tuple[str, int], int] = field(default_factory=dict)
-    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    flush_task: asyncio.Task | None = None
+class _CompositeFrame:
+    width: int
+    height: int
+    size_revision: int
+    rgb: np.ndarray
+
+
+@dataclass(frozen=True)
+class _EncodedFrame:
+    sequence: int
+    logical_width: int
+    logical_height: int
+    coded_width: int
+    coded_height: int
+    keyframe: bool
+    timestamp_us: int
+    payload: bytes
+
+
+@dataclass
+class _ViewStream:
+    """All mutable transport state for one logical view."""
+
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    clients: set[int] = field(default_factory=set)
+    pending_clients: set[int] = field(default_factory=set)
+    frame: _CompositeFrame | None = None
+    encoded: _EncodedFrame | None = None
+    encoder: object | None = None
+    encoder_size: tuple[int, int] | None = None
+    sequence: int = 0
+    frame_revision: int = 0
+    encoded_revision: int = -1
+    stats_started_at: float = field(default_factory=time.monotonic)
+    stats_rank_frames: dict[int, int] = field(default_factory=dict)
+    stats_known_ranks: set[int] = field(default_factory=set)
+    stats_composite_frames: int = 0
+    stats_bytes: int = 0
 
 
 class FrameTransport(Protocol):
-    """Transport interface for encoded server-rendered frames."""
+    """Transport interface for server-rendered RGB tiles."""
+
+    def discard_view(self, view_id: str) -> None: ...
 
     async def publish(
         self,
         view_id: str,
-        image: bytes,
+        rgb: bytes,
         *,
-        mime_type: str = "image/jpeg",
-        generation: int = 0,
-        sequence: int = 0,
+        width: int,
+        height: int,
         region=None,
         full_size=None,
-        tile_id: int = 0,
-        debug: bool = False,
         size_revision: int = 0,
-        depth: bytes | None = None,
-        depth_near: float | None = None,
-        depth_far: float | None = None,
-        depth_encoding: str | None = None,
-        ssao_slices: int = 0,
-        ssao_steps: int = 6,
-        ssao_radius: float = 10.0,
-        ssao_strength: float = 1.0,
-        ssao_thickness: float = 0.4,
-        camera_fov: float = 30.0,
+        source_rank: int = 0,
     ) -> None: ...
 
 
-class WebSocketFrameTransport:
-    """Client-paced latest-value binary frame stream.
+class H264WebSocketFrameTransport:
+    """CPU tile compositor + shared per-view PyAV/libx264 WebSocket stream.
 
-    Rank 0 stores only the latest encoded packet for each ``(view_id, tile_id)``.
-    A browser grants one delivery credit after it has painted the previous batch.
-    One credit sends one batch containing only tiles that changed since that
-    client's previous batch. A short coalescing window lets tiles from multiple
-    ranks and views accumulate before the credit is consumed. If nothing has
-    changed yet, the credit remains outstanding until a later publish schedules
-    another coalesced flush.
-
-    Batch wire format::
-
-        b"VTB1" | uint32_be count |
-            uint32_be packet_length | packet |
-            ...
-
-    Each embedded packet retains the original tile format::
-
-        uint32_be header_length | utf8 JSON header | encoded image bytes
-
-    This provides end-to-end backpressure without queueing obsolete rendered
-    tiles and without polling/resending unchanged images.
+    Every tile immediately updates the retained CPU framebuffer. At most one
+    encoded H.264 access unit is in flight per view. Tile updates that arrive
+    while it is being delivered are coalesced *before* x264; after delivery,
+    only the newest framebuffer state is encoded. This preserves the H.264
+    reference chain without delaying hot framebuffer updates.
     """
 
-    route = "/vtkweb/frame-stream"
+    route = "/vtkweb/video/{view_id}"
+    _packet_header = struct.Struct("!BQ")  # keyframe flag, timestamp_us
 
-    def __init__(self, server, *, coalesce_delay: float = 0.003) -> None:
+    def __init__(self, server) -> None:
         self.server = server
-        self.coalesce_delay = max(0.0, float(coalesce_delay))
-        self._clients: set[int] = set()
-        self._client_data: dict[int, _Client] = {}
-        self._latest_tiles: dict[tuple[str, int], _CachedTile] = {}
-        self._revision = 0
+        self._streams: dict[str, _ViewStream] = {}
+        self.server.state.render_stats = {}
+        self._next_client_id = 1
         server.controller.on_server_bind.add(self._on_server_bind)
 
     def _on_server_bind(self, http_server) -> None:
         http_server.app.router.add_get(self.route, self._handle_websocket)
 
-    async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
-        websocket = web.WebSocketResponse(autoping=True, heartbeat=30)
-        await websocket.prepare(request)
+    def _stream(self, view_id: str) -> _ViewStream:
+        stream = self._streams.get(view_id)
+        if stream is None:
+            stream = _ViewStream()
+            self._streams[view_id] = stream
+        return stream
 
-        key = id(websocket)
-        client = _Client(websocket=websocket)
-        self._clients.add(key)
-        self._client_data[key] = client
+    @staticmethod
+    def _make_encoder(width: int, height: int):
+        try:
+            import av
+        except ImportError as exc:
+            raise RuntimeError("H.264 transport requires PyAV (pip install av).") from exc
 
         try:
-            async for message in websocket:
-                if message.type == WSMsgType.TEXT:
-                    try:
-                        payload = json.loads(message.data)
-                    except (TypeError, ValueError):
-                        continue
-                    if payload.get("type") == "ready":
-                        client.credit = True
-                        self._schedule_flush(client)
-                    continue
-                if message.type in {
-                    WSMsgType.CLOSE,
-                    WSMsgType.CLOSING,
-                    WSMsgType.CLOSED,
-                }:
-                    break
-                if message.type == WSMsgType.ERROR:
-                    break
-        finally:
-            self._clients.discard(key)
-            self._client_data.pop(key, None)
-            if client.flush_task is not None and not client.flush_task.done():
-                client.flush_task.cancel()
-            if not websocket.closed:
-                await websocket.close()
+            codec = av.CodecContext.create("libx264", "w")
+        except Exception as exc:
+            raise RuntimeError(
+                "PyAV/FFmpeg does not provide the CPU libx264 encoder"
+            ) from exc
 
-        return websocket
+        codec.width = width
+        codec.height = height
+        codec.pix_fmt = "yuv420p"
+        codec.time_base = Fraction(1, 1_000_000)
+        codec.framerate = Fraction(60, 1)
+        codec.gop_size = 60
+        codec.max_b_frames = 0
+        codec.options = {
+            "preset": "ultrafast",
+            "tune": "zerolatency",
+            "profile": "baseline",
+            "crf": "20",
+            "x264-params": "repeat-headers=1:annexb=1:scenecut=0",
+        }
+        codec.open()
+        return codec
 
-    @staticmethod
-    def _encode_tile_packet(
-        view_id: str,
-        image: bytes,
-        *,
-        mime_type: str,
-        generation: int,
+    def _encoder(self, stream: _ViewStream, width: int, height: int):
+        size = (width, height)
+        if stream.encoder is None or stream.encoder_size != size:
+            stream.encoder = self._make_encoder(width, height)
+            stream.encoder_size = size
+        return stream.encoder
+
+    def _encode(
+        self,
+        stream: _ViewStream,
+        frame: _CompositeFrame,
         sequence: int,
-        region,
-        full_size,
-        tile_id: int,
-        debug: bool,
-        size_revision: int,
-        depth: bytes | None,
-        depth_near: float | None,
-        depth_far: float | None,
-        depth_encoding: str | None,
-        ssao_slices: int,
-        ssao_steps: int,
-        ssao_radius: float,
-        ssao_strength: float,
-        ssao_thickness: float,
-        camera_fov: float,
-    ) -> bytes:
-        depth_bytes = depth or b""
-        header = json.dumps(
-            {
-                "view_id": view_id,
-                "mime_type": mime_type,
-                "generation": int(generation),
-                "sequence": int(sequence),
-                "image_length": len(image),
-                "depth_length": len(depth_bytes),
-                "ssao_slices": int(ssao_slices),
-                "ssao_steps": int(ssao_steps),
-                "ssao_radius": float(ssao_radius),
-                "ssao_strength": float(ssao_strength),
-                "ssao_thickness": float(ssao_thickness),
-                "camera_fov": float(camera_fov),
-                **(
-                    {
-                        "depth_encoding": str(depth_encoding),
-                        "depth_near": float(depth_near),
-                        "depth_far": float(depth_far),
-                    }
-                    if depth_bytes
-                    and depth_encoding is not None
-                    and depth_near is not None
-                    and depth_far is not None
-                    else {}
-                ),
-                **(
-                    {
-                        "region": list(region),
-                        "full_size": list(full_size),
-                        "tile_id": int(tile_id),
-                        "debug": bool(debug),
-                        "size_revision": int(size_revision),
-                    }
-                    if region is not None and full_size is not None
-                    else {}
-                ),
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return struct.pack(">I", len(header)) + header + image + depth_bytes
+    ) -> _EncodedFrame | None:
+        import av
+
+        logical_width = frame.width
+        logical_height = frame.height
+        coded_width = logical_width + (logical_width & 1)
+        coded_height = logical_height + (logical_height & 1)
+
+        rgb = frame.rgb
+        if coded_width != logical_width or coded_height != logical_height:
+            padded = np.zeros((coded_height, coded_width, 3), dtype=np.uint8)
+            padded[:logical_height, :logical_width] = rgb
+            rgb = padded
+
+        encoder = self._encoder(stream, coded_width, coded_height)
+        video_frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+        timestamp_us = time.monotonic_ns() // 1000
+        video_frame.pts = timestamp_us
+        video_frame.time_base = Fraction(1, 1_000_000)
+        packets = encoder.encode(video_frame)
+        if not packets:
+            return None
+
+        return _EncodedFrame(
+            sequence=sequence,
+            logical_width=logical_width,
+            logical_height=logical_height,
+            coded_width=coded_width,
+            coded_height=coded_height,
+            keyframe=any(packet.is_keyframe for packet in packets),
+            timestamp_us=timestamp_us,
+            payload=b"".join(bytes(packet) for packet in packets),
+        )
+
+    def _encode_latest(self, stream: _ViewStream) -> bool:
+        if stream.encoded is not None or not stream.clients or stream.frame is None:
+            return False
+        if stream.frame_revision <= stream.encoded_revision:
+            return False
+
+        sequence = stream.sequence + 1
+        encoded = self._encode(stream, stream.frame, sequence)
+        if encoded is None:
+            return False
+
+        stream.sequence = sequence
+        stream.encoded_revision = stream.frame_revision
+        stream.encoded = encoded
+        # Only clients present at encode time must consume this access unit.
+        stream.pending_clients = set(stream.clients)
+        return True
+
+
+    def _record_stats(self, view_id: str, stream: _ViewStream, source_rank: int, byte_count: int) -> None:
+        rank = int(source_rank)
+        stream.stats_known_ranks.add(rank)
+        stream.stats_rank_frames[rank] = stream.stats_rank_frames.get(rank, 0) + 1
+        stream.stats_composite_frames += 1
+        stream.stats_bytes += int(byte_count)
+
+        now = time.monotonic()
+        elapsed = now - stream.stats_started_at
+        if elapsed < 1.0:
+            return
+
+        rank_fps = [
+            {"rank": rank_id, "fps": stream.stats_rank_frames.get(rank_id, 0) / elapsed}
+            for rank_id in sorted(stream.stats_known_ranks)
+        ]
+        current = dict(self.server.state.render_stats or {})
+        current[str(view_id)] = {
+            "rank_fps": rank_fps,
+            "composite_fps": stream.stats_composite_frames / elapsed,
+            "data_mib_s": stream.stats_bytes / elapsed / (1024.0 * 1024.0),
+        }
+        self.server.state.render_stats = current
+        # Stats are produced outside a Trame RPC callback. Publish only this key
+        # instead of calling state.flush(), which would also push unrelated
+        # pending UI state and can overwrite controls while the user is editing.
+        protocol = self.server.protocol
+        if protocol is not None:
+            payload = self.server.state.translator.translate_dict(
+                {"render_stats": current}
+            )
+            protocol.push_state_change(payload)
+            # Mark this one key as committed so a later normal Trame flush does
+            # not resend it together with unrelated state.
+            self.server.state.clean("render_stats")
+
+        stream.stats_started_at = now
+        stream.stats_rank_frames.clear()
+        stream.stats_composite_frames = 0
+        stream.stats_bytes = 0
+
+    def reset_stats(self, view_id: str) -> None:
+        """Start a fresh measurement window for one view.
+
+        Used when switching render modes so the next sample measures only the
+        new mode instead of averaging across both kernels.
+        """
+        stream = self._streams.get(str(view_id))
+        if stream is None:
+            return
+        stream.stats_started_at = time.monotonic()
+        stream.stats_rank_frames.clear()
+        stream.stats_composite_frames = 0
+        stream.stats_bytes = 0
 
     @staticmethod
-    def _encode_batch(packets: list[bytes]) -> bytes:
-        parts = [_BATCH_MAGIC, struct.pack(">I", len(packets))]
-        for packet in packets:
-            parts.append(struct.pack(">I", len(packet)))
-            parts.append(packet)
-        return b"".join(parts)
-
-    def _schedule_flush(self, client: _Client) -> None:
-        if not client.credit or client.websocket.closed:
-            return
-        if client.flush_task is not None and not client.flush_task.done():
-            return
-
-        async def _coalesced_flush() -> None:
-            try:
-                if self.coalesce_delay:
-                    await asyncio.sleep(self.coalesce_delay)
-                await self._flush_client(client)
-            except asyncio.CancelledError:
-                raise
-            finally:
-                if client.flush_task is asyncio.current_task():
-                    client.flush_task = None
-
-        client.flush_task = asyncio.create_task(_coalesced_flush())
-
-    async def _flush_client(self, client: _Client) -> None:
-        if not client.credit or client.websocket.closed:
-            return
-
-        async with client.send_lock:
-            if not client.credit or client.websocket.closed:
-                return
-
-            changed: list[tuple[tuple[str, int], _CachedTile]] = [
-                (key, cached)
-                for key, cached in self._latest_tiles.items()
-                if cached.revision > client.last_sent.get(key, 0)
-            ]
-            if not changed:
-                # Keep the credit outstanding. The next publish will satisfy it.
-                return
-
-            # Stable ordering makes captures/debugging deterministic. Tile
-            # freshness is still latest-value because there is only one cache
-            # entry per logical tile.
-            changed.sort(key=lambda item: item[0])
-            batch = self._encode_batch([cached.packet for _, cached in changed])
-
-            try:
-                await client.websocket.send_bytes(batch)
-            except (ConnectionError, RuntimeError):
-                return
-
-            for key, cached in changed:
-                client.last_sent[key] = cached.revision
-            client.credit = False
-
-    def discard_view(self, view_id: str) -> None:
-        """Drop cached tiles and per-client revisions for a removed/replaced view."""
-        view_id = str(view_id)
-        stale_keys = [key for key in self._latest_tiles if key[0] == view_id]
-        for key in stale_keys:
-            self._latest_tiles.pop(key, None)
-            for client in self._client_data.values():
-                client.last_sent.pop(key, None)
+    async def _notify(stream: _ViewStream) -> None:
+        async with stream.condition:
+            stream.condition.notify_all()
 
     async def publish(
         self,
         view_id: str,
-        image: bytes,
+        rgb: bytes,
         *,
-        mime_type: str = "image/jpeg",
-        generation: int = 0,
-        sequence: int = 0,
+        width: int,
+        height: int,
         region=None,
         full_size=None,
-        tile_id: int = 0,
-        debug: bool = False,
         size_revision: int = 0,
-        depth: bytes | None = None,
-        depth_near: float | None = None,
-        depth_far: float | None = None,
-        depth_encoding: str | None = None,
-        ssao_slices: int = 0,
-        ssao_steps: int = 6,
-        ssao_radius: float = 10.0,
-        ssao_strength: float = 1.0,
-        ssao_thickness: float = 0.4,
-        camera_fov: float = 30.0,
+        source_rank: int = 0,
     ) -> None:
-        if not image:
+        if not rgb:
             return
 
-        packet = self._encode_tile_packet(
-            view_id,
-            image,
-            mime_type=mime_type,
-            generation=generation,
-            sequence=sequence,
-            region=region,
-            full_size=full_size,
-            tile_id=tile_id,
-            debug=debug,
-            size_revision=size_revision,
-            depth=depth,
-            depth_near=depth_near,
-            depth_far=depth_far,
-            depth_encoding=depth_encoding,
-            ssao_slices=ssao_slices,
-            ssao_steps=ssao_steps,
-            ssao_radius=ssao_radius,
-            ssao_strength=ssao_strength,
-            ssao_thickness=ssao_thickness,
-            camera_fov=camera_fov,
-        )
-        key = (str(view_id), int(tile_id))
-        self._revision += 1
-        self._latest_tiles[key] = _CachedTile(packet=packet, revision=self._revision)
+        tile_width = max(1, int(width))
+        tile_height = max(1, int(height))
+        expected = tile_width * tile_height * 3
+        if len(rgb) != expected:
+            raise ValueError(f"RGB payload has {len(rgb)} bytes, expected {expected}")
 
-        # Publishing never queues a frame for a busy client. It only replaces
-        # latest state. Clients with an outstanding credit get one short
-        # coalescing window so tiles from multiple ranks/views can share a batch.
-        for client_key in tuple(self._clients):
-            client = self._client_data.get(client_key)
-            if client is not None and client.credit and not client.websocket.closed:
-                self._schedule_flush(client)
+        if full_size is None:
+            full_width, full_height = tile_width, tile_height
+        else:
+            full_width, full_height = map(int, full_size)
+
+        if region is None:
+            x, y = 0, 0
+        else:
+            x, y, region_width, region_height = map(int, region)
+            if (region_width, region_height) != (tile_width, tile_height):
+                raise ValueError("Tile dimensions do not match its region")
+
+        if x < 0 or y < 0 or x + tile_width > full_width or y + tile_height > full_height:
+            raise ValueError("Tile region lies outside the full framebuffer")
+
+        stream = self._stream(str(view_id))
+        revision = max(1, int(size_revision))
+        frame = stream.frame
+        if frame is not None and revision < frame.size_revision:
+            return
+        if (
+            frame is None
+            or frame.size_revision != revision
+            or frame.width != full_width
+            or frame.height != full_height
+        ):
+            frame = _CompositeFrame(
+                width=full_width,
+                height=full_height,
+                size_revision=revision,
+                rgb=np.zeros((full_height, full_width, 3), dtype=np.uint8),
+            )
+            stream.frame = frame
+
+        tile_rgb = np.frombuffer(rgb, dtype=np.uint8).reshape(tile_height, tile_width, 3)
+        frame.rgb[y : y + tile_height, x : x + tile_width] = tile_rgb
+        stream.frame_revision += 1
+        self._record_stats(view_id, stream, source_rank, len(rgb))
+
+        # If an H.264 access unit is already in flight, just keep accumulating
+        # the newest raw state. Encoding it now would force us to queue or drop
+        # an inter-frame packet, both of which are undesirable here.
+        if stream.encoded is not None or not stream.clients:
+            return
+
+        if self._encode_latest(stream):
+            await self._notify(stream)
+
+    async def _mark_delivered(
+        self,
+        stream: _ViewStream,
+        client_id: int,
+        sequence: int,
+    ) -> None:
+        current = stream.encoded
+        if current is None or current.sequence != sequence:
+            return
+
+        stream.pending_clients.discard(client_id)
+        if stream.pending_clients:
+            return
+
+        stream.encoded = None
+        if self._encode_latest(stream):
+            await self._notify(stream)
+
+    async def _wait_for_encoded(
+        self,
+        stream: _ViewStream,
+        after_sequence: int,
+    ) -> _EncodedFrame:
+        async with stream.condition:
+            while stream.encoded is None or stream.encoded.sequence <= after_sequence:
+                await stream.condition.wait()
+            return stream.encoded
+
+    def discard_view(self, view_id: str) -> None:
+        stream = self._streams.get(str(view_id))
+        if stream is None:
+            return
+
+        # Resize/scene reset: drop image/codec state but preserve connected
+        # clients, their condition, and the monotonic stream sequence.
+        stream.frame = None
+        stream.encoded = None
+        stream.pending_clients.clear()
+        stream.encoder = None
+        stream.encoder_size = None
+        stream.frame_revision = 0
+        stream.encoded_revision = -1
+
+    async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
+        view_id = str(request.match_info.get("view_id") or "")
+        if not view_id:
+            raise web.HTTPBadRequest(text="view_id is required")
+
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+
+        stream = self._stream(view_id)
+        client_id = self._next_client_id
+        self._next_client_id += 1
+        stream.clients.add(client_id)
+
+        # A new WebCodecs decoder must start on a keyframe. Restarting the
+        # shared encoder makes the next access unit a fresh GOP for the newcomer.
+        stream.encoder = None
+        stream.encoder_size = None
+
+        sequence = stream.sequence
+        configured_size: tuple[int, int] | None = None
+        needs_keyframe = True
+
+        try:
+            while not ws.closed:
+                frame = await self._wait_for_encoded(stream, sequence)
+                sequence = frame.sequence
+                size = (frame.logical_width, frame.logical_height)
+
+                if configured_size != size:
+                    configured_size = size
+                    needs_keyframe = True
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "type": "config",
+                                "codec": "avc1.42E033",
+                                "codedWidth": frame.coded_width,
+                                "codedHeight": frame.coded_height,
+                                "width": frame.logical_width,
+                                "height": frame.logical_height,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+
+                if needs_keyframe and not frame.keyframe:
+                    await self._mark_delivered(stream, client_id, frame.sequence)
+                    continue
+                needs_keyframe = False
+
+                header = self._packet_header.pack(
+                    1 if frame.keyframe else 0,
+                    frame.timestamp_us,
+                )
+                await ws.send_bytes(header + frame.payload)
+                await self._mark_delivered(stream, client_id, frame.sequence)
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            if not ws.closed:
+                await ws.send_str(json.dumps({"type": "error", "message": str(exc)}))
+        finally:
+            stream.clients.discard(client_id)
+            # Do not let a disconnected client hold the in-flight access unit.
+            if stream.encoded is not None:
+                await self._mark_delivered(stream, client_id, stream.encoded.sequence)
+            if not ws.closed:
+                await ws.close()
+
+        return ws

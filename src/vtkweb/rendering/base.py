@@ -6,23 +6,15 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 
+
+
 @dataclass(frozen=True)
-class EncodedFrame:
-    """Encoded color tile plus optional linear-depth payload.
+class RenderedFrame:
+    """Raw top-to-bottom RGB24 tile."""
 
-    ``depth`` stores zlib-compressed little-endian float32 linear world/ray
-    distances. Foreground pixels contain metric surface/volume depth,
-    antialiased edges are blended toward the finite world-space ``depth_far``,
-    and pure background equals ``depth_far``. Values are never projection-
-    normalized or quantized.
-    """
-
-    image: bytes
-    mime_type: str = "image/jpeg"
-    depth: bytes | None = None
-    depth_near: float | None = None
-    depth_far: float | None = None
-    depth_encoding: str | None = None
+    rgb: bytes
+    width: int
+    height: int
 
 
 REPRESENTATION_KINDS = (
@@ -76,61 +68,13 @@ VIEW_PROPERTY_SPECS = {
         "min": 0.0,
         "step": 0.1,
     },
-    "camera_aperture_radius": {
-        "name": "camera_aperture_radius",
-        "label": "Aperture radius",
+    "camera_aperture_size": {
+        "name": "camera_aperture_size",
+        "label": "Aperture size",
         "kind": "float",
         "default": 0.0,
         "min": 0.0,
         "step": 0.001,
-    },
-    "ssao_slices": {
-        "name": "ssao_slices",
-        "label": "SSAO slices",
-        "kind": "int",
-        "default": 0,
-        "min": 0,
-        "max": 8,
-        "step": 1,
-    },
-    "ssao_steps": {
-        "name": "ssao_steps",
-        "label": "SSAO steps",
-        "kind": "int",
-        "default": 6,
-        "min": 1,
-        "max": 32,
-        "step": 1,
-    },
-    "ssao_radius": {
-        "name": "ssao_radius",
-        "label": "SSAO radius",
-        "kind": "float",
-        "default": 10.0,
-        "min": 0.0,
-        "step": 0.1,
-    },
-    "ssao_strength": {
-        "name": "ssao_strength",
-        "label": "SSAO strength",
-        "kind": "float",
-        "default": 1.0,
-        "min": 0.0,
-        "step": 0.05,
-    },
-    "ssao_thickness": {
-        "name": "ssao_thickness",
-        "label": "SSAO thickness",
-        "kind": "float",
-        "default": 0.4,
-        "min": 0.000001,
-        "step": 0.1,
-    },
-    "debug": {
-        "name": "debug",
-        "label": "Debug",
-        "kind": "bool",
-        "default": False,
     },
     "fps_limit": {
         "name": "fps_limit",
@@ -139,6 +83,12 @@ VIEW_PROPERTY_SPECS = {
         "default": 30,
         "min": 1,
         "step": 1,
+    },
+    "caching": {
+        "name": "caching",
+        "label": "Caching",
+        "kind": "bool",
+        "default": True,
     },
     "distributed": {
         "name": "distributed",
@@ -224,4 +174,4 @@ class FrameRenderingBackend(Protocol):
     def has_renderable_scene(self, view_id: str) -> bool: ...
     def render_frame(
         self, view_id: str, *, region=None, full_size=None
-    ) -> bytes | EncodedFrame | None: ...
+    ) -> RenderedFrame | None: ...

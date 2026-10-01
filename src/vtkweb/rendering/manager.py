@@ -44,7 +44,6 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
     "environment_scattering_strength": 1.0,
     "environment_scattering_samples": 0,
     "environment_scattering_step_factor": 4.0,
-    "volume_depth_opacity_threshold": 0.95,
     "auto_adjust_sample_distances": True,
     "sample_distance": 1.0,
 }
@@ -92,14 +91,8 @@ class RenderManager:
         self._view_backend_ids: dict[str, str] = {}
         # Client viewport size is transient runtime state owned by the logical
         # view. Keep it here so a backend switch does not lose the existing
-        # canvas dimensions when the DOM itself does not resize.
+        # viewport dimensions when the DOM itself does not resize.
         self._render_sizes: dict[str, tuple[int, int]] = {}
-        # Transient size revisions are tracked for every logical view, even on
-        # workers where the backend is not materialized. Because resize
-        # mutations are replicated in order, all ranks keep the same revision
-        # and late-materialized workers join the current framebuffer epoch.
-        self._render_size_revisions: dict[str, int] = {}
-
         self.state.views = {}
         self.state.representations = {}
         self.state.active_view_id = None
@@ -191,7 +184,7 @@ class RenderManager:
             self._dematerialize_view(view_id)
         if not preserve_render_size:
             self._render_sizes.pop(view_id, None)
-            self._render_size_revisions.pop(view_id, None)
+            self.frames.forget_view(view_id)
 
         views = dict(self.state.views)
         del views[view_id]
@@ -210,7 +203,11 @@ class RenderManager:
         self.state.active_view_id = view_id
 
     def switch_view_type(self, view_id: str, view_type: str) -> None:
-        """Replace a render backend in place while preserving logical state."""
+        """Replace this rank's backend while preserving logical view state.
+
+        No MPI synchronization is performed. Each rank applies the replicated
+        mutation independently; tiles from old and new backends may briefly mix.
+        """
         if view_type not in {"vtk", "mitsuba"}:
             raise ValueError(f"Unknown render view type: {view_type}")
         value = deepcopy(self.state.views[view_id])
@@ -227,6 +224,12 @@ class RenderManager:
 
         if self._should_materialize_view(view_id):
             self._materialize_view(view_id)
+
+        print(
+            f"[Render view] rank={distributed.rank} view={view_id} "
+            f"backend={view_type} materialized={self._is_view_materialized(view_id)}",
+            flush=True,
+        )
         self._notify_render()
 
     # -------------------------------------------------------------------------
@@ -596,24 +599,6 @@ class RenderManager:
         self._update_representation(representation_id)
         self._notify_render()
 
-    def set_tf_interacting(self, active: bool) -> None:
-        """Toggle transient transfer-function drag mode on rendering backends.
-
-        While active, Mitsuba avoids expensive opacity-dependent lighting bakes.
-        Ending interaction refreshes volume representations once so their cached
-        lighting fields are rebuilt from the final opacity mapping.
-        """
-        active = bool(active)
-        for backend in tuple(self._backends.values()):
-            setter = getattr(backend, "set_tf_interacting", None)
-            if setter is not None:
-                setter(active)
-        if not active:
-            for representation in tuple(self.representations):
-                if representation.kind == "volume":
-                    self._update_representation(representation.id)
-            self._notify_render()
-
     def discover_transfer_functions(self, node_id: str) -> None:
         self.transfer_functions.discover_node_outputs(node_id)
 
@@ -737,22 +722,18 @@ class RenderManager:
             value = max(0.0, float(value))
         elif name == "camera_focal_length_mm":
             value = max(1.0, float(value))
-        elif name in {"camera_focus_distance", "camera_aperture_radius"}:
+        elif name in {"camera_focus_distance", "camera_aperture_size"}:
             value = max(0.0, float(value))
-        elif name == "ssao_slices":
-            value = max(0, min(8, int(round(float(value)))))
-        elif name == "ssao_steps":
-            value = max(1, min(32, int(round(float(value)))))
-        elif name in {"ssao_radius", "ssao_strength"}:
-            value = max(0.0, float(value))
-        elif name == "ssao_thickness":
-            value = max(1.0e-6, float(value))
         elif name == "fps_limit":
             value = max(1, int(round(float(value))))
-        elif name in {"debug", "distributed"}:
+        elif name in {"distributed", "caching"}:
             value = bool(value)
 
         value = deepcopy(value)
+        if name == "caching":
+            # Keep performance samples mode-specific. The actual renderer keeps
+            # running continuously; this only resets the lightweight counters.
+            self.frames.reset_stats(view_id)
 
         # Update authoritative logical state first. This lets a worker materialize
         # the view immediately when Distributed Rendering transitions to true.
@@ -783,6 +764,9 @@ class RenderManager:
         self.state.views = {**self.state.views, view_id: view}
 
         if name == "distributed":
+            # Worker ranks independently materialize/dematerialize their local
+            # renderer. No rank waits for another rank, and in-flight tiles are
+            # allowed to reach the client during the transition.
             if self._should_materialize_view(view_id):
                 if not self._is_view_materialized(view_id):
                     self._materialize_view(view_id)
@@ -791,30 +775,17 @@ class RenderManager:
 
             if self._is_view_materialized(view_id):
                 self.frames.set_distributed(view_id, value)
+
+            print(
+                f"[Render view] rank={distributed.rank} view={view_id} "
+                f"distributed={bool(value)} materialized={self._is_view_materialized(view_id)}",
+                flush=True,
+            )
             if notify:
                 self._notify_render()
             return
 
-        if name == "debug":
-            if self._is_view_materialized(view_id):
-                self.frames.set_debug(view_id, value)
-        elif name in {
-            "ssao_slices",
-            "ssao_steps",
-            "ssao_radius",
-            "ssao_strength",
-            "ssao_thickness",
-        }:
-            if self._is_view_materialized(view_id):
-                self.frames.set_ssao(
-                    view_id,
-                    slices=self.get_view_property(view_id, "ssao_slices"),
-                    steps=self.get_view_property(view_id, "ssao_steps"),
-                    radius=self.get_view_property(view_id, "ssao_radius"),
-                    strength=self.get_view_property(view_id, "ssao_strength"),
-                    thickness=self.get_view_property(view_id, "ssao_thickness"),
-                )
-        elif name == "fps_limit":
+        if name == "fps_limit":
             if self._is_view_materialized(view_id):
                 self.frames.set_fps_limit(view_id, float(value))
         elif self._is_view_materialized(view_id):
@@ -832,6 +803,7 @@ class RenderManager:
                 properties[name] = property_state
                 view["properties"] = properties
                 self.state.views = {**self.state.views, view_id: view}
+
 
         if self._is_view_materialized(view_id):
             self.frames.ensure(view_id)
@@ -891,15 +863,13 @@ class RenderManager:
         width = max(1, int(width))
         height = max(1, int(height))
         new_size = (width, height)
-        if self._render_sizes.get(view_id) != new_size:
-            self._render_size_revisions[view_id] = (
-                self._render_size_revisions.get(view_id, 0) + 1
-            )
         self._render_sizes[view_id] = new_size
-        revision = self._render_size_revisions.get(view_id, 1)
+        # The scheduler owns the framebuffer revision even on worker ranks where
+        # the renderer is currently dematerialized. Replicated resize mutations
+        # therefore keep every rank in the same stale-frame epoch.
+        self.frames.set_render_size(view_id, width, height)
         if not self._is_view_materialized(view_id):
             return
-        self.frames.set_render_size(view_id, width, height, revision=revision)
         backend = self._frame_backend_for_view(view_id)
         if backend.set_render_size(self.backend_view_id(view_id), width, height):
             self.frames.ensure(view_id)
@@ -910,11 +880,6 @@ class RenderManager:
         self._render_sizes = {
             view_id: size
             for view_id, size in self._render_sizes.items()
-            if view_id in active_ids
-        }
-        self._render_size_revisions = {
-            view_id: revision
-            for view_id, revision in self._render_size_revisions.items()
             if view_id in active_ids
         }
 
@@ -943,7 +908,11 @@ class RenderManager:
         # Apply cheap view properties first. Camera is applied after scene
         # representations so clipping/bounds-dependent backend state is valid.
         for property_name in VIEW_PROPERTY_NAMES:
-            if property_name in {"camera", "debug", "fps_limit", "distributed"}:
+            if property_name in {
+                "camera",
+                "fps_limit",
+                "distributed",
+            }:
                 continue
             backend.set_view_property(
                 backend_id,
@@ -977,15 +946,6 @@ class RenderManager:
                 backend_id, *render_size
             )
 
-        self.frames.set_debug(view_id, bool(self.get_view_property(view_id, "debug")))
-        self.frames.set_ssao(
-            view_id,
-            slices=self.get_view_property(view_id, "ssao_slices"),
-            steps=self.get_view_property(view_id, "ssao_steps"),
-            radius=self.get_view_property(view_id, "ssao_radius"),
-            strength=self.get_view_property(view_id, "ssao_strength"),
-            thickness=self.get_view_property(view_id, "ssao_thickness"),
-        )
         self.frames.set_fps_limit(
             view_id, float(self.get_view_property(view_id, "fps_limit"))
         )
@@ -993,11 +953,7 @@ class RenderManager:
             view_id, bool(self.get_view_property(view_id, "distributed"))
         )
         if render_size is not None:
-            self.frames.set_render_size(
-                view_id,
-                *render_size,
-                revision=self._render_size_revisions.get(view_id, 1),
-            )
+            self.frames.set_render_size(view_id, *render_size)
         self.frames.register_view(
             view_id, self._frame_backend_for_view(view_id), backend_id
         )

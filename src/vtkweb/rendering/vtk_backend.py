@@ -10,7 +10,7 @@ from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from vtkweb.transfer_functions import mapping_scalar
 
-from vtkweb.rendering.base import RenderView, RenderingBackend, Representation
+from vtkweb.rendering.base import RenderedFrame, RenderView, RenderingBackend, Representation
 
 
 @dataclass
@@ -18,7 +18,6 @@ class VTKViewHandle:
     renderer: vtk.vtkRenderer
     render_window: vtk.vtkRenderWindow
     capture: vtk.vtkWindowToImageFilter
-    writer: vtk.vtkJPEGWriter
     width: int = 0
     height: int = 0
     # Each logical view owns an independent renderer/render-window/capture
@@ -40,7 +39,7 @@ class VTKRepresentationHandle:
 
 
 class VTKRenderingBackend(RenderingBackend):
-    """Server-side VTK renderer producing encoded image frames."""
+    """Server-side VTK renderer producing RGB24 frame tiles."""
 
     name = "vtk"
 
@@ -70,12 +69,7 @@ class VTKRenderingBackend(RenderingBackend):
         capture.ReadFrontBufferOff()
         capture.SetInputBufferTypeToRGB()
 
-        writer = vtk.vtkJPEGWriter()
-        writer.SetInputConnection(capture.GetOutputPort())
-        writer.SetQuality(90)
-        writer.WriteToMemoryOn()
-
-        self._views[view.id] = VTKViewHandle(renderer, render_window, capture, writer)
+        self._views[view.id] = VTKViewHandle(renderer, render_window, capture)
 
     def remove_view(self, view_id: str) -> None:
         handle = self._views.get(view_id)
@@ -153,8 +147,8 @@ class VTKRenderingBackend(RenderingBackend):
 
     def render_frame(
         self, view_id: str, *, region=None, full_size=None
-    ) -> bytes | None:
-        """Render only this rank's image-space tile and encode it as JPEG.
+    ) -> RenderedFrame | None:
+        """Render only this rank's image-space tile as RGB24.
 
         The logical camera describes the full browser viewport. For a tile, we
         derive the full-frame projection matrix, remap the tile's NDC rectangle
@@ -201,7 +195,6 @@ class VTKRenderingBackend(RenderingBackend):
                 handle.render_window.Render()
                 handle.capture.Modified()
                 handle.capture.Update()
-                handle.writer.Write()
             finally:
                 if old_use_explicit and old_explicit is not None:
                     camera.SetExplicitProjectionTransformMatrix(old_explicit)
@@ -209,10 +202,24 @@ class VTKRenderingBackend(RenderingBackend):
                 else:
                     camera.SetUseExplicitProjectionTransformMatrix(False)
 
-            result = handle.writer.GetResult()
-            if result is None or result.GetNumberOfValues() == 0:
+            output = handle.capture.GetOutput()
+            scalars = output.GetPointData().GetScalars()
+            if scalars is None:
                 return None
-            return bytes(memoryview(result))
+            pixels = vtk_to_numpy(scalars)
+            if pixels.size != width * height * 3:
+                raise RuntimeError(
+                    f"Unexpected VTK RGB buffer size: {pixels.size} for {width}x{height}"
+                )
+            # VTK image rows are bottom-to-top; browser/video rows are top-to-bottom.
+            rgb = np.ascontiguousarray(
+                np.flipud(pixels.reshape(height, width, 3))
+            )
+            return RenderedFrame(
+                rgb=rgb.tobytes(),
+                width=width,
+                height=height,
+            )
 
     def release_render_resources(self, view_id: str) -> None:
         """Finalize the VTK graphics context on its dedicated render thread."""
@@ -394,19 +401,10 @@ class VTKRenderingBackend(RenderingBackend):
                 max(-1.0, min(1.0, float(properties.get("scattering_anisotropy", 0.0))))
             )
             mapper.SetGlobalIlluminationReach(
-                max(
-                    0.0,
-                    min(1.0, float(properties.get("global_illumination_reach", 0.0))),
-                )
+                max(0.0, min(1.0, float(properties.get("global_illumination_reach", 0.0))))
             )
             mapper.SetVolumetricScatteringBlending(
-                max(
-                    0.0,
-                    min(
-                        2.0,
-                        float(properties.get("volumetric_scattering_blending", 0.0)),
-                    ),
-                )
+                max(0.0, min(2.0, float(properties.get("volumetric_scattering_blending", 0.0))))
             )
 
             blend_mode = properties.get("blend_mode", "composite")

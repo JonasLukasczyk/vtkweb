@@ -363,13 +363,6 @@ def build_representations_tab(
                         "1",
                         "32",
                     ),
-                    (
-                        "Volume depth opacity threshold",
-                        "volume_depth_opacity_threshold",
-                        "0.01",
-                        "0.01",
-                        "1",
-                    ),
                 ):
                     with html.Label(classes="vtkweb-input-box mt-1"):
                         html.Span(label, classes="vtkweb-control-label")

@@ -12,19 +12,10 @@ class _SvgTag(HtmlElement):
             ["classes", "class"],
             ["key", ":key"],
             ["v_for", "v-for"],
-            "x",
-            "y",
-            "x1",
-            "y1",
-            "x2",
-            "y2",
-            "width",
-            "height",
-            "points",
-            "cx",
-            "cy",
-            "r",
+            "x", "y", "x1", "y1", "x2", "y2",
+            "width", "height", "points", "cx", "cy", "r",
         ]
+
 
 
 def initialize_transfer_tab(state, ctrl) -> None:
@@ -122,7 +113,6 @@ def build_transfer_tab(ctrl) -> None:
                 if (!arrayName || event.button !== 0) return;
                 event.preventDefault();
                 event.stopPropagation();
-                trigger('set_tf_interacting', [true]);
                 const svg = event.currentTarget.ownerSVGElement;
                 if (!svg) return;
 
@@ -134,7 +124,6 @@ def build_transfer_tab(ctrl) -> None:
                     window.removeEventListener('pointermove', move);
                     window.removeEventListener('pointerup', up);
                     window.removeEventListener('pointercancel', up);
-                    trigger('set_tf_interacting', [false]);
                 };
 
                 window.addEventListener('pointermove', move);
@@ -253,30 +242,9 @@ def build_transfer_tab(ctrl) -> None:
                 '@click="window.__vtkwebAddOpacityPoint(active_transfer_function, $event)"',
             ],
         ):
-            _SvgTag(
-                "rect",
-                x="0",
-                y="0",
-                width="300",
-                height="140",
-                classes="vtkweb-opacity-bg",
-            )
-            _SvgTag(
-                "line",
-                x1="0",
-                y1="70",
-                x2="300",
-                y2="70",
-                classes="vtkweb-opacity-grid",
-            )
-            _SvgTag(
-                "line",
-                x1="150",
-                y1="0",
-                x2="150",
-                y2="140",
-                classes="vtkweb-opacity-grid",
-            )
+            _SvgTag("rect", x="0", y="0", width="300", height="140", classes="vtkweb-opacity-bg")
+            _SvgTag("line", x1="0", y1="70", x2="300", y2="70", classes="vtkweb-opacity-grid")
+            _SvgTag("line", x1="150", y1="0", x2="150", y2="140", classes="vtkweb-opacity-grid")
             _SvgTag(
                 "polyline",
                 points=(
@@ -297,8 +265,8 @@ def build_transfer_tab(ctrl) -> None:
                 classes="vtkweb-opacity-point",
                 raw_attrs=[
                     '@pointerdown="window.__vtkwebStartOpacityDrag(active_transfer_function, index, $event)"',
-                    "@click.stop",
-                    "@dblclick.stop=\"trigger('remove_tf_opacity_control_point', [active_transfer_function,index])\"",
+                    '@click.stop',
+                    '@dblclick.stop="trigger(\'remove_tf_opacity_control_point\', [active_transfer_function,index])"',
                 ],
             )
 
