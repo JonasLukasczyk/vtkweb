@@ -288,6 +288,60 @@ def build_representations_tab(
                         ),
                     )
 
+                for label, key, items in (
+                    (
+                        "Scalar volume",
+                        "scalar_volume",
+                        [
+                            {"title": "FP32", "value": "f32"},
+                            {"title": "FP16", "value": "f16"},
+                        ],
+                    ),
+                    (
+                        "Gradient volume",
+                        "gradient_volume",
+                        [
+                            {"title": "Off", "value": "off"},
+                            {"title": "FP32", "value": "f32"},
+                            {"title": "FP16", "value": "f16"},
+                        ],
+                    ),
+                    (
+                        "Shadow volume",
+                        "shadow_volume",
+                        [
+                            {"title": "Off", "value": "off"},
+                            {"title": "FP32", "value": "f32"},
+                            {"title": "FP16", "value": "f16"},
+                        ],
+                    ),
+                    (
+                        "Environment volume",
+                        "environment_volume",
+                        [
+                            {"title": "Off", "value": "off"},
+                            {"title": "FP32", "value": "f32"},
+                            {"title": "FP16", "value": "f16"},
+                        ],
+                    ),
+                ):
+                    with html.Div(classes="vtkweb-select-box mt-1"):
+                        html.Span(label, classes="vtkweb-control-label")
+                        v3.VSelect(
+                            classes="vtkweb-compact-select",
+                            model_value=(f"representation.properties.{key}",),
+                            items=(items,),
+                            item_title="title",
+                            item_value="value",
+                            density="compact",
+                            variant="plain",
+                            hide_details=True,
+                            update_modelValue=(
+                                ctrl.set_representation_property,
+                                f"[representation.id,'{key}',$event]",
+                            ),
+                        )
+
                 with html.Div(classes="vtkweb-select-box mt-1"):
                     html.Span("Blend", classes="vtkweb-control-label")
                     v3.VSelect(

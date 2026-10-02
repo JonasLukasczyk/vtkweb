@@ -84,12 +84,6 @@ VIEW_PROPERTY_SPECS = {
         "min": 1,
         "step": 1,
     },
-    "caching": {
-        "name": "caching",
-        "label": "Caching",
-        "kind": "bool",
-        "default": True,
-    },
     "distributed": {
         "name": "distributed",
         "label": "Distributed Rendering",

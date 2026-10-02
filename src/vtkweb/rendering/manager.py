@@ -46,6 +46,10 @@ DEFAULT_REPRESENTATION_PROPERTIES = {
     "environment_scattering_step_factor": 4.0,
     "auto_adjust_sample_distances": True,
     "sample_distance": 1.0,
+    "scalar_volume": "f32",
+    "gradient_volume": "f32",
+    "shadow_volume": "f32",
+    "environment_volume": "f32",
 }
 
 DEFAULT_VIEW_CAMERAS = {
@@ -591,6 +595,15 @@ class RenderManager:
             )
             value = [array_name, association]
 
+        if name == "scalar_volume":
+            value = str(value).lower()
+            if value not in {"f32", "f16"}:
+                raise ValueError("scalar_volume must be 'f32' or 'f16'")
+        elif name in {"gradient_volume", "shadow_volume", "environment_volume"}:
+            value = str(value).lower()
+            if value not in {"off", "f32", "f16"}:
+                raise ValueError(f"{name} must be 'off', 'f32', or 'f16'")
+
         properties[str(name)] = value
         state_value["properties"] = properties
         self._set_representation_state(representation_id, state_value)
@@ -728,14 +741,10 @@ class RenderManager:
             value = max(0.0, float(value))
         elif name == "fps_limit":
             value = max(1, int(round(float(value))))
-        elif name in {"distributed", "caching"}:
+        elif name == "distributed":
             value = bool(value)
 
         value = deepcopy(value)
-        if name == "caching":
-            # Keep performance samples mode-specific. The actual renderer keeps
-            # running continuously; this only resets the lightweight counters.
-            self.frames.reset_stats(view_id)
 
         # Update authoritative logical state first. This lets a worker materialize
         # the view immediately when Distributed Rendering transitions to true.

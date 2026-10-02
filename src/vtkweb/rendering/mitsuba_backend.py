@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import math
 import threading
 import time
@@ -38,11 +39,8 @@ class MitsubaViewHandle:
     cached_scene_key: tuple | None = None
     cached_scene_params: Any | None = None
     cached_sensor_key: tuple | None = None
-    cached_integrator: Any | None = None
-    cached_integrator_key: tuple | None = None
-    live_integrator: Any | None = None
-    live_integrator_key: tuple | None = None
-    caching: bool = True
+    integrator: Any | None = None
+    integrator_key: tuple | None = None
 
 
 @dataclass
@@ -78,6 +76,10 @@ class MitsubaRepresentationHandle:
     scalar_values: np.ndarray | None = None
     shadow_volume: Any | None = None
     shadow_volume_key: tuple[Any, ...] | None = None
+    scalar_volume_precision: str = "f32"
+    gradient_volume_precision: str = "f32"
+    shadow_volume_precision: str = "f32"
+    environment_volume_precision: str = "f32"
 
 
 class MitsubaRenderingBackend(RenderingBackend):
@@ -144,8 +146,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         except Exception:
             mpi_rank = 0
         print(f"[Mitsuba] rank={mpi_rank} variant: {selected_variant}", flush=True)
-        self._cached_direct_volume_type = _make_direct_volume_type(mi, dr, cached_lighting=True)
-        self._live_direct_volume_type = _make_direct_volume_type(mi, dr, cached_lighting=False)
+        self._direct_volume_types: dict[tuple[bool, bool, bool], type] = {}
         self._dvr_integrator_type = _make_dvr_integrator_type(mi, dr)
 
         # Protect only the small canonical render-state snapshot shared
@@ -163,6 +164,137 @@ class MitsubaRenderingBackend(RenderingBackend):
         self._render_lock = threading.RLock()
         self._views: dict[str, MitsubaViewHandle] = {}
         self._representations: dict[tuple[str, str], MitsubaRepresentationHandle] = {}
+
+    @staticmethod
+    def _precision(value: Any, *, allow_off: bool) -> str:
+        value = str(value or "f32").lower()
+        allowed = {"f32", "f16"} | ({"off"} if allow_off else set())
+        return value if value in allowed else "f32"
+
+    def _texture_storage_types(self, precision: str):
+        """Return the Dr.Jit tensor/array/texture types for one storage precision."""
+        precision = self._precision(precision, allow_off=False)
+        tensor_type = self.mi.TensorXf16 if precision == "f16" else self.mi.TensorXf
+        backend_module = importlib.import_module(tensor_type.__module__)
+        texture_name = "Texture3f16" if precision == "f16" else "Texture3f"
+        array_name = "Float16" if precision == "f16" else "Float"
+        texture_type = getattr(backend_module, texture_name, None)
+        array_type = getattr(backend_module, array_name, None)
+        if texture_type is None or array_type is None:
+            raise RuntimeError(
+                f"Dr.Jit backend {tensor_type.__module__!r} does not provide "
+                f"{texture_name}/{array_name}"
+            )
+        return tensor_type, array_type, texture_type
+
+    def _texture_from_tensor(self, tensor, precision: str, *, interpolation: str = "linear"):
+        _tensor_type, _array_type, texture_type = self._texture_storage_types(precision)
+        filter_mode = (
+            self.dr.FilterMode.Nearest
+            if interpolation == "nearest"
+            else self.dr.FilterMode.Linear
+        )
+        return texture_type(
+            tensor,
+            filter_mode=filter_mode,
+            wrap_mode=self.dr.WrapMode.Clamp,
+        )
+
+    def _make_texture3d_device(
+        self,
+        flat_array,
+        shape: tuple[int, int, int, int],
+        precision: str,
+        *,
+        interpolation: str = "linear",
+    ):
+        """Create a 3D texture from an already device-resident flat Dr.Jit array."""
+        tensor_type, _array_type, _texture_type = self._texture_storage_types(precision)
+        try:
+            tensor = tensor_type(flat_array, shape=shape)
+        except TypeError:
+            tensor = tensor_type(flat_array, shape)
+        return self._texture_from_tensor(tensor, precision, interpolation=interpolation)
+
+    def _make_texture3d(
+        self,
+        array: np.ndarray,
+        precision: str,
+        *,
+        interpolation: str = "linear",
+    ):
+        """Upload a CPU array without first materializing a full FP32/FP16 host copy.
+
+        Dr.Jit performs the conversion to the requested device storage type during
+        tensor construction.  This is important for large VTK int16 volumes: the
+        VTK-owned host buffer can be uploaded directly instead of first creating
+        another multi-gigabyte NumPy float array.
+        """
+        precision = self._precision(precision, allow_off=False)
+        source = np.asarray(array)
+        if source.ndim == 3:
+            source = source[..., None]
+        # Preserve the source dtype. ascontiguousarray is a no-op for the usual
+        # VTK scalar view and only copies genuinely strided input.
+        source = np.ascontiguousarray(source)
+        tensor_type, _array_type, _texture_type = self._texture_storage_types(precision)
+        tensor = tensor_type(source)
+        return self._texture_from_tensor(tensor, precision, interpolation=interpolation)
+
+    @staticmethod
+    def _gpu_texture_position_from_indices(mi, x, y, z, nx: int, ny: int, nz: int):
+        """Return texture coordinates for integer voxel-center indices."""
+        return mi.Point3f(
+            (mi.Float(x) + 0.5) / float(nx),
+            (mi.Float(y) + 0.5) / float(ny),
+            (mi.Float(z) + 0.5) / float(nz),
+        )
+
+    def _compile_gpu_opacity_mapping(self, mapping):
+        minimum, maximum = map(float, mapping["range"])
+        width = maximum - minimum
+        if abs(width) < 1.0e-20:
+            width = 1.0
+        points = np.asarray(mapping["control_points"], dtype=np.float32)
+        x = np.linspace(0.0, 1.0, 1024, dtype=np.float32)
+        lut = np.interp(
+            x,
+            points[:, 0],
+            np.clip(points[:, 1], 0.0, 1.0),
+        ).astype(np.float32)
+        return (
+            self.dr.opaque(self.mi.Float, minimum),
+            self.dr.opaque(self.mi.Float, 1.0 / width),
+            self.mi.Float(np.ascontiguousarray(lut)),
+            len(lut),
+        )
+
+    def _gpu_opacity_from_scalar(self, scalar, compiled):
+        minimum, inv_width, lut, size = compiled
+        x = self.dr.clip((scalar - minimum) * inv_width, 0.0, 1.0)
+        scaled = x * float(size - 1)
+        i0 = self.mi.UInt32(self.dr.floor(scaled))
+        i1 = self.dr.minimum(i0 + 1, self.mi.UInt32(size - 1))
+        t = scaled - self.mi.Float(i0)
+        v0 = self.dr.gather(self.mi.Float, lut, i0)
+        v1 = self.dr.gather(self.mi.Float, lut, i1)
+        return self.dr.clip(self.dr.lerp(v0, v1, t), 0.0, 1.0 - 1.0e-6)
+
+    def _direct_volume_type(
+        self, *, gradient: bool, shadow: bool, environment: bool
+    ):
+        key = (bool(gradient), bool(shadow), bool(environment))
+        volume_type = self._direct_volume_types.get(key)
+        if volume_type is None:
+            volume_type = _make_direct_volume_type(
+                self.mi,
+                self.dr,
+                has_gradient_texture=key[0],
+                has_shadow_texture=key[1],
+                has_environment_texture=key[2],
+            )
+            self._direct_volume_types[key] = volume_type
+        return volume_type
 
     # ------------------------------------------------------------------
     # Views
@@ -220,8 +352,6 @@ class MitsubaRenderingBackend(RenderingBackend):
                 return float(handle.camera_focus_distance)
             if name == "camera_aperture_size":
                 return float(handle.camera_aperture_size)
-            if name == "caching":
-                return bool(handle.caching)
             if name == "camera":
                 return {
                     "position": list(handle.camera_origin),
@@ -258,10 +388,6 @@ class MitsubaRenderingBackend(RenderingBackend):
                 return
             if name == "camera_aperture_size":
                 handle.camera_aperture_size = max(0.0, float(value))
-                handle.render_revision += 1
-                return
-            if name == "caching":
-                handle.caching = bool(value)
                 handle.render_revision += 1
                 return
             if name != "camera":
@@ -384,7 +510,6 @@ class MitsubaRenderingBackend(RenderingBackend):
                 "background_color": tuple(handle.background_color),
                 "world_ambient_color": tuple(handle.world_ambient_color),
                 "world_ambient_intensity": float(handle.world_ambient_intensity),
-                "caching": bool(handle.caching),
                 # Keep strong references to exactly the scene objects represented
                 # by this revision even if the server thread replaces them later.
                 "objects": tuple(
@@ -704,12 +829,25 @@ class MitsubaRenderingBackend(RenderingBackend):
             return MitsubaRepresentationHandle(kind="volume", bounds=bounds)
 
         interpolation = str(representation.properties.get("interpolation", "linear"))
+        scalar_precision = self._precision(
+            representation.properties.get("scalar_volume", "f32"), allow_off=False
+        )
+        gradient_precision = self._precision(
+            representation.properties.get("gradient_volume", "f32"), allow_off=True
+        )
+        shadow_precision = self._precision(
+            representation.properties.get("shadow_volume", "f32"), allow_off=True
+        )
+        environment_precision = self._precision(
+            representation.properties.get("environment_volume", "f32"), allow_off=True
+        )
         scalar_key = (
             data.GetAddressAsString("vtkweb"),
             int(data.GetMTime()),
             array_name,
             association,
             interpolation,
+            scalar_precision,
         )
         scalar_volume = None
         scalar_values = None
@@ -729,19 +867,24 @@ class MitsubaRenderingBackend(RenderingBackend):
                 return MitsubaRepresentationHandle(kind="volume", bounds=bounds)
 
             scalar_range = (float(np.min(scalar_values)), float(np.max(scalar_values)))
-            filter_type = "nearest" if interpolation == "nearest" else "trilinear"
-            to_world = _image_volume_transform(self.mi, bounds)
+            activity_key = f"scalar:{activity_view_id}:{representation.id}"
+            activity_started = self._activity_start(
+                activity_key,
+                "Uploading scalar volume",
+                view_id=str(activity_view_id),
+                details={
+                    "shape": tuple(int(v) for v in scalar_values.shape),
+                    "dtype": scalar_precision,
+                },
+                determinate=False,
+            )
             with self._render_lock:
-                scalar_volume = self.mi.load_dict(
-                    {
-                        "type": "gridvolume",
-                        "data": self.mi.TensorXf(scalar_values),
-                        "raw": True,
-                        "filter_type": filter_type,
-                        "wrap_mode": "clamp",
-                        "to_world": to_world,
-                    }
+                scalar_volume = self._make_texture3d(
+                    scalar_values,
+                    scalar_precision,
+                    interpolation=interpolation,
                 )
+            self._activity_done(activity_key, activity_started)
 
         handle = MitsubaRepresentationHandle(
             kind="volume",
@@ -780,6 +923,10 @@ class MitsubaRenderingBackend(RenderingBackend):
             ),
             scalar_range=scalar_range or (0.0, 1.0),
             scalar_values=scalar_values,
+            scalar_volume_precision=scalar_precision,
+            gradient_volume_precision=gradient_precision,
+            shadow_volume_precision=shadow_precision,
+            environment_volume_precision=environment_precision,
         )
 
         # Reuse the baked shadow field across representation refreshes whenever
@@ -793,96 +940,120 @@ class MitsubaRenderingBackend(RenderingBackend):
             handle.environment_lighting_volumes = previous.environment_lighting_volumes
             handle.environment_lighting_key = previous.environment_lighting_key
 
-        # Dataset-static preprocessing is shared by both render paths.
-        # TF/light-dependent lighting caches are built lazily only when the
-        # cached path is actually selected for rendering.
-        self._build_gradient_field(handle)
+        # Auxiliary textures are built lazily in render_pass() only when the
+        # selected representation settings and shading path actually need them.
         return handle
 
     def _build_gradient_field(self, volume: MitsubaRepresentationHandle) -> None:
-        """Bake a camera/TF-independent float32 scalar-gradient field."""
+        """Bake the scalar gradient directly on the active Dr.Jit device.
+
+        The only full-resolution persistent allocation is the requested gradient
+        texture itself.  Work is emitted in small Z slabs so the six neighboring
+        scalar samples never create full-volume temporary arrays on either the CPU
+        or GPU.
+        """
         scalars = volume.scalar_values
         bounds = volume.bounds
-        if scalars is None or bounds is None or scalars.ndim != 3:
+        texture = volume.scalar_volume
+        if scalars is None or bounds is None or texture is None or scalars.ndim != 3:
+            return
+        precision = volume.gradient_volume_precision
+        if precision == "off":
+            volume.gradient_volume = None
+            volume.gradient_volume_key = None
             return
         key = (
             volume.scalar_volume_key,
             tuple(float(v) for v in volume.gradient_step),
             tuple(float(v) for v in bounds),
-            "float32",
+            precision,
+            "gpu-central-difference-v1",
         )
         if volume.gradient_volume is not None and volume.gradient_volume_key == key:
             return
 
+        nz, ny, nx = (int(v) for v in scalars.shape)
+        voxel_count = int(nz * ny * nx)
+        tensor_type, storage_type, _texture_type = self._texture_storage_types(precision)
+        del tensor_type
         start = time.perf_counter()
         activity_key = f"gradient:{volume.activity_scope}"
         activity_started = self._activity_start(
             activity_key,
             "Baking gradient volume",
             view_id=volume.activity_view_id,
-            details={"shape": tuple(int(v) for v in scalars.shape), "dtype": "float32"},
+            details={
+                "shape": (nz, ny, nx),
+                "dtype": precision,
+                "device": self.mi.variant(),
+            },
         )
         print(
-            f"Mitsuba bake gradient: start shape={tuple(int(v) for v in scalars.shape)} dtype=float32"
+            f"Mitsuba bake gradient (device): start shape={(nz, ny, nx)} dtype={precision}",
+            flush=True,
         )
-        hx, hy, hz = (max(abs(float(v)), 1.0e-12) for v in volume.gradient_step)
-        # numpy arrays are laid out as (z, y, x). edge_order=1 keeps the bake
-        # valid for dimensions with only two samples while matching central
-        # differences in the interior.
-        gz, gy, gx = np.gradient(
-            np.asarray(scalars, dtype=np.float32),
-            np.float32(hz),
-            np.float32(hy),
-            np.float32(hx),
-            edge_order=1,
-        )
-        self._activity_progress(activity_key, 0.60)
-        gradient = np.empty((*scalars.shape, 3), dtype=np.float32)
-        gradient[..., 0] = np.asarray(gx, dtype=np.float32)
-        gradient[..., 1] = np.asarray(gy, dtype=np.float32)
-        gradient[..., 2] = np.asarray(gz, dtype=np.float32)
-        gradient = np.ascontiguousarray(gradient, dtype=np.float32)
-        self._activity_progress(activity_key, 0.82)
 
+        hx, hy, hz = (max(abs(float(v)), 1.0e-12) for v in volume.gradient_step)
         with self._render_lock:
-            volume.gradient_volume = self.mi.load_dict(
-                {
-                    "type": "gridvolume",
-                    "data": self.mi.TensorXf(gradient),
-                    "raw": True,
-                    "filter_type": "trilinear",
-                    "wrap_mode": "clamp",
-                    "to_world": _image_volume_transform(self.mi, bounds),
-                }
+            output = self.dr.zeros(storage_type, voxel_count * 3)
+            plane = int(ny * nx)
+            # Keep each launch to roughly <= 8 million voxels. This is large
+            # enough for good GPU occupancy but bounds temporary JIT arrays.
+            slab_depth = max(1, min(nz, int(max(1, 8_000_000 // max(1, plane)))))
+            report_stride = max(1, int(math.ceil(nz / 10.0)))
+
+            for z0 in range(0, nz, slab_depth):
+                z1 = min(nz, z0 + slab_depth)
+                count = int((z1 - z0) * plane)
+                local = self.dr.arange(self.mi.UInt32, count)
+                x = local % self.mi.UInt32(nx)
+                yz = local // self.mi.UInt32(nx)
+                y = yz % self.mi.UInt32(ny)
+                z = yz // self.mi.UInt32(ny) + self.mi.UInt32(z0)
+                p = self._gpu_texture_position_from_indices(self.mi, x, y, z, nx, ny, nz)
+                dx = self.mi.Vector3f(1.0 / float(nx), 0.0, 0.0)
+                dy = self.mi.Vector3f(0.0, 1.0 / float(ny), 0.0)
+                dz = self.mi.Vector3f(0.0, 0.0, 1.0 / float(nz))
+                gx = (texture.eval(p + dx)[0] - texture.eval(p - dx)[0]) / (2.0 * hx)
+                gy = (texture.eval(p + dy)[0] - texture.eval(p - dy)[0]) / (2.0 * hy)
+                gz = (texture.eval(p + dz)[0] - texture.eval(p - dz)[0]) / (2.0 * hz)
+                global_index = local + self.mi.UInt32(z0 * plane)
+                base = global_index * self.mi.UInt32(3)
+                self.dr.scatter(output, storage_type(gx), base)
+                self.dr.scatter(output, storage_type(gy), base + 1)
+                self.dr.scatter(output, storage_type(gz), base + 2)
+                # Force each slab now so deferred JIT graphs cannot accumulate
+                # into a second full-volume temporary representation.
+                self.dr.eval(output)
+                if z1 == nz or z1 % report_stride < slab_depth:
+                    self._activity_progress(activity_key, 0.95 * z1 / max(1, nz))
+
+            volume.gradient_volume = self._make_texture3d_device(
+                output,
+                (nz, ny, nx, 3),
+                precision,
+                interpolation="linear",
             )
+            self.dr.eval(output)
         volume.gradient_volume_key = key
         self._activity_progress(activity_key, 0.98)
         elapsed = time.perf_counter() - start
         self._activity_done(activity_key, activity_started)
-        print(f"Mitsuba bake gradient: end {elapsed:.3f}s")
+        print(f"Mitsuba bake gradient (device): end {elapsed:.3f}s", flush=True)
 
     def _build_directional_shadow_field(
         self, volume: MitsubaRepresentationHandle
     ) -> None:
-        """Bake one high-quality +Z optical-depth field and cache it.
-
-        The field depends on the scalar data, opacity mapping, opacity reference distance,
-        and bake quadrature quality, but not on the camera. Rendering therefore
-        only samples the cached field until one of those inputs changes.
-        """
+        """Bake the +Z optical-depth texture directly on the Dr.Jit device."""
         scalars = volume.scalar_values
         mapping = volume.opacity_mapping
         bounds = volume.bounds
-        if scalars is None or mapping is None or bounds is None:
+        texture = volume.scalar_volume
+        if scalars is None or mapping is None or bounds is None or texture is None:
             return
         if scalars.ndim != 3 or scalars.shape[0] < 2:
             return
 
-        # Two-point Gauss-Legendre quadrature per voxel interval is an
-        # internal quality choice. One sample is already close for linearly
-        # interpolated scalar data, while two robustly handles intervals that
-        # cross transfer-function control-point changes without exposing a
-        # misleading end-user quality parameter.
         sample_count = 2
         opacity_signature = (
             tuple(float(v) for v in mapping["range"]),
@@ -891,15 +1062,34 @@ class MitsubaRenderingBackend(RenderingBackend):
                 for point in mapping["control_points"]
             ),
         )
+        precision = volume.shadow_volume_precision
+        if precision == "off":
+            volume.shadow_volume = None
+            volume.shadow_volume_key = None
+            return
         shadow_key = (
             volume.scalar_volume_key,
             opacity_signature,
             float(volume.opacity_reference_distance),
-            (0.0, 0.0, 1.0),  # fixed directional-light direction
+            (0.0, 0.0, 1.0),
             tuple(float(v) for v in bounds),
+            precision,
+            "gpu-z-optical-depth-v1",
         )
         if volume.shadow_volume is not None and volume.shadow_volume_key == shadow_key:
             return
+
+        nz, ny, nx = (int(v) for v in scalars.shape)
+        plane = int(ny * nx)
+        voxel_count = int(nz * plane)
+        _tensor_type, storage_type, _texture_type = self._texture_storage_types(precision)
+        opacity_lut = self._compile_gpu_opacity_mapping(mapping)
+        opacity_reference_distance = max(float(volume.opacity_reference_distance), 1.0e-12)
+        zmin, zmax = float(bounds[4]), float(bounds[5])
+        dz_world = (zmax - zmin) / float(max(nz - 1, 1))
+        nodes, weights = np.polynomial.legendre.leggauss(sample_count)
+        u_values = tuple(float(v) for v in 0.5 * (nodes + 1.0))
+        weights = tuple(float(v) for v in 0.5 * weights)
 
         start = time.perf_counter()
         activity_key = f"shadow:{volume.activity_scope}"
@@ -908,122 +1098,136 @@ class MitsubaRenderingBackend(RenderingBackend):
             "Baking shadow volume",
             view_id=volume.activity_view_id,
             details={
-                "shape": tuple(int(v) for v in scalars.shape),
+                "shape": (nz, ny, nx),
                 "q": sample_count,
-                "dtype": "float32",
+                "dtype": precision,
+                "device": self.mi.variant(),
             },
         )
         print(
-            f"Mitsuba bake directional shadow: start shape={tuple(int(v) for v in scalars.shape)} "
-            f"quadrature_samples={sample_count} dtype=float32"
+            f"Mitsuba bake directional shadow (device): start shape={(nz, ny, nx)} "
+            f"quadrature_samples={sample_count} dtype={precision}",
+            flush=True,
         )
-        nz, ny, nx = scalars.shape
-        lower = np.asarray(scalars[:-1], dtype=np.float32)
-        upper = np.asarray(scalars[1:], dtype=np.float32)
-
-        # Gauss-Legendre quadrature gives a high-quality one-time integral
-        # within every voxel interval without requiring progressive passes.
-        nodes, weights = np.polynomial.legendre.leggauss(sample_count)
-        u_values = np.asarray(0.5 * (nodes + 1.0), dtype=np.float32)
-        weights = np.asarray(0.5 * weights, dtype=np.float32)
-        mean_sigma = np.zeros((nz - 1, ny, nx), dtype=np.float32)
-        opacity_reference_distance = np.float32(
-            max(float(volume.opacity_reference_distance), 1.0e-12)
-        )
-        for sample_index, (u, weight) in enumerate(zip(u_values, weights), start=1):
-            sample_scalars = lower + u * (upper - lower)
-            alpha = _evaluate_opacity_mapping(mapping, sample_scalars)
-            alpha = np.clip(alpha, np.float32(0.0), np.float32(1.0 - 1.0e-6))
-            sigma = np.asarray(
-                -np.log1p(-alpha) / opacity_reference_distance, dtype=np.float32
-            )
-            mean_sigma += weight * sigma
-            self._activity_progress(
-                activity_key, 0.10 + 0.50 * sample_index / max(1, sample_count)
-            )
-
-        zmin, zmax = float(bounds[4]), float(bounds[5])
-        dz = np.float32((zmax - zmin) / float(max(nz - 1, 1)))
-        segment_tau = np.asarray(mean_sigma * dz, dtype=np.float32)
-
-        # tau[k] is the optical depth from grid plane k toward +Z. The final
-        # plane lies on the light-facing boundary and therefore has tau=0.
-        tau = np.zeros((nz, ny, nx), dtype=np.float32)
-        tau[:-1] = np.cumsum(segment_tau[::-1], axis=0, dtype=np.float32)[::-1]
-        self._activity_progress(activity_key, 0.88)
 
         with self._render_lock:
-            volume.shadow_volume = self.mi.load_dict(
-                {
-                    "type": "gridvolume",
-                    "data": self.mi.TensorXf(np.ascontiguousarray(tau)),
-                    "raw": True,
-                    "filter_type": "trilinear",
-                    "wrap_mode": "clamp",
-                    "to_world": _image_volume_transform(self.mi, bounds),
-                }
+            output = self.dr.zeros(storage_type, voxel_count)
+            running_tau = self.dr.zeros(self.mi.Float, plane)
+            xy = self.dr.arange(self.mi.UInt32, plane)
+            x = xy % self.mi.UInt32(nx)
+            y = xy // self.mi.UInt32(nx)
+            report_stride = max(1, int(math.ceil(max(1, nz - 1) / 10.0)))
+
+            # output[nz-1] is already zero at the light-facing boundary.
+            for completed, k in enumerate(range(nz - 2, -1, -1), start=1):
+                mean_sigma = self.dr.zeros(self.mi.Float, plane)
+                for u, weight in zip(u_values, weights):
+                    z = self.mi.Float(k + u)
+                    p = self._gpu_texture_position_from_indices(
+                        self.mi, x, y, z, nx, ny, nz
+                    )
+                    scalar = texture.eval(p)[0]
+                    alpha = self._gpu_opacity_from_scalar(scalar, opacity_lut)
+                    sigma = -self.dr.log(1.0 - alpha) / opacity_reference_distance
+                    mean_sigma += float(weight) * sigma
+                running_tau = running_tau + mean_sigma * dz_world
+                indices = xy + self.mi.UInt32(k * plane)
+                self.dr.scatter(output, storage_type(running_tau), indices)
+                self.dr.eval(output, running_tau)
+                if completed % report_stride == 0 or k == 0:
+                    self._activity_progress(
+                        activity_key,
+                        0.95 * completed / max(1, nz - 1),
+                    )
+
+            volume.shadow_volume = self._make_texture3d_device(
+                output,
+                (nz, ny, nx, 1),
+                precision,
+                interpolation="linear",
             )
+            self.dr.eval(output)
         volume.shadow_volume_key = shadow_key
         self._activity_progress(activity_key, 0.98)
         elapsed = time.perf_counter() - start
         self._activity_done(activity_key, activity_started)
-        print(f"Mitsuba bake directional shadow: end {elapsed:.3f}s")
+        print(
+            f"Mitsuba bake directional shadow (device): end {elapsed:.3f}s",
+            flush=True,
+        )
 
-    @staticmethod
-    def _bilinear_shift(slice2d: np.ndarray, offset0: float, offset1: float) -> np.ndarray:
-        """Sample a 2D slice at coordinates shifted by fixed fractional offsets."""
-        n0, n1 = slice2d.shape
-        c0 = np.arange(n0, dtype=np.float64)[:, None] + float(offset0)
-        c1 = np.arange(n1, dtype=np.float64)[None, :] + float(offset1)
-        i0 = np.floor(c0).astype(np.int64)
-        i1 = np.floor(c1).astype(np.int64)
-        f0 = c0 - i0
-        f1 = c1 - i1
-        j0 = i0 + 1
-        j1 = i1 + 1
+    def _gpu_gather_zyx(self, data, shape, z, y, x):
+        """Gather one flat ZYX device volume, returning zero outside its bounds."""
+        nz, ny, nx = (int(v) for v in shape)
+        iz = self.mi.Int32(z)
+        iy = self.mi.Int32(y)
+        ix = self.mi.Int32(x)
+        valid = (
+            (iz >= 0) & (iz < nz) &
+            (iy >= 0) & (iy < ny) &
+            (ix >= 0) & (ix < nx)
+        )
+        izc = self.dr.minimum(self.dr.maximum(iz, 0), nz - 1)
+        iyc = self.dr.minimum(self.dr.maximum(iy, 0), ny - 1)
+        ixc = self.dr.minimum(self.dr.maximum(ix, 0), nx - 1)
+        index = (
+            self.mi.UInt32(izc) * self.mi.UInt32(ny * nx)
+            + self.mi.UInt32(iyc) * self.mi.UInt32(nx)
+            + self.mi.UInt32(ixc)
+        )
+        value = self.dr.gather(self.mi.Float, data, index)
+        return self.dr.select(valid, value, 0.0)
 
-        valid00 = (i0 >= 0) & (i0 < n0) & (i1 >= 0) & (i1 < n1)
-        valid10 = (j0 >= 0) & (j0 < n0) & (i1 >= 0) & (i1 < n1)
-        valid01 = (i0 >= 0) & (i0 < n0) & (j1 >= 0) & (j1 < n1)
-        valid11 = (j0 >= 0) & (j0 < n0) & (j1 >= 0) & (j1 < n1)
+    def _gpu_trilinear_flat(self, data, shape, z, y, x):
+        """Trilinearly sample a flat ZYX float array, using zero outside."""
+        z0 = self.mi.Int32(self.dr.floor(z))
+        y0 = self.mi.Int32(self.dr.floor(y))
+        x0 = self.mi.Int32(self.dr.floor(x))
+        fz = z - self.mi.Float(z0)
+        fy = y - self.mi.Float(y0)
+        fx = x - self.mi.Float(x0)
+        result = self.mi.Float(0.0)
+        for dz in (0, 1):
+            wz = fz if dz else 1.0 - fz
+            for dy in (0, 1):
+                wy = fy if dy else 1.0 - fy
+                for dx in (0, 1):
+                    wx = fx if dx else 1.0 - fx
+                    result += (
+                        self._gpu_gather_zyx(data, shape, z0 + dz, y0 + dy, x0 + dx)
+                        * wz * wy * wx
+                    )
+        return result
 
-        ci0 = np.clip(i0, 0, n0 - 1)
-        cj0 = np.clip(j0, 0, n0 - 1)
-        ci1 = np.clip(i1, 0, n1 - 1)
-        cj1 = np.clip(j1, 0, n1 - 1)
-
-        out = np.zeros((n0, n1), dtype=np.float32)
-        out += np.where(valid00, slice2d[ci0, ci1], 0.0) * ((1.0 - f0) * (1.0 - f1))
-        out += np.where(valid10, slice2d[cj0, ci1], 0.0) * (f0 * (1.0 - f1))
-        out += np.where(valid01, slice2d[ci0, cj1], 0.0) * ((1.0 - f0) * f1)
-        out += np.where(valid11, slice2d[cj0, cj1], 0.0) * (f0 * f1)
-        return out
-
-    @staticmethod
-    def _shift_axis_linear(data: np.ndarray, offset: float, axis: int) -> np.ndarray:
-        """Linearly sample ``data`` at a constant fractional index offset."""
-        n = data.shape[axis]
-        base = math.floor(float(offset))
-        frac = float(offset) - base
-        coords0 = np.arange(n, dtype=np.int64) + base
-        coords1 = coords0 + 1
-        valid0 = (coords0 >= 0) & (coords0 < n)
-        valid1 = (coords1 >= 0) & (coords1 < n)
-        take0 = np.take(data, np.clip(coords0, 0, n - 1), axis=axis)
-        take1 = np.take(data, np.clip(coords1, 0, n - 1), axis=axis)
-        shape = [1] * data.ndim
-        shape[axis] = n
-        take0 = take0 * valid0.reshape(shape)
-        take1 = take1 * valid1.reshape(shape)
-        return np.asarray((1.0 - frac) * take0 + frac * take1, dtype=np.float32)
-
-    @classmethod
-    def _shift_volume_linear(
-        cls, data: np.ndarray, offsets: tuple[float, float, float]
-    ) -> np.ndarray:
-        result = np.asarray(data, dtype=np.float32)
-        for axis, offset in enumerate(offsets):
-            result = cls._shift_axis_linear(result, offset, axis)
+    def _gpu_bilinear_tau_slice(
+        self,
+        tau,
+        shape,
+        dominant: int,
+        fixed_index: int,
+        other0,
+        other1,
+    ):
+        """Bilinearly sample one fixed-axis slice of a flat ZYX tau volume."""
+        axes = [0, 1, 2]
+        axes.remove(dominant)
+        o0, o1 = axes
+        a0 = self.mi.Int32(self.dr.floor(other0))
+        b0 = self.mi.Int32(self.dr.floor(other1))
+        fa = other0 - self.mi.Float(a0)
+        fb = other1 - self.mi.Float(b0)
+        result = self.mi.Float(0.0)
+        for da in (0, 1):
+            wa = fa if da else 1.0 - fa
+            for db in (0, 1):
+                wb = fb if db else 1.0 - fb
+                coords = [None, None, None]
+                coords[dominant] = self.mi.Int32(fixed_index)
+                coords[o0] = a0 + da
+                coords[o1] = b0 + db
+                result += self._gpu_gather_zyx(
+                    tau, shape, coords[0], coords[1], coords[2]
+                ) * wa * wb
         return result
 
     @staticmethod
@@ -1053,125 +1257,36 @@ class MitsubaRenderingBackend(RenderingBackend):
         reach = max(0.0, min(1.0, float(volume.global_illumination_reach)))
         return (min_extent - max_extent) * ((1.0 - reach) ** 0.33) + max_extent
 
-    def _build_environment_extinction_array(
-        self, volume: MitsubaRepresentationHandle
-    ) -> np.ndarray | None:
-        """Build one float32 extinction grid reused by all environment directions."""
-        scalars = volume.scalar_values
-        mapping = volume.opacity_mapping
-        if scalars is None or mapping is None or scalars.ndim != 3:
-            return None
-
-        # Evaluate opacity before spatial downsampling. This avoids missing thin
-        # opaque structures when the TF is nonlinear or sharply peaked.
-        alpha_full = _evaluate_opacity_mapping(mapping, np.asarray(scalars, dtype=np.float32))
-        alpha_full = np.clip(alpha_full, np.float32(0.0), np.float32(1.0 - 1.0e-6))
-        sigma_full = np.asarray(
-            -np.log1p(-alpha_full)
-            / np.float32(max(float(volume.opacity_reference_distance), 1.0e-12)),
-            dtype=np.float32,
-        )
-
-        factor = max(1, int(round(float(volume.environment_scattering_step_factor))))
-        if factor <= 1 or min(sigma_full.shape) < 2:
-            return np.ascontiguousarray(sigma_full, dtype=np.float32)
-
-        # Average extinction over factor-sized blocks instead of striding scalar
-        # samples. Averaging the linear extinction quantity is both more stable
-        # and less prone to light leaks through thin features.
-        nz, ny, nx = sigma_full.shape
-        pz = (-nz) % factor
-        py = (-ny) % factor
-        px = (-nx) % factor
-        padded = np.pad(
-            sigma_full,
-            ((0, pz), (0, py), (0, px)),
-            mode="edge",
-        )
-        oz, oy, ox = (v // factor for v in padded.shape)
-        reduced = padded.reshape(oz, factor, oy, factor, ox, factor).mean(
-            axis=(1, 3, 5), dtype=np.float32
-        )
-        return np.ascontiguousarray(reduced, dtype=np.float32)
-
-    def _build_environment_shadow_array(
-        self,
-        volume: MitsubaRepresentationHandle,
-        direction: tuple[float, float, float],
-        sigma: np.ndarray,
-    ) -> np.ndarray | None:
-        """Bake cumulative optical depth toward one arbitrary direction."""
-        bounds = volume.bounds
-        if bounds is None or sigma is None or sigma.ndim != 3:
-            return None
-
-        nz, ny, nx = sigma.shape
-        sx = (float(bounds[1]) - float(bounds[0])) / max(nx - 1, 1)
-        sy = (float(bounds[3]) - float(bounds[2])) / max(ny - 1, 1)
-        sz = (float(bounds[5]) - float(bounds[4])) / max(nz - 1, 1)
-        axis_spacing = np.asarray((sz, sy, sx), dtype=np.float64)
-        d_xyz = np.asarray(direction, dtype=np.float64)
-        norm = float(np.linalg.norm(d_xyz))
-        if norm <= 1.0e-12:
-            return np.zeros_like(sigma, dtype=np.float32)
-        d_xyz /= norm
-        d_axis = np.asarray((d_xyz[2], d_xyz[1], d_xyz[0]), dtype=np.float64)
-        dominant = int(np.argmax(np.abs(d_axis)))
-        dom = float(d_axis[dominant])
-        if abs(dom) <= 1.0e-8:
-            return np.zeros_like(sigma, dtype=np.float32)
-
-        perm = (dominant,) + tuple(axis for axis in range(3) if axis != dominant)
-        inv_perm = tuple(np.argsort(perm))
-        sigma_p = np.transpose(sigma, perm)
-        spacing_p = axis_spacing[list(perm)]
-        direction_p = d_axis[list(perm)]
-
-        step_length = float(spacing_p[0] / abs(direction_p[0]))
-        offset0 = float(direction_p[1] * step_length / spacing_p[1])
-        offset1 = float(direction_p[2] * step_length / spacing_p[2])
-        tau_p = np.zeros_like(sigma_p, dtype=np.float32)
-
-        if direction_p[0] > 0.0:
-            indices = range(sigma_p.shape[0] - 1, -1, -1)
-            def next_index(i):
-                return i + 1
-        else:
-            indices = range(0, sigma_p.shape[0])
-            def next_index(i):
-                return i - 1
-
-        for i in indices:
-            j = next_index(i)
-            if 0 <= j < sigma_p.shape[0]:
-                continuation = self._bilinear_shift(tau_p[j], offset0, offset1)
-            else:
-                continuation = 0.0
-            tau_p[i] = sigma_p[i] * step_length + continuation
-
-        return np.ascontiguousarray(np.transpose(tau_p, inv_perm), dtype=np.float32)
-
     def _build_environment_lighting_field(
         self, volume: MitsubaRepresentationHandle
     ) -> None:
-        """Bake view-independent environment visibility into L2 SH volumes.
+        """Bake L2 environment visibility entirely on the active Dr.Jit device.
 
-        The expensive angular visibility integration is independent of the camera.
-        Camera-dependent Henyey-Greenstein weighting is applied later in the DVR
-        kernel by convolving the stored SH coefficients with the phase function.
+        The reduced extinction grid, per-direction optical-depth field, SH
+        accumulation, and final FP16/FP32 textures remain device-resident.  CPU
+        memory use is limited to tiny direction/LUT metadata and the original
+        VTK scalar buffer.
         """
         if volume.environment_scattering_samples <= 0 or not volume.shade:
             volume.environment_lighting_volumes = ()
             volume.environment_lighting_key = None
             return
         mapping = volume.opacity_mapping
-        if mapping is None or volume.bounds is None or volume.scalar_values is None:
+        bounds = volume.bounds
+        scalars = volume.scalar_values
+        scalar_texture = volume.scalar_volume
+        if mapping is None or bounds is None or scalars is None or scalar_texture is None:
             return
 
         opacity_signature = (
             tuple(float(v) for v in mapping["range"]),
             tuple(tuple(float(c) for c in point) for point in mapping["control_points"]),
         )
+        precision = volume.environment_volume_precision
+        if precision == "off":
+            volume.environment_lighting_volumes = ()
+            volume.environment_lighting_key = None
+            return
         direction_count = max(0, int(volume.environment_scattering_samples))
         resolution_factor = max(1, int(round(volume.environment_scattering_step_factor)))
         key = (
@@ -1181,11 +1296,23 @@ class MitsubaRenderingBackend(RenderingBackend):
             float(volume.global_illumination_reach),
             direction_count,
             resolution_factor,
-            tuple(float(v) for v in volume.bounds),
+            tuple(float(v) for v in bounds),
             2,
+            precision,
+            "gpu-environment-sh-v1",
         )
         if volume.environment_lighting_key == key and volume.environment_lighting_volumes:
             return
+
+        nz, ny, nx = (int(v) for v in scalars.shape)
+        rz = int(math.ceil(nz / float(resolution_factor)))
+        ry = int(math.ceil(ny / float(resolution_factor)))
+        rx = int(math.ceil(nx / float(resolution_factor)))
+        reduced_shape = (rz, ry, rx)
+        reduced_count = int(rz * ry * rx)
+        opacity_lut = self._compile_gpu_opacity_mapping(mapping)
+        opacity_reference_distance = max(float(volume.opacity_reference_distance), 1.0e-12)
+        directions = _environment_directions(direction_count)
 
         start = time.perf_counter()
         activity_key = f"environment:{volume.activity_scope}"
@@ -1194,116 +1321,240 @@ class MitsubaRenderingBackend(RenderingBackend):
             "Baking environment lighting",
             view_id=volume.activity_view_id,
             details={
-                "shape": tuple(int(v) for v in volume.scalar_values.shape),
+                "shape": (nz, ny, nx),
                 "directions": direction_count,
                 "resolution_factor": resolution_factor,
-                "dtype": "float32",
+                "dtype": precision,
+                "device": self.mi.variant(),
             },
         )
         print(
-            f"Mitsuba bake environment lighting: start shape={tuple(int(v) for v in volume.scalar_values.shape)} "
-            f"directions={direction_count} resolution_factor={resolution_factor} dtype=float32"
-        )
-        directions = _environment_directions(direction_count)
-        sigma = self._build_environment_extinction_array(volume)
-        if sigma is None:
-            volume.environment_lighting_volumes = ()
-            volume.environment_lighting_key = None
-            elapsed = time.perf_counter() - start
-            self._activity_done(activity_key, activity_started)
-            print(f"Mitsuba bake environment lighting: end {elapsed:.3f}s no-extinction")
-            return
-        self._activity_progress(activity_key, 0.08)
-        coeffs = None
-        weight = 4.0 * math.pi / float(direction_count)
-        reach = self._shadow_extent_for_volume(volume)
-        report_stride = max(1, int(math.ceil(max(1, len(directions)) / 10.0)))
-
-        for direction_index, direction in enumerate(directions, start=1):
-            tau = self._build_environment_shadow_array(volume, direction, sigma)
-            if tau is None:
-                continue
-            nz, ny, nx = tau.shape
-            sx = (float(volume.bounds[1]) - float(volume.bounds[0])) / max(nx - 1, 1)
-            sy = (float(volume.bounds[3]) - float(volume.bounds[2])) / max(ny - 1, 1)
-            sz = (float(volume.bounds[5]) - float(volume.bounds[4])) / max(nz - 1, 1)
-            offsets = (
-                float(direction[2]) * reach / max(sz, 1.0e-12),
-                float(direction[1]) * reach / max(sy, 1.0e-12),
-                float(direction[0]) * reach / max(sx, 1.0e-12),
-            )
-            tau_end = self._shift_volume_linear(tau, offsets)
-            visibility = np.exp(-np.maximum(tau - tau_end, 0.0)).astype(np.float32)
-            basis = self._real_sh_basis(direction)
-            if coeffs is None:
-                coeffs = [np.zeros_like(visibility, dtype=np.float32) for _ in basis]
-            for index, value in enumerate(basis):
-                coeffs[index] += np.float32(weight * value) * visibility
-            if direction_index % report_stride == 0 or direction_index == len(directions):
-                self._activity_progress(
-                    activity_key,
-                    0.08 + 0.82 * direction_index / max(1, len(directions)),
-                )
-
-        if not coeffs:
-            volume.environment_lighting_volumes = ()
-            volume.environment_lighting_key = None
-            elapsed = time.perf_counter() - start
-            self._activity_done(activity_key, activity_started)
-            print(f"Mitsuba bake environment lighting: end {elapsed:.3f}s no-data")
-            return
-
-        # Pack the nine L2 SH coefficients into one 6-channel and one
-        # 3-channel volume. Mitsuba can then fetch all coefficients with just
-        # eval_6() + eval_3() instead of nine scalar texture lookups.
-        packed6 = np.ascontiguousarray(np.stack(coeffs[:6], axis=-1), dtype=np.float32)
-        packed3 = np.ascontiguousarray(np.stack(coeffs[6:9], axis=-1), dtype=np.float32)
-        self._activity_progress(activity_key, 0.94)
-        built = []
-        with self._render_lock:
-            transform = _image_volume_transform(self.mi, volume.bounds)
-            for packed in (packed6, packed3):
-                built.append(
-                    self.mi.load_dict(
-                        {
-                            "type": "gridvolume",
-                            "data": self.mi.TensorXf(packed),
-                            "raw": True,
-                            "filter_type": "trilinear",
-                            "wrap_mode": "clamp",
-                            "to_world": transform,
-                        }
-                    )
-                )
-        volume.environment_lighting_volumes = tuple(built)
-        volume.environment_lighting_key = key
-        self._activity_progress(activity_key, 0.98)
-        elapsed = time.perf_counter() - start
-        metadata = []
-        for index, field in enumerate(built):
-            try:
-                metadata.append(
-                    f"field{index}:channels={int(field.channel_count())},resolution={tuple(int(v) for v in field.resolution())}"
-                )
-            except Exception as exc:
-                metadata.append(f"field{index}:metadata-error={exc}")
-        self._activity_done(activity_key, activity_started)
-        print(
-            f"Mitsuba bake environment lighting: end {elapsed:.3f}s " + " ".join(metadata),
+            f"Mitsuba bake environment lighting (device): start shape={(nz, ny, nx)} "
+            f"directions={direction_count} resolution_factor={resolution_factor} "
+            f"dtype={precision}",
             flush=True,
         )
 
-    def _ensure_cached_lighting(
+        xmin, xmax, ymin, ymax, zmin, zmax = map(float, bounds)
+        sx = (xmax - xmin) / max(rx - 1, 1)
+        sy = (ymax - ymin) / max(ry - 1, 1)
+        sz = (zmax - zmin) / max(rz - 1, 1)
+        axis_spacing = (sz, sy, sx)  # z, y, x
+        reach = self._shadow_extent_for_volume(volume)
+        weight = 4.0 * math.pi / float(max(1, direction_count))
+
+        with self._render_lock:
+            # Build a reduced extinction grid directly from the scalar texture.
+            # Average extinction (not scalar values) over each source block so
+            # nonlinear/sharp opacity mappings do not create light leaks.
+            reduced_index = self.dr.arange(self.mi.UInt32, reduced_count)
+            ox = reduced_index % self.mi.UInt32(rx)
+            oyz = reduced_index // self.mi.UInt32(rx)
+            oy = oyz % self.mi.UInt32(ry)
+            oz = oyz // self.mi.UInt32(ry)
+            sigma = self.dr.zeros(self.mi.Float, reduced_count)
+            sample_total = int(resolution_factor ** 3)
+            sample_number = 0
+            for dz in range(resolution_factor):
+                iz = self.dr.minimum(
+                    oz * self.mi.UInt32(resolution_factor) + self.mi.UInt32(dz),
+                    self.mi.UInt32(nz - 1),
+                )
+                for dy in range(resolution_factor):
+                    iy = self.dr.minimum(
+                        oy * self.mi.UInt32(resolution_factor) + self.mi.UInt32(dy),
+                        self.mi.UInt32(ny - 1),
+                    )
+                    for dx in range(resolution_factor):
+                        ix = self.dr.minimum(
+                            ox * self.mi.UInt32(resolution_factor) + self.mi.UInt32(dx),
+                            self.mi.UInt32(nx - 1),
+                        )
+                        p = self._gpu_texture_position_from_indices(
+                            self.mi, ix, iy, iz, nx, ny, nz
+                        )
+                        scalar = scalar_texture.eval(p)[0]
+                        alpha = self._gpu_opacity_from_scalar(scalar, opacity_lut)
+                        sigma += -self.dr.log(1.0 - alpha) / opacity_reference_distance
+                        sample_number += 1
+                        if sample_number % 8 == 0 or sample_number == sample_total:
+                            self.dr.eval(sigma)
+            sigma /= float(max(1, sample_total))
+            self.dr.eval(sigma)
+            self._activity_progress(activity_key, 0.08)
+
+            coeffs = [self.dr.zeros(self.mi.Float, reduced_count) for _ in range(9)]
+            report_stride = max(1, int(math.ceil(max(1, len(directions)) / 10.0)))
+
+            # Base coordinates of every reduced-grid voxel, reused for the
+            # reach-offset lookup after each directional dynamic-programming pass.
+            x_all = reduced_index % self.mi.UInt32(rx)
+            yz_all = reduced_index // self.mi.UInt32(rx)
+            y_all = yz_all % self.mi.UInt32(ry)
+            z_all = yz_all // self.mi.UInt32(ry)
+
+            for direction_index, direction in enumerate(directions, start=1):
+                d_xyz = np.asarray(direction, dtype=np.float64)
+                norm = float(np.linalg.norm(d_xyz))
+                if norm <= 1.0e-12:
+                    continue
+                d_xyz /= norm
+                d_axis = np.asarray((d_xyz[2], d_xyz[1], d_xyz[0]), dtype=np.float64)
+                dominant = int(np.argmax(np.abs(d_axis)))
+                dom = float(d_axis[dominant])
+                if abs(dom) <= 1.0e-8:
+                    continue
+
+                sizes = reduced_shape
+                axes = [0, 1, 2]
+                axes.remove(dominant)
+                o0, o1 = axes
+                step_length = float(axis_spacing[dominant] / abs(dom))
+                offset0 = float(d_axis[o0] * step_length / axis_spacing[o0])
+                offset1 = float(d_axis[o1] * step_length / axis_spacing[o1])
+                tau = self.dr.zeros(self.mi.Float, reduced_count)
+
+                n0, n1 = sizes[o0], sizes[o1]
+                slice_count = int(n0 * n1)
+                uv = self.dr.arange(self.mi.UInt32, slice_count)
+                a = uv // self.mi.UInt32(n1)
+                b = uv % self.mi.UInt32(n1)
+                if dom > 0.0:
+                    slice_indices = range(sizes[dominant] - 1, -1, -1)
+                    next_delta = 1
+                else:
+                    slice_indices = range(0, sizes[dominant])
+                    next_delta = -1
+
+                for fixed in slice_indices:
+                    coords = [None, None, None]
+                    coords[dominant] = self.mi.UInt32(fixed)
+                    coords[o0] = a
+                    coords[o1] = b
+                    flat_index = (
+                        coords[0] * self.mi.UInt32(ry * rx)
+                        + coords[1] * self.mi.UInt32(rx)
+                        + coords[2]
+                    )
+                    sigma_slice = self.dr.gather(self.mi.Float, sigma, flat_index)
+                    nxt = fixed + next_delta
+                    if 0 <= nxt < sizes[dominant]:
+                        continuation = self._gpu_bilinear_tau_slice(
+                            tau,
+                            reduced_shape,
+                            dominant,
+                            nxt,
+                            self.mi.Float(a) + offset0,
+                            self.mi.Float(b) + offset1,
+                        )
+                    else:
+                        continuation = self.mi.Float(0.0)
+                    current = sigma_slice * step_length + continuation
+                    self.dr.scatter(tau, current, flat_index)
+                    self.dr.eval(tau)
+
+                offsets = (
+                    float(direction[2]) * reach / max(sz, 1.0e-12),
+                    float(direction[1]) * reach / max(sy, 1.0e-12),
+                    float(direction[0]) * reach / max(sx, 1.0e-12),
+                )
+                tau_end = self._gpu_trilinear_flat(
+                    tau,
+                    reduced_shape,
+                    self.mi.Float(z_all) + offsets[0],
+                    self.mi.Float(y_all) + offsets[1],
+                    self.mi.Float(x_all) + offsets[2],
+                )
+                visibility = self.dr.exp(-self.dr.maximum(tau - tau_end, 0.0))
+                basis = self._real_sh_basis(direction)
+                for index, value in enumerate(basis):
+                    coeffs[index] += float(weight * value) * visibility
+                self.dr.eval(*coeffs)
+
+                if direction_index % report_stride == 0 or direction_index == len(directions):
+                    self._activity_progress(
+                        activity_key,
+                        0.08 + 0.82 * direction_index / max(1, len(directions)),
+                    )
+
+            _tensor_type, storage_type, _texture_type = self._texture_storage_types(precision)
+            indices = self.dr.arange(self.mi.UInt32, reduced_count)
+            packed6 = self.dr.zeros(storage_type, reduced_count * 6)
+            packed3 = self.dr.zeros(storage_type, reduced_count * 3)
+            for channel in range(6):
+                self.dr.scatter(
+                    packed6,
+                    storage_type(coeffs[channel]),
+                    indices * self.mi.UInt32(6) + self.mi.UInt32(channel),
+                )
+            for channel in range(3):
+                self.dr.scatter(
+                    packed3,
+                    storage_type(coeffs[channel + 6]),
+                    indices * self.mi.UInt32(3) + self.mi.UInt32(channel),
+                )
+            self.dr.eval(packed6, packed3)
+            volume.environment_lighting_volumes = (
+                self._make_texture3d_device(
+                    packed6,
+                    (rz, ry, rx, 6),
+                    precision,
+                    interpolation="linear",
+                ),
+                self._make_texture3d_device(
+                    packed3,
+                    (rz, ry, rx, 3),
+                    precision,
+                    interpolation="linear",
+                ),
+            )
+
+        volume.environment_lighting_key = key
+        self._activity_progress(activity_key, 0.98)
+        elapsed = time.perf_counter() - start
+        self._activity_done(activity_key, activity_started)
+        print(
+            f"Mitsuba bake environment lighting (device): end {elapsed:.3f}s "
+            f"field0:channels=6,resolution={(rz, ry, rx)} "
+            f"field1:channels=3,resolution={(rz, ry, rx)}",
+            flush=True,
+        )
+
+    def _ensure_configured_volume_resources(
         self, volumes: tuple[MitsubaRepresentationHandle, ...]
     ) -> None:
-        """Build only the TF-dependent lighting fields required by cached mode."""
+        """Build only enabled auxiliary textures that the current shading path uses."""
         for volume in volumes:
-            if not volume.shade or volume.volumetric_scattering_blending <= 0.0:
+            # `off` is an explicit memory-control request, so release old
+            # resources even when the current shading path would not use them.
+            if volume.gradient_volume_precision == "off":
+                volume.gradient_volume = None
+                volume.gradient_volume_key = None
+            if volume.shadow_volume_precision == "off":
+                volume.shadow_volume = None
+                volume.shadow_volume_key = None
+            if volume.environment_volume_precision == "off":
+                volume.environment_lighting_volumes = ()
+                volume.environment_lighting_key = None
+
+            if not volume.shade:
                 continue
-            self._build_directional_shadow_field(volume)
-            if volume.environment_scattering_samples > 0:
+
+            if volume.gradient_volume_precision != "off":
+                self._build_gradient_field(volume)
+
+            if volume.volumetric_scattering_blending <= 0.0:
+                continue
+
+            if volume.shadow_volume_precision != "off":
+                self._build_directional_shadow_field(volume)
+
+            if (
+                volume.environment_scattering_samples > 0
+                and volume.environment_volume_precision != "off"
+            ):
                 self._build_environment_lighting_field(volume)
-            else:
+            elif volume.environment_scattering_samples <= 0:
                 volume.environment_lighting_volumes = ()
                 volume.environment_lighting_key = None
 
@@ -1414,8 +1665,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             float(snapshot["world_ambient_intensity"]),
         )
 
-        if snapshot["caching"]:
-            self._ensure_cached_lighting(snapshot["volumes"])
+        self._ensure_configured_volume_resources(snapshot["volumes"])
 
         # Scene creation and render/materialization all touch Dr.Jit runtime
         # state. Keep them serialized across Mitsuba views within this rank.
@@ -1482,65 +1732,57 @@ class MitsubaRenderingBackend(RenderingBackend):
                 handle.cached_sensor_key = sensor_key
             scene = handle.cached_scene
 
-            # Cached and live volume paths are separate specialized DirectVolume
-            # types. The integrators themselves are rebuilt only for structural
-            # changes. Transfer functions and ordinary shading parameters are
-            # refreshed in-place on the existing volume objects.
-            caching = bool(snapshot["caching"])
-            direct_volume_type = (
-                self._cached_direct_volume_type if caching else self._live_direct_volume_type
-            )
+            # Auxiliary texture presence is a Python-time specialization: each
+            # volume gets a DirectVolume type matching exactly the resources it
+            # owns. Precision changes recreate textures but do not add runtime
+            # branches inside the ray-march kernel.
             structural_volume_key = tuple(
                 (
                     id(volume.scalar_volume),
                     tuple(float(v) for v in volume.bounds),
                     id(volume.gradient_volume),
+                    id(volume.shadow_volume),
+                    tuple(id(field) for field in volume.environment_lighting_volumes),
                     bool(volume.shade),
                     int(volume.environment_scattering_samples),
-                    # These values select Python-time branches in DirectVolume.
                     bool(float(volume.volumetric_scattering_blending) > 0.0),
                     bool(float(volume.volumetric_scattering_blending) < 1.0),
                     bool(abs(float(volume.scattering_anisotropy)) < 0.01),
                 )
                 for volume in snapshot["volumes"]
             )
-            integrator_key = (
-                structural_volume_key,
-                bool(snapshot["objects"]),
-            )
-            integrator = handle.cached_integrator if caching else handle.live_integrator
-            previous_key = (
-                handle.cached_integrator_key if caching else handle.live_integrator_key
-            )
+            integrator_key = (structural_volume_key, bool(snapshot["objects"]))
             ambient_light = tuple(
                 component * snapshot["world_ambient_intensity"]
                 for component in self._srgb_to_linear(snapshot["world_ambient_color"])
             )
-            if integrator is None or previous_key != integrator_key:
-                mode = "cached" if caching else "live"
-                kernel_activity_key = f"kernel:{view_id}:{mode}"
+            if handle.integrator is None or handle.integrator_key != integrator_key:
+                kernel_activity_key = f"kernel:{view_id}"
                 kernel_activity_started = self._activity_start(
                     kernel_activity_key,
-                    f"Building {mode} rendering kernel",
+                    "Building rendering kernel",
                     view_id=view_id,
                     details={
                         "volumes": len(snapshot["volumes"]),
                         "surfaces": bool(snapshot["objects"]),
-                        "env": [
-                            int(v.environment_scattering_samples)
-                            for v in snapshot["volumes"]
-                        ],
+                        "gradient": [v.gradient_volume_precision for v in snapshot["volumes"]],
+                        "shadow": [v.shadow_volume_precision for v in snapshot["volumes"]],
+                        "environment": [v.environment_volume_precision for v in snapshot["volumes"]],
                     },
                     determinate=False,
                 )
                 print(
-                    f"[Mitsuba] {mode} integrator rebuild: view={view_id} "
+                    f"[Mitsuba] integrator rebuild: view={view_id} "
                     f"volumes={len(snapshot['volumes'])} surfaces={bool(snapshot['objects'])} "
-                    f"env_samples={[int(v.environment_scattering_samples) for v in snapshot['volumes']]}",
+                    f"resources={[ (v.gradient_volume_precision, v.shadow_volume_precision, v.environment_volume_precision) for v in snapshot['volumes'] ]}",
                     flush=True,
                 )
                 direct_volumes = tuple(
-                    direct_volume_type(
+                    self._direct_volume_type(
+                        gradient=volume.gradient_volume is not None,
+                        shadow=volume.shadow_volume is not None,
+                        environment=bool(volume.environment_lighting_volumes),
+                    )(
                         volume.scalar_volume,
                         volume.bounds,
                         volume.color_mapping,
@@ -1559,33 +1801,28 @@ class MitsubaRenderingBackend(RenderingBackend):
                         volume.scattering_anisotropy,
                         volume.scalar_range,
                         ambient_light,
-                        volume.shadow_volume if caching else None,
+                        volume.shadow_volume,
                         volume.environment_scattering_strength,
                         volume.environment_scattering_samples,
                         volume.environment_scattering_step_factor,
-                        volume.environment_lighting_volumes if caching else (),
+                        volume.environment_lighting_volumes,
                     )
                     for volume in snapshot["volumes"]
                 )
-                integrator = self._dvr_integrator_type(
+                handle.integrator = self._dvr_integrator_type(
                     direct_volumes,
                     self._srgb_to_linear(snapshot["background_color"]),
                     bool(snapshot["objects"]),
                 )
-                if caching:
-                    handle.cached_integrator = integrator
-                    handle.cached_integrator_key = integrator_key
-                else:
-                    handle.live_integrator = integrator
-                    handle.live_integrator_key = integrator_key
+                handle.integrator_key = integrator_key
                 self._activity_done(kernel_activity_key, kernel_activity_started)
             else:
-                integrator.update(
+                handle.integrator.update(
                     snapshot["volumes"],
                     background_color=self._srgb_to_linear(snapshot["background_color"]),
                     ambient_light=ambient_light,
-                    cached_lighting=caching,
                 )
+            integrator = handle.integrator
 
             seed = max(1, int(render_seed) + 1)
             try:
@@ -1805,25 +2042,6 @@ def _evaluate_transfer_function(
 
 
 
-def _evaluate_opacity_mapping(
-    mapping: dict[str, Any], values: np.ndarray
-) -> np.ndarray:
-    """Evaluate normalized piecewise-linear opacity as float32."""
-    points = np.asarray(mapping["control_points"], dtype=np.float32)
-    minimum, maximum = (np.float32(v) for v in mapping["range"])
-    width = np.float32(max(float(maximum - minimum), 1.0e-20))
-    normalized = np.clip(
-        (np.asarray(values, dtype=np.float32) - minimum) / width,
-        np.float32(0.0),
-        np.float32(1.0),
-    )
-    result = np.interp(
-        normalized,
-        points[:, 0],
-        np.clip(points[:, 1], np.float32(0.0), np.float32(1.0)),
-    )
-    return np.asarray(result, dtype=np.float32)
-
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
     value = str(value).lstrip("#")
     if len(value) != 6:
@@ -1853,14 +2071,15 @@ def _environment_directions(count: int) -> tuple[tuple[float, float, float], ...
     return tuple(directions)
 
 
-def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
-    """Create one specialized DVR volume type.
-
-    ``cached_lighting`` is a Python-time specialization constant, so cached and
-    live lighting paths produce separate Dr.Jit kernels without a per-sample
-    runtime branch. Both paths share scalar, gradient, TF, and local shading
-    code.
-    """
+def _make_direct_volume_type(
+    mi,
+    dr,
+    *,
+    has_gradient_texture: bool,
+    has_shadow_texture: bool,
+    has_environment_texture: bool,
+):
+    """Create one DVR volume type specialized by available GPU textures."""
 
     class DirectVolume:
         def __init__(
@@ -1937,7 +2156,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
                 ),
             )
 
-        def update_runtime(self, volume, *, ambient_light, cached_lighting: bool) -> None:
+        def update_runtime(self, volume, *, ambient_light) -> None:
             """Refresh non-structural inputs without replacing the integrator.
 
             Structural inputs are deliberately handled by the compact cache key
@@ -1983,14 +2202,10 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             self.environment_scattering_step_factor = max(
                 1.0, float(volume.environment_scattering_step_factor)
             )
-            if cached_lighting:
-                self.shadow_volume = volume.shadow_volume
-                self.environment_lighting_volumes = tuple(
-                    volume.environment_lighting_volumes or ()
-                )
-            else:
-                self.shadow_volume = None
-                self.environment_lighting_volumes = ()
+            self.shadow_volume = volume.shadow_volume
+            self.environment_lighting_volumes = tuple(
+                volume.environment_lighting_volumes or ()
+            )
 
         @staticmethod
         def _compile_mapping(mapping):
@@ -2043,18 +2258,44 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             values = cls._lut_sample(x, compiled, active)
             return dr.clip(mi.Color3f(values[0], values[1], values[2]), 0.0, 1.0)
 
+        def _texture_position(self, position, texture):
+            """Map world coordinates to Dr.Jit texture coordinates.
+
+            VTK samples lie on the world-space bounds, while Dr.Jit places
+            texels at half-cell centers. Account for that half-cell convention
+            so texture interpolation reproduces the original endpoint grid.
+            """
+            xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
+            shape = tuple(int(v) for v in texture.shape)
+            if len(shape) >= 4:
+                nz, ny, nx = shape[-4:-1]
+            else:
+                nz, ny, nx = shape[:3]
+
+            def axis(value, lower, upper, count):
+                t = (value - lower) / (upper - lower)
+                if count <= 1:
+                    return mi.Float(0.5)
+                return (t * float(count - 1) + 0.5) / float(count)
+
+            return mi.Point3f(
+                axis(position.x, xmin, xmax, nx),
+                axis(position.y, ymin, ymax, ny),
+                axis(position.z, zmin, zmax, nz),
+            )
+
         def _sample_scalar(self, position, active=True):
-            it = dr.zeros(mi.Interaction3f)
-            it.p = position
-            return self.scalar_volume.eval_1(it, active)
+            return self.scalar_volume.eval(
+                self._texture_position(position, self.scalar_volume), active
+            )[0]
 
         def _gradient(self, position, active=True):
-            if self.gradient_volume is not None:
-                it = dr.zeros(mi.Interaction3f)
-                it.p = position
-                return self.gradient_volume.eval_3(it, active)
-            # Defensive fallback for malformed/unsupported inputs. Normal volume
-            # rendering should use the cached float32 gradient field above.
+            if has_gradient_texture:
+                value = self.gradient_volume.eval(
+                    self._texture_position(position, self.gradient_volume), active
+                )
+                return mi.Vector3f(value[0], value[1], value[2])
+            # Live central differences are used when the gradient texture is off.
             hx, hy, hz = self.gradient_step
             dx = mi.Vector3f(hx, 0.0, 0.0)
             dy = mi.Vector3f(0.0, hy, 0.0)
@@ -2094,11 +2335,11 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             return dr.clip(1.0 - dr.power(transmission, ratio), 0.0, 1.0)
 
         def _sample_shadow_tau(self, position, active=True):
-            if self.shadow_volume is None:
+            if not has_shadow_texture:
                 return mi.Float(0.0)
-            it = dr.zeros(mi.Interaction3f)
-            it.p = position
-            return self.shadow_volume.eval_1(it, active)
+            return self.shadow_volume.eval(
+                self._texture_position(position, self.shadow_volume), active
+            )[0]
 
         def _distance_to_volume_exit(self, position, direction):
             xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
@@ -2170,10 +2411,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
         def _volume_shadow(self, position, light_direction, sample_index, active=True):
             del sample_index
             direction = dr.normalize(light_direction)
-            if cached_lighting:
-                if self.shadow_volume is None:
-                    return mi.Float(1.0)
-
+            if has_shadow_texture:
                 base_step = mi.Float(self.sample_distance)
                 start = position + direction * base_step
                 reach = mi.Float(self._shadow_extent())
@@ -2218,10 +2456,7 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
             if self.environment_scattering_samples <= 0:
                 return mi.Color3f(0.0)
 
-            if cached_lighting:
-                if not self.environment_lighting_volumes:
-                    return mi.Color3f(0.0)
-
+            if has_environment_texture:
                 # Incoming directions were projected into real SH coefficients in
                 # volume space. Camera-dependent Henyey-Greenstein weighting is
                 # applied here without rebaking the visibility field.
@@ -2230,10 +2465,14 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
                 g = mi.Float(self.scattering_anisotropy)
                 if len(self.environment_lighting_volumes) != 2:
                     return mi.Color3f(0.0)
-                it = dr.zeros(mi.Interaction3f)
-                it.p = position
-                c0 = self.environment_lighting_volumes[0].eval_6(it, active)
-                c1 = self.environment_lighting_volumes[1].eval_3(it, active)
+                c0_texture = self.environment_lighting_volumes[0]
+                c1_texture = self.environment_lighting_volumes[1]
+                c0 = c0_texture.eval(
+                    self._texture_position(position, c0_texture), active
+                )
+                c1 = c1_texture.eval(
+                    self._texture_position(position, c1_texture), active
+                )
                 g2 = g * g
                 total = (
                     c0[0] * basis[0]
@@ -2241,9 +2480,9 @@ def _make_direct_volume_type(mi, dr, *, cached_lighting: bool):
                     + g2 * (
                         c0[4] * basis[4]
                         + c0[5] * basis[5]
-                        + c1.x * basis[6]
-                        + c1.y * basis[7]
-                        + c1.z * basis[8]
+                        + c1[0] * basis[6]
+                        + c1[1] * basis[7]
+                        + c1[2] * basis[8]
                     )
                 )
                 total = dr.maximum(total, 0.0)
@@ -2447,13 +2686,12 @@ def _make_dvr_integrator_type(mi, dr):
                 else None
             )
 
-        def update(self, volumes, *, background_color, ambient_light, cached_lighting):
+        def update(self, volumes, *, background_color, ambient_light):
             self.background_color = mi.Color3f(*map(float, background_color))
             for direct_volume, volume in zip(self.volumes, volumes):
                 direct_volume.update_runtime(
                     volume,
                     ambient_light=ambient_light,
-                    cached_lighting=cached_lighting,
                 )
 
         def sample(self, scene, sampler, ray, medium=None, active=True):
@@ -2599,24 +2837,24 @@ def _image_scalar_values(
     if int(array.GetNumberOfTuples()) != expected_count:
         return None
 
-    values = np.asarray(vtk_to_numpy(array), dtype=np.float32)
+    # Keep the VTK-owned scalar buffer in its native dtype.  For ordinary
+    # single-component CT data this is a zero-copy NumPy view (typically int16).
+    # The Dr.Jit upload path converts directly into the requested GPU texture
+    # precision, avoiding a second full-resolution host allocation.
+    values = np.asarray(vtk_to_numpy(array))
     components = int(array.GetNumberOfComponents())
     if components <= 1:
         scalars = values.reshape(-1)
     else:
-        scalars = np.linalg.norm(values.reshape(-1, components), axis=1)
+        # Vector magnitude necessarily creates a derived scalar array. Keep this
+        # exceptional path in float32; scalar medical volumes do not use it.
+        scalars = np.linalg.norm(
+            values.reshape(-1, components).astype(np.float32, copy=False), axis=1
+        ).astype(np.float32, copy=False)
 
     nx, ny, nz = grid_dimensions
-    return np.ascontiguousarray(scalars.reshape(nz, ny, nx), dtype=np.float32)
-
-
-def _image_volume_transform(mi, bounds):
-    xmin, xmax, ymin, ymax, zmin, zmax = map(float, bounds)
-    extent = [xmax - xmin, ymax - ymin, zmax - zmin]
-    if any(value <= 0.0 for value in extent):
-        raise ValueError("Mitsuba volume bounds must have positive extent on all axes")
-    return mi.ScalarTransform4f().translate([xmin, ymin, zmin]).scale(extent)
-
+    shaped = scalars.reshape(nz, ny, nx)
+    return shaped if shaped.flags.c_contiguous else np.ascontiguousarray(shaped)
 
 
 
