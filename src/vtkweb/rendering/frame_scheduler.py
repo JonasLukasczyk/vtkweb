@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from vtkweb.distributed import TileRegion, context
 from vtkweb.rendering.base import FrameRenderingBackend, RenderedFrame
-from vtkweb.rendering.frame_transport import FrameTransport
+from vtkweb.stream_hub import StreamSink
 
 
 @dataclass(frozen=True)
@@ -18,8 +18,8 @@ class _FrameView:
 class FrameRenderManager:
     """Continuously render RGB tiles and publish each completed tile immediately."""
 
-    def __init__(self, frame_transport: FrameTransport | None = None) -> None:
-        self.frame_transport = frame_transport
+    def __init__(self, stream_sink: StreamSink | None = None) -> None:
+        self.stream_sink = stream_sink
         self._views: dict[str, _FrameView] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._executors: dict[str, ThreadPoolExecutor] = {}
@@ -74,18 +74,16 @@ class FrameRenderManager:
         self._distributed.pop(view_id, None)
         self._render_sizes.pop(view_id, None)
         self._size_revision.pop(view_id, None)
-        if self.frame_transport is not None:
-            self.frame_transport.discard_view(view_id)
+        if self.stream_sink is not None:
+            self.stream_sink.discard_view(view_id)
 
     def set_fps_limit(self, view_id: str, fps_limit: float) -> None:
         self._fps_limit[view_id] = max(1.0, float(fps_limit))
 
     def reset_stats(self, view_id: str) -> None:
-        if self.frame_transport is None:
+        if self.stream_sink is None:
             return
-        reset = getattr(self.frame_transport, "reset_stats", None)
-        if callable(reset):
-            reset(view_id)
+        self.stream_sink.reset_stats(view_id)
 
     def set_distributed(self, view_id: str, distributed: bool) -> None:
         self._distributed[view_id] = bool(distributed and context.enabled)
@@ -95,8 +93,8 @@ class FrameRenderManager:
         old_size = self._render_sizes.get(view_id)
         if old_size != new_size:
             self._size_revision[view_id] = self._size_revision.get(view_id, 0) + 1
-            if self.frame_transport is not None:
-                self.frame_transport.discard_view(view_id)
+            if self.stream_sink is not None:
+                self.stream_sink.discard_view(view_id)
         self._render_sizes[view_id] = new_size
 
     def ensure(self, view_id: str) -> None:
@@ -162,13 +160,13 @@ class FrameRenderManager:
                 if view_id not in self._views:
                     return
 
-                if frame and self.frame_transport is not None:
+                if frame and self.stream_sink is not None:
                     if not isinstance(frame, RenderedFrame):
                         raise TypeError(
                             f"{type(frame).__name__} returned by renderer; expected RenderedFrame"
                         )
                     try:
-                        await self.frame_transport.publish(
+                        await self.stream_sink.publish(
                             view_id,
                             frame.rgb,
                             width=frame.width,

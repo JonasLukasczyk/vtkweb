@@ -414,9 +414,7 @@ class VTKRenderingBackend(RenderingBackend):
                 mapper.SetBlendModeToMinimumIntensity()
             else:
                 mapper.SetBlendModeToComposite()
-            mapper.SetAutoAdjustSampleDistances(
-                1 if properties.get("auto_adjust_sample_distances", True) else 0
-            )
+            mapper.SetAutoAdjustSampleDistances(0)
             mapper.SetSampleDistance(
                 max(1e-12, float(properties.get("sample_distance", 1.0)))
             )

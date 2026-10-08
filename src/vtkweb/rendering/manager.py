@@ -11,9 +11,12 @@ from vtkweb.pipeline import PipelineGraph
 from vtkweb.distributed import context as distributed
 from vtkweb.rendering.base import (
     DEFAULT_VIEW_PROPERTIES,
+    DEFAULT_REPRESENTATION_PROPERTIES,
+    DIRECTIONAL_LIGHT_PROPERTY_NAMES,
     REPRESENTATION_KINDS,
     VIEW_PROPERTY_NAMES,
-    view_property_state,
+    VIEW_PROPERTY_SPECS,
+    normalize_representation_property,
     RenderView,
     FrameRenderingBackend,
     RenderingBackend,
@@ -26,31 +29,6 @@ from vtkweb.rendering.vtk_backend import (
 from vtkweb.transfer_functions import TransferFunctionManager
 
 
-DEFAULT_REPRESENTATION_PROPERTIES = {
-    "color_by": None,
-    "color": "#ffffff",
-    "line_width": 0.01,
-    "tube_sides": 3,
-    "interpolation": "linear",
-    "blend_mode": "composite",
-    "shade": True,
-    "ambient": 0.1,
-    "diffuse": 0.9,
-    "specular": 0.2,
-    "specular_power": 10.0,
-    "global_illumination_reach": 0.0,
-    "volumetric_scattering_blending": 0.0,
-    "scattering_anisotropy": 0.0,
-    "environment_scattering_strength": 1.0,
-    "environment_scattering_samples": 0,
-    "environment_scattering_step_factor": 4.0,
-    "auto_adjust_sample_distances": True,
-    "sample_distance": 1.0,
-    "scalar_volume": "f32",
-    "gradient_volume": "f32",
-    "shadow_volume": "f32",
-    "environment_volume": "f32",
-}
 
 DEFAULT_VIEW_CAMERAS = {
     "vtk": {
@@ -84,13 +62,12 @@ class RenderManager:
         state,
         pipeline: PipelineGraph,
         backend: RenderingBackend | None = None,
-        frame_transport=None,
-        activity_reporter=None,
+        stream_sink=None,
     ) -> None:
         self.state = state
         self.pipeline = pipeline
-        self.frames = FrameRenderManager(frame_transport)
-        self.activity_reporter = activity_reporter
+        self.stream_sink = stream_sink
+        self.frames = FrameRenderManager(stream_sink)
         self.transfer_functions = TransferFunctionManager(state, self)
         vtk_backend = backend or VTKRenderingBackend(self.transfer_functions.get)
         self._backends: dict[str, RenderingBackend] = {"vtk": vtk_backend}
@@ -101,6 +78,10 @@ class RenderManager:
         self._render_sizes: dict[str, tuple[int, int]] = {}
         self.state.views = {}
         self.state.representations = {}
+        self.state.view_property_specs = [
+            {k: v for k, v in spec.items() if k != "default"}
+            for spec in VIEW_PROPERTY_SPECS.values()
+        ]
         self.state.active_view_id = None
 
     # -------------------------------------------------------------------------
@@ -157,12 +138,7 @@ class RenderManager:
             "id": view_id,
             "type": view_type,
             "name": name,
-            "properties": {
-                property_name: view_property_state(
-                    property_name, property_values[property_name]
-                )
-                for property_name in VIEW_PROPERTY_NAMES
-            },
+            "properties": deepcopy(property_values),
         }
         self.state.views = {**self.state.views, view_id: value}
 
@@ -256,8 +232,7 @@ class RenderManager:
         representation_id: str,
     ) -> Representation:
         value = self.state.representations[representation_id]
-        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
-        properties.update(deepcopy(value.get("properties", {})))
+        properties = deepcopy(value.get("properties", {}))
 
         return Representation(
             id=value["id"],
@@ -537,8 +512,7 @@ class RenderManager:
 
         value = dict(self.state.representations[representation_id])
         value["kind"] = kind
-        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
-        properties.update(value.get("properties", {}))
+        properties = dict(value.get("properties", {}))
         if kind == "volume" and properties.get("color_by") is None:
             representation = self.get_representation(representation_id)
             arrays = self.get_arrays(representation.node_id, representation.output_port)
@@ -575,8 +549,7 @@ class RenderManager:
         backend reads the properties it understands and ignores the rest.
         """
         state_value = dict(self.state.representations[representation_id])
-        properties = dict(DEFAULT_REPRESENTATION_PROPERTIES)
-        properties.update(state_value.get("properties", {}))
+        properties = dict(state_value.get("properties", {}))
         if name == "color_by" and value is not None:
             if not isinstance(value, (list, tuple)) or len(value) != 2:
                 raise ValueError("color_by must be null or [array_name, association]")
@@ -595,15 +568,7 @@ class RenderManager:
             )
             value = [array_name, association]
 
-        if name == "scalar_volume":
-            value = str(value).lower()
-            if value not in {"f32", "f16"}:
-                raise ValueError("scalar_volume must be 'f32' or 'f16'")
-        elif name in {"gradient_volume", "shadow_volume", "environment_volume"}:
-            value = str(value).lower()
-            if value not in {"off", "f32", "f16"}:
-                raise ValueError(f"{name} must be 'off', 'f32', or 'f16'")
-
+        value = normalize_representation_property(name, value)
         properties[str(name)] = value
         state_value["properties"] = properties
         self._set_representation_state(representation_id, state_value)
@@ -707,10 +672,10 @@ class RenderManager:
 
     def get_view_property(self, view_id: str, name: str):
         self.get_view(view_id)
-        property_state = self.state.views[view_id].get("properties", {}).get(name)
-        if property_state is None:
+        properties = self.state.views[view_id].get("properties", {})
+        if name not in properties:
             raise ValueError(f"Unknown view property: {name}")
-        return deepcopy(property_state.get("value"))
+        return deepcopy(properties[name])
 
     def set_view_property(
         self,
@@ -735,6 +700,8 @@ class RenderManager:
             value = _rgb_to_hex(tuple(map(float, value)))
         elif name == "world_ambient_intensity":
             value = max(0.0, float(value))
+        elif name in DIRECTIONAL_LIGHT_PROPERTY_NAMES:
+            value = max(0.0, float(value))
         elif name == "camera_focal_length_mm":
             value = max(1.0, float(value))
         elif name in {"camera_focus_distance", "camera_aperture_size"}:
@@ -750,26 +717,20 @@ class RenderManager:
         # the view immediately when Distributed Rendering transitions to true.
         view = deepcopy(self.state.views[view_id])
         properties = dict(view.get("properties", {}))
-        property_state = dict(properties[name])
-        property_state["value"] = value
-        properties[name] = property_state
+        properties[name] = value
 
-        # Keep the canonical camera field-of-view synchronized with the
-        # photographic focal-length control used by the Mitsuba thin-lens
-        # sensor. A 24 mm film height matches the 35 mm-equivalent convention.
+        # Keep field-of-view and focal length synchronized.
         if name == "camera_focal_length_mm":
-            camera_state = dict(properties["camera"].get("value") or {})
+            camera_state = dict(properties["camera"] or {})
             camera_state["fov"] = math.degrees(
                 2.0 * math.atan(12.0 / max(float(value), 1.0e-12))
             )
-            camera_property = dict(properties["camera"])
-            camera_property["value"] = _normalize_camera(camera_state)
-            properties["camera"] = camera_property
+            properties["camera"] = _normalize_camera(camera_state)
         elif name == "camera" and value.get("fov") is not None:
-            focal_property = dict(properties["camera_focal_length_mm"])
             half = 0.5 * math.radians(max(float(value["fov"]), 1.0e-6))
-            focal_property["value"] = 12.0 / max(math.tan(half), 1.0e-12)
-            properties["camera_focal_length_mm"] = focal_property
+            properties["camera_focal_length_mm"] = 12.0 / max(
+                math.tan(half), 1.0e-12
+            )
 
         view["properties"] = properties
         self.state.views = {**self.state.views, view_id: view}
@@ -808,11 +769,7 @@ class RenderManager:
                     backend.get_view_property(backend_id, "camera")
                 )
                 view = deepcopy(self.state.views[view_id])
-                properties = dict(view.get("properties", {}))
-                property_state = dict(properties[name])
-                property_state["value"] = value
-                properties[name] = property_state
-                view["properties"] = properties
+                view["properties"] = {**view.get("properties", {}), name: value}
                 self.state.views = {**self.state.views, view_id: view}
 
 
@@ -841,11 +798,7 @@ class RenderManager:
         backend.reset_camera(backend_id)
         camera = _normalize_camera(backend.get_view_property(backend_id, "camera"))
         view = deepcopy(self.state.views[view_id])
-        properties = dict(view.get("properties", {}))
-        camera_state = dict(properties["camera"])
-        camera_state["value"] = camera
-        properties["camera"] = camera_state
-        view["properties"] = properties
+        view["properties"] = {**view.get("properties", {}), "camera": camera}
         self.state.views = {**self.state.views, view_id: view}
         if notify:
             self._notify_render()
@@ -928,7 +881,7 @@ class RenderManager:
             backend.set_view_property(
                 backend_id,
                 property_name,
-                deepcopy(value["properties"][property_name]["value"]),
+                deepcopy(value["properties"][property_name]),
             )
 
         for representation in self.representations:
@@ -943,12 +896,12 @@ class RenderManager:
                 node.processor,
             )
 
-        camera = deepcopy(value["properties"]["camera"]["value"])
+        camera = deepcopy(value["properties"]["camera"])
         if camera is not None:
             backend.set_view_property(backend_id, "camera", camera)
         camera = _normalize_camera(backend.get_view_property(backend_id, "camera"))
         view = deepcopy(self.state.views[view_id])
-        view["properties"]["camera"]["value"] = camera
+        view["properties"]["camera"] = camera
         self.state.views = {**self.state.views, view_id: view}
 
         render_size = self._render_sizes.get(view_id)
@@ -1015,7 +968,7 @@ class RenderManager:
             from vtkweb.rendering.mitsuba_backend import MitsubaRenderingBackend
 
             backend = MitsubaRenderingBackend(
-                self.transfer_functions.get, activity_reporter=self.activity_reporter
+                self.transfer_functions.get, stream_sink=self.stream_sink
             )
             self._backends[view_type] = backend
             return backend

@@ -479,6 +479,73 @@ INSPECTOR_STYLE = """
     cursor: pointer;
 }
 
+
+.vtkweb-property-group {
+    width: 100%;
+    margin-top: 6px;
+    border: 1px solid rgba(128,128,128,0.28);
+    border-radius: 5px;
+    background: rgba(128,128,128,0.025);
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.vtkweb-property-group:first-child {
+    margin-top: 0;
+}
+
+.vtkweb-property-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 8px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    font-weight: 600;
+    opacity: 0.86;
+    list-style: none;
+}
+
+.vtkweb-property-group-header::-webkit-details-marker {
+    display: none;
+}
+
+.vtkweb-property-group-header::after {
+    content: "›";
+    margin-left: auto;
+    font-size: 16px;
+    line-height: 1;
+    opacity: 0.55;
+    transform: rotate(0deg);
+    transition: transform 120ms ease;
+}
+
+.vtkweb-property-group[open] > .vtkweb-property-group-header::after {
+    transform: rotate(90deg);
+}
+
+.vtkweb-property-group-header:hover {
+    background: rgba(128,128,128,0.08);
+}
+
+.vtkweb-property-group-icon {
+    opacity: 0.68;
+}
+
+.vtkweb-property-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 5px 6px 6px;
+    border-top: 1px solid rgba(128,128,128,0.18);
+}
+
+.vtkweb-view-property {
+    display: contents;
+}
+
 .vtkweb-representation-cards {
     display: flex;
     flex-direction: column;

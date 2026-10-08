@@ -12,6 +12,9 @@ from vtkweb.ui.representations_tab import (
 from vtkweb.ui.view_tab import (
     build_view_tab,
 )
+from vtkweb.ui.lighting_tab import (
+    build_lighting_tab,
+)
 from vtkweb.ui.transfer_tab import (
     build_transfer_tab,
 )
@@ -93,6 +96,11 @@ def build_inspector_view(
                 ):
                     v3.VIcon("mdi-monitor-edit")
 
+                with v3.VTab(
+                    value="lighting",
+                ):
+                    v3.VIcon("mdi-lightbulb-outline")
+
             v3.VDivider(
                 classes="mb-3",
                 style="flex:0 0 auto;",
@@ -126,3 +134,8 @@ def build_inspector_view(
                     v_if=("inspector_tab === 'view'"),
                 ):
                     build_view_tab(ctrl)
+
+                with html.Div(
+                    v_if=("inspector_tab === 'lighting'"),
+                ):
+                    build_lighting_tab(ctrl)
