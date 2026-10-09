@@ -164,6 +164,7 @@ REPRESENTATION_PROPERTY_SPECS = {
     "environment_scattering_step_factor": {"label": "Environment lighting resolution factor", "kind": "float", "default": 4.0, "min": 1.0, "max": 32.0, "step": 0.5, "kinds": {"dvr"}, "group": "scattering"},
     "vpt_transport": {"label": "VPT transport", "kind": "choice", "default": "delta", "options": (("Stochastic absorption (delta tracking)", "delta"), ("Deterministic absorption diagnostic", "diagnostic")), "kinds": {"vpt"}, "group": "sampling"},
     "vpt_max_depth": {"label": "Max scattering depth", "kind": "int", "default": 1, "min": 1, "max": 4, "step": 1, "kinds": {"vpt"}, "group": "scattering"},
+    "vpt_anisotropy": {"label": "Scattering anisotropy (g)", "kind": "float", "default": 0.0, "min": -0.9, "max": 0.9, "step": 0.05, "kinds": {"vpt"}, "group": "scattering"},
     "scattering_albedo": {"label": "Scattering albedo", "kind": "float", "default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"vpt"}, "group": "scattering"},
     "sample_distance": {"label": "Sample distance", "kind": "float", "default": 1.0, "min": 0.000001, "step": "any", "kinds": {"dvr"}, "group": "sampling"},
     "preintegration": {"label": "Pre-integration", "kind": "choice", "default": "512", "options": (("Off", "0"), ("256", "256"), ("512", "512"), ("1024", "1024"), ("2048", "2048"), ("4096", "4096")), "kinds": {"dvr"}, "group": "sampling"},

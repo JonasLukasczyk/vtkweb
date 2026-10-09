@@ -259,6 +259,7 @@ class MitsubaRepresentationHandle:
     vpt_transport: str = "delta"
     scattering_albedo: float = 0.8
     vpt_max_depth: int = 1
+    vpt_anisotropy: float = 0.0
     opacity_reference_distance: float = 1.0
     shade: bool = False
     ambient: float = 0.1
@@ -1175,6 +1176,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             vpt_transport=str(representation.properties.get("vpt_transport", "delta")),
             scattering_albedo=float(representation.properties.get("scattering_albedo", 0.8)),
             vpt_max_depth=int(representation.properties.get("vpt_max_depth", 1)),
+            vpt_anisotropy=float(representation.properties.get("vpt_anisotropy", 0.0)),
             opacity_reference_distance=_volume_opacity_reference_distance(data),
             shade=bool(representation.properties.get("shade", True)),
             ambient=float(representation.properties.get("ambient", 0.1)),
@@ -2041,7 +2043,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 seed = max(1, int(render_seed) + 1)
                 vpt_key = tuple((id(v.resources.scalar.texture), v.bounds,
                     repr(v.opacity_mapping), v.sample_distance,
-                    v.opacity_reference_distance, v.vpt_transport, v.scattering_albedo, v.vpt_max_depth,
+                    v.opacity_reference_distance, v.vpt_transport, v.scattering_albedo, v.vpt_max_depth, v.vpt_anisotropy,
                     repr(v.color_mapping)) for v in snapshot["vpt_volumes"])
                 if getattr(handle, "vpt_diagnostic_key", None) != vpt_key:
                     use_delta = all(v.vpt_transport == "delta" for v in snapshot["vpt_volumes"])
@@ -3623,7 +3625,8 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
                          max(float(volume.opacity_reference_distance), 1e-12),
                          float(np.clip(volume.scattering_albedo, 0, 1)),
                          color_min, color_width, color_luts,
-                         max(1, min(4, int(volume.vpt_max_depth)))))
+                         max(1, min(4, int(volume.vpt_max_depth))),
+                         float(np.clip(volume.vpt_anisotropy, -0.9, 0.9))))
 
     def next_pcg32(state):
         """Advance a per-lane 32-bit PCG hash state explicitly."""
@@ -3735,6 +3738,30 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
             raise RuntimeError("VPT shadow ratio tracking exceeded 100000 iterations")
         return weight
 
+    def hg_phase(cos_theta, g):
+        """Henyey-Greenstein phase density per steradian."""
+        denom = dr.maximum(1.0 + g*g - 2.0*g*cos_theta, 1e-8)
+        return (1.0 - g*g) / (4.0 * np.pi * denom * dr.sqrt(denom))
+
+    def sample_hg_direction(incoming, u1, u2, g):
+        """Sample HG about the incident propagation direction (not -incoming)."""
+        if abs(g) < 1e-7:
+            cos_theta = 1.0 - 2.0*u1
+        else:
+            ratio = (1.0 - g*g) / (1.0 - g + 2.0*g*u1)
+            cos_theta = dr.clip((1.0 + g*g - ratio*ratio) / (2.0*g), -1.0, 1.0)
+        sin_theta = dr.sqrt(dr.maximum(0.0, 1.0 - cos_theta*cos_theta))
+        phi = 2.0*np.pi*u2
+        # Construct a stable orthonormal frame around incoming.
+        helper = dr.select(dr.abs(incoming.z) < 0.999,
+                           mi.Vector3f(0.0, 0.0, 1.0),
+                           mi.Vector3f(0.0, 1.0, 0.0))
+        tangent = dr.normalize(dr.cross(helper, incoming))
+        bitangent = dr.cross(incoming, tangent)
+        return mi.Vector3f(incoming*cos_theta +
+                           tangent*(sin_theta*dr.cos(phi)) +
+                           bitangent*(sin_theta*dr.sin(phi)))
+
     class VPTDeltaAbsorptionIntegrator(mi.SamplingIntegrator):
         def __init__(self):
             super().__init__(mi.Properties())
@@ -3750,7 +3777,7 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
             if len(compiled) != 1:
                 raise ValueError("VPT multiple scattering currently supports exactly one volume")
             (bounds, texture, minimum, width, lut, lut_size, grid, shape,
-             reference, albedo, color_min, color_width, color_luts, max_depth) = compiled[0]
+             reference, albedo, color_min, color_width, color_luts, max_depth, g) = compiled[0]
             xmin, xmax, ymin, ymax, zmin, zmax = bounds
             env = scene.environment()
             seed_u = sampler.next_1d(active)
@@ -3927,19 +3954,14 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
                     tint = mi.Color3f(*rgb)
                     throughput = dr.select(scatter_mask, throughput * tint, throughput)
                     result += dr.select(shadow_mask,
-                        throughput * emitter_weight * (1.0 / (4.0 * np.pi)) * transmittance,
+                        throughput * emitter_weight * hg_phase(dr.dot(ray.d, ds.d), g) * transmittance,
                         mi.Color3f(0.0))
                 if depth + 1 < max_depth:
-                    # Uniform sphere sampling: p(omega)=1/(4*pi), so the
-                    # phase/pdf factor is one. Albedo was already sampled as
-                    # the Bernoulli scattering-versus-absorption decision.
+                    # Sample the HG phase density around the incoming
+                    # propagation direction. The phase/pdf ratio is 1.
                     rng_state, u1 = next_pcg32(rng_state)
                     rng_state, u2 = next_pcg32(rng_state)
-                    z = 1.0 - 2.0 * u1
-                    radius = dr.sqrt(dr.maximum(0.0, 1.0 - z*z))
-                    phi = 2.0 * np.pi * u2
-                    direction = mi.Vector3f(radius * dr.cos(phi),
-                                             radius * dr.sin(phi), z)
+                    direction = sample_hg_direction(ray.d, u1, u2, g)
                     ray = mi.Ray3f(scatter_pos, direction)
                     path_active = scatter_mask
             return result, valid | hit_any, aovs
