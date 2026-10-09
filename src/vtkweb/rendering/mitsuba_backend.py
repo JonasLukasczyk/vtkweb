@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import math
 import threading
 import time
@@ -24,6 +25,8 @@ from vtkweb.rendering.base import (
 # Experimental 1-byte directional shadow cache: "u8" in shadow_volume.
 # Values are averaged over active lights before quantization, and restored
 # to summed illumination when sampled. Other volume formats are unchanged.
+
+VPT_DEBUG = os.environ.get("VTKWEB_VPT_DEBUG", "0").lower() in ("1", "true", "yes")
 
 DEBUG_SHADOW_STORAGE = True  # Print actual GPU array types and logical storage size after baking.
 
@@ -253,6 +256,9 @@ class MitsubaRepresentationHandle:
     opacity_mapping: dict[str, Any] | None = None
     sample_distance: float = 1.0
     preintegration_size: int = 512
+    vpt_transport: str = "delta"
+    scattering_albedo: float = 0.8
+    vpt_max_depth: int = 1
     opacity_reference_distance: float = 1.0
     shade: bool = False
     ambient: float = 0.1
@@ -1166,6 +1172,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             opacity_mapping=transfer_function["opacity"],
             sample_distance=_volume_sample_distance(data, representation.properties),
             preintegration_size=int(representation.properties.get("preintegration", "512")),
+            vpt_transport=str(representation.properties.get("vpt_transport", "delta")),
+            scattering_albedo=float(representation.properties.get("scattering_albedo", 0.8)),
+            vpt_max_depth=int(representation.properties.get("vpt_max_depth", 1)),
             opacity_reference_distance=_volume_opacity_reference_distance(data),
             shade=bool(representation.properties.get("shade", True)),
             ambient=float(representation.properties.get("ambient", 0.1)),
@@ -2032,17 +2041,32 @@ class MitsubaRenderingBackend(RenderingBackend):
                 seed = max(1, int(render_seed) + 1)
                 vpt_key = tuple((id(v.resources.scalar.texture), v.bounds,
                     repr(v.opacity_mapping), v.sample_distance,
-                    v.opacity_reference_distance) for v in snapshot["vpt_volumes"])
+                    v.opacity_reference_distance, v.vpt_transport, v.scattering_albedo, v.vpt_max_depth,
+                    repr(v.color_mapping)) for v in snapshot["vpt_volumes"])
                 if getattr(handle, "vpt_diagnostic_key", None) != vpt_key:
-                    handle.vpt_diagnostic_integrator = _make_vpt_extinction_integrator(
-                        self.mi, self.dr, snapshot["vpt_volumes"]
+                    use_delta = all(v.vpt_transport == "delta" for v in snapshot["vpt_volumes"])
+                    if VPT_DEBUG:
+                        print(f"[VPT DEBUG] build integrator: transport={'delta' if use_delta else 'deterministic'} volumes={len(snapshot['vpt_volumes'])} spp={spp} seed={seed}", flush=True)
+                        for vi, v in enumerate(snapshot["vpt_volumes"]):
+                            print(f"[VPT DEBUG] volume[{vi}]: bounds={v.bounds} reference_distance={v.opacity_reference_distance} texture={type(v.resources.scalar.texture).__name__}", flush=True)
+                    handle.vpt_diagnostic_integrator = (
+                        _make_vpt_delta_integrator(self.mi, self.dr, snapshot["vpt_volumes"])
+                        if use_delta
+                        else _make_vpt_extinction_integrator(self.mi, self.dr, snapshot["vpt_volumes"])
                     )
                     handle.vpt_diagnostic_key = vpt_key
-                image = self.mi.render(
-                    scene, sensor=scene.sensors()[0], spp=spp, seed=seed,
-                    integrator=handle.vpt_diagnostic_integrator,
-                )
-                return np.asarray(image, dtype=np.float32)[..., :3].copy()
+                try:
+                    image = self.mi.render(
+                        scene, sensor=scene.sensors()[0], spp=spp, seed=seed,
+                        integrator=handle.vpt_diagnostic_integrator,
+                    )
+                    return np.asarray(image, dtype=np.float32)[..., :3].copy()
+                except Exception as exc:
+                    import traceback
+                    if VPT_DEBUG:
+                        print(f"[VPT DEBUG] mi.render failed: {type(exc).__name__}: {exc}", flush=True)
+                        traceback.print_exception(type(exc), exc, exc.__traceback__)
+                    raise
 
             # Auxiliary texture presence is a Python-time specialization: each
             # volume gets a DirectVolume type matching exactly the resources it
@@ -3431,6 +3455,10 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
 
     No scattering or emission. Optical depth uses DVR reference-distance units.
     """
+    if len(volumes) != 1 and any(v.scattering_albedo > 0 for v in volumes):
+        raise NotImplementedError(
+            "VPT single scattering currently supports exactly one volume; "
+            "cross-volume shadow transmittance is not yet implemented")
     compiled = []
     for volume in volumes:
         mapping = volume.opacity_mapping
@@ -3463,6 +3491,7 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
             result = background
             total_tau = mi.Float(0)
             hit_any = mi.Bool(False)
+            scattered_light = mi.Color3f(0.0)
             for bounds, texture, minimum, width, preintegration, table_size, reference, step in compiled:
                 xmin, xmax, ymin, ymax, zmin, zmax = bounds
                 if not (xmin < xmax and ymin < ymax and zmin < zmax):
@@ -3526,3 +3555,392 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
             return result, valid | hit_any, aovs
 
     return VPTExtinctionIntegrator()
+
+
+def _vpt_brick_majorants(volume, brick_size=8):
+    """Conservative extinction bounds for trilinearly interpolated scalar data.
+
+    The one-voxel halo covers texture interpolation at brick boundaries.
+    A piecewise-linear opacity TF reaches its maximum on a scalar interval
+    at an interval endpoint or an interior control point.
+    """
+    values = np.asarray(volume.scalar_values)
+    if values.ndim != 3:
+        raise ValueError("VPT requires a 3D scalar array")
+    nz, ny, nx = values.shape
+    bx, by, bz = [(n + brick_size - 1) // brick_size for n in (nx, ny, nz)]
+    points = np.asarray(volume.opacity_mapping["control_points"], dtype=np.float64)
+    reference = max(float(volume.opacity_reference_distance), 1e-12)
+    lo, hi = map(float, volume.opacity_mapping["range"])
+    width = max(hi - lo, 1e-20)
+    result = np.zeros((bz, by, bx), dtype=np.float32)
+    for z in range(bz):
+        for y in range(by):
+            for x in range(bx):
+                # Texture coordinates map across the whole image extent. Include
+                # a halo so no trilinear footprint crosses outside this range.
+                patch = values[max(0,z*brick_size-1):min(nz,(z+1)*brick_size+2),
+                               max(0,y*brick_size-1):min(ny,(y+1)*brick_size+2),
+                               max(0,x*brick_size-1):min(nx,(x+1)*brick_size+2)]
+                vmin = np.clip((float(np.min(patch))-lo)/width, 0, 1)
+                vmax = np.clip((float(np.max(patch))-lo)/width, 0, 1)
+                candidates = [vmin, vmax]
+                candidates.extend(float(q) for q in points[:,0] if vmin <= q <= vmax)
+                alpha = max(float(np.interp(q, points[:,0], points[:,1])) for q in candidates)
+                sigma = -np.log1p(-min(max(alpha, 0.0), 1-1e-6)) / reference
+                result[z,y,x] = np.float32(sigma * (1 + 1e-5) + 1e-7) if sigma > 0 else np.float32(0)
+    return np.ascontiguousarray(result), (bx, by, bz)
+
+
+def _make_vpt_delta_integrator(mi, dr, volumes):
+    """Spatial-majorant delta tracking with optional HDRI single scattering."""
+    compiled = []
+    for volume in volumes:
+        mapping = volume.opacity_mapping
+        points = np.asarray(mapping["control_points"], dtype=np.float32)
+        x = np.linspace(0.0, 1.0, 1024, dtype=np.float32)
+        lut = np.interp(x, points[:,0], np.clip(points[:,1], 0, 1-1e-6))
+        # TF color tints scattered radiance, not scalar extinction. The color
+        # mapping may have a different scalar range from the opacity mapping.
+        color_mapping = volume.color_mapping
+        color_points = np.asarray(color_mapping["control_points"], dtype=np.float32)
+        color_x = np.linspace(0.0, 1.0, 1024, dtype=np.float32)
+        color_luts = tuple(
+            mi.Float(np.ascontiguousarray(np.interp(
+                color_x, color_points[:, 0], color_points[:, channel])))
+            for channel in (1, 2, 3)
+        )
+        color_min = float(color_mapping["range"][0])
+        color_width = max(float(color_mapping["range"][1]) - color_min, 1e-20)
+        grid, shape = _vpt_brick_majorants(volume)
+        if VPT_DEBUG:
+            print(f"[VPT DEBUG] majorant grid: shape={shape} min={float(np.min(grid)):.6g} max={float(np.max(grid)):.6g} nonzero={int(np.count_nonzero(grid))}/{grid.size}", flush=True)
+        compiled.append((volume.bounds, volume.resources.scalar.texture,
+                         float(mapping["range"][0]),
+                         max(float(mapping["range"][1])-float(mapping["range"][0]), 1e-20),
+                         mi.Float(np.ascontiguousarray(lut)), len(lut),
+                         mi.Float(grid.ravel()), shape,
+                         max(float(volume.opacity_reference_distance), 1e-12),
+                         float(np.clip(volume.scattering_albedo, 0, 1)),
+                         color_min, color_width, color_luts,
+                         max(1, min(4, int(volume.vpt_max_depth)))))
+
+    def next_pcg32(state):
+        """Advance a per-lane 32-bit PCG hash state explicitly."""
+        state = state * mi.UInt32(747796405) + mi.UInt32(2891336453)
+        shift = (state >> 28) + mi.UInt32(4)
+        word = ((state >> shift) ^ state) * mi.UInt32(277803737)
+        word = (word >> 22) ^ word
+        # Convert the high 24 bits to a representable uniform float in [0, 1).
+        u = mi.Float(word >> 8) * (1.0 / 16777216.0)
+        return state, u
+
+    def shadow_ratio_tracking(ray, active, rng_state, bounds, texture,
+                              minimum, width, lut, lut_size, grid, shape, reference):
+        """Unbiased null-collision transmittance estimate, using brick DDA.
+
+        This shares the spatial-majorant representation with camera tracking.
+        Each null collision multiplies throughput by (1 - sigma / majorant).
+        """
+        xmin, xmax, ymin, ymax, zmin, zmax = bounds
+        nx, ny, nz = shape
+        near = mi.Float(-float("inf"))
+        far = mi.Float(float("inf"))
+        for origin, direction, low, high in (
+            (ray.o.x, ray.d.x, xmin, xmax),
+            (ray.o.y, ray.d.y, ymin, ymax),
+            (ray.o.z, ray.d.z, zmin, zmax),
+        ):
+            parallel = dr.abs(direction) < 1e-12
+            safe = dr.select(parallel, mi.Float(1), direction)
+            ta, tb = (low - origin) / safe, (high - origin) / safe
+            inside = (origin >= low) & (origin <= high)
+            near = dr.maximum(near, dr.select(parallel, -float("inf"), dr.minimum(ta, tb)))
+            far = dr.minimum(far, dr.select(parallel,
+                dr.select(inside, float("inf"), -float("inf")), dr.maximum(ta, tb)))
+        start = dr.maximum(near, mi.Float(0))
+        end = far
+        running = active & (end > start)
+        p0 = ray.o + ray.d * start
+
+        def initial_index(coord, direction, low, high, count):
+            coord = (coord - low) * (count / (high - low))
+            index = dr.select(direction < 0, dr.ceil(coord) - 1, dr.floor(coord))
+            return mi.Int32(dr.clip(index, 0, count - 1))
+
+        ix = initial_index(p0.x, ray.d.x, xmin, xmax, nx)
+        iy = initial_index(p0.y, ray.d.y, ymin, ymax, ny)
+        iz = initial_index(p0.z, ray.d.z, zmin, zmax, nz)
+        t = start
+        weight = mi.Float(1.0)
+        iterations = mi.UInt32(0)
+        limit = 100000
+
+        def cond(t, ix, iy, iz, running, rng_state, weight, iterations):
+            return running & (iterations < limit)
+
+        def body(t, ix, iy, iz, running, rng_state, weight, iterations):
+            index = mi.UInt32(ix + nx * (iy + ny * iz))
+            sigma_max = dr.gather(mi.Float, grid, index, running)
+
+            def plane_time(index, direction, origin, low, high, count):
+                positive, negative = direction > 0, direction < 0
+                plane = low + dr.select(positive, mi.Float(index + 1),
+                                        mi.Float(index)) * ((high - low) / count)
+                safe = dr.select(positive | negative, direction, 1.0)
+                return dr.select(positive | negative,
+                                 (plane - origin) / safe, float("inf"))
+
+            tx = plane_time(ix, ray.d.x, ray.o.x, xmin, xmax, nx)
+            ty = plane_time(iy, ray.d.y, ray.o.y, ymin, ymax, ny)
+            tz = plane_time(iz, ray.d.z, ray.o.z, zmin, zmax, nz)
+            next_plane = dr.minimum(tx, dr.minimum(ty, tz))
+            boundary = dr.minimum(end, next_plane)
+            rng_next, u = next_pcg32(rng_state)
+            rng_state = dr.select(running, rng_next, rng_state)
+            flight = -dr.log(1 - dr.clip(u, 1e-7, 1 - 1e-7)) / dr.maximum(sigma_max, 1e-12)
+            candidate_t = t + flight
+            candidate = running & (sigma_max > 0) & (candidate_t > t) & (candidate_t < boundary)
+            pos = ray.o + ray.d * candidate_t
+            uvw = mi.Point3f((pos.x - xmin) / (xmax - xmin),
+                             (pos.y - ymin) / (ymax - ymin),
+                             (pos.z - zmin) / (zmax - zmin))
+            scalar = texture.eval(uvw, candidate)[0]
+            scaled = dr.clip((scalar - minimum) / width, 0, 1) * (lut_size - 1)
+            i0 = mi.UInt32(dr.floor(scaled))
+            i1 = dr.minimum(i0 + 1, mi.UInt32(lut_size - 1))
+            opacity = dr.lerp(dr.gather(mi.Float, lut, i0, candidate),
+                              dr.gather(mi.Float, lut, i1, candidate),
+                              scaled - mi.Float(i0))
+            sigma = -dr.log(dr.maximum(1 - opacity, 1e-6)) / reference
+            weight *= dr.select(candidate,
+                1 - dr.clip(sigma / dr.maximum(sigma_max, 1e-12), 0, 1), 1)
+            crossing = running & ~candidate & (next_plane <= end)
+            ix += dr.select(crossing & (tx <= next_plane),
+                            dr.select(ray.d.x > 0, 1, -1), 0)
+            iy += dr.select(crossing & (ty <= next_plane),
+                            dr.select(ray.d.y > 0, 1, -1), 0)
+            iz += dr.select(crossing & (tz <= next_plane),
+                            dr.select(ray.d.z > 0, 1, -1), 0)
+            t = dr.maximum(dr.select(candidate, candidate_t, boundary), start)
+            in_grid = ((ix >= 0) & (ix < nx) & (iy >= 0) &
+                       (iy < ny) & (iz >= 0) & (iz < nz))
+            running = running & (t < end) & in_grid & (weight > 0)
+            return t, ix, iy, iz, running, rng_state, weight, iterations + 1
+
+        t, ix, iy, iz, running, rng_state, weight, iterations = dr.while_loop(
+            state=(t, ix, iy, iz, running, rng_state, weight, iterations),
+            cond=cond, body=body, label="vpt_shadow_ratio_tracking")
+        if dr.any(running):
+            raise RuntimeError("VPT shadow ratio tracking exceeded 100000 iterations")
+        return weight
+
+    class VPTDeltaAbsorptionIntegrator(mi.SamplingIntegrator):
+        def __init__(self):
+            super().__init__(mi.Properties())
+            self.surface = mi.load_dict({"type":"path", "max_depth":4,
+                                         "hide_emitters":False})
+
+        def sample(self, scene, sampler, ray, medium=None, active=True):
+            ray = mi.Ray3f(ray)
+            active = mi.Bool(active)
+            background, valid, aovs = self.surface.sample(scene, sampler, ray, medium, active)
+            si = scene.ray_intersect(ray, active=active)
+            primary_surface_t = dr.select(si.is_valid(), si.t, mi.Float(float("inf")))
+            if len(compiled) != 1:
+                raise ValueError("VPT multiple scattering currently supports exactly one volume")
+            (bounds, texture, minimum, width, lut, lut_size, grid, shape,
+             reference, albedo, color_min, color_width, color_luts, max_depth) = compiled[0]
+            xmin, xmax, ymin, ymax, zmin, zmax = bounds
+            env = scene.environment()
+            seed_u = sampler.next_1d(active)
+            rng_state = (mi.UInt32(seed_u * 16777216.0) ^
+                         (mi.UInt32(dr.arange(mi.UInt32, dr.width(ray.o.x))) * mi.UInt32(2246822519)) ^
+                         mi.UInt32(0x9e3779b9))
+            throughput = mi.Color3f(1.0)
+            result = mi.Color3f(0.0)
+            path_active = active
+            hit_any = mi.Bool(False)
+            for depth in range(max_depth):
+                # Recompute the entry/exit interval for the current path ray.
+                near = mi.Float(-float("inf"))
+                far = mi.Float(float("inf"))
+                for origin, direction, low, high in (
+                    (ray.o.x, ray.d.x, xmin, xmax),
+                    (ray.o.y, ray.d.y, ymin, ymax),
+                    (ray.o.z, ray.d.z, zmin, zmax),
+                ):
+                    parallel = dr.abs(direction) < 1e-12
+                    safe = dr.select(parallel, mi.Float(1), direction)
+                    ta, tb = (low-origin)/safe, (high-origin)/safe
+                    inside = (origin >= low) & (origin <= high)
+                    near = dr.maximum(near, dr.select(parallel, -float("inf"), dr.minimum(ta,tb)))
+                    far = dr.minimum(far, dr.select(parallel,
+                        dr.select(inside, float("inf"), -float("inf")), dr.maximum(ta,tb)))
+                start = dr.maximum(near, mi.Float(0))
+                # Only the camera ray uses the surface/background computed by
+                # Mitsuba. Secondary paths terminate at the first surface.
+                if depth == 0:
+                    end = dr.minimum(far, primary_surface_t)
+                else:
+                    secondary_si = scene.ray_intersect(ray, active=path_active)
+                    secondary_t = dr.select(secondary_si.is_valid(), secondary_si.t,
+                                            mi.Float(float("inf")))
+                    end = dr.minimum(far, secondary_t)
+                running = path_active & (end > start)
+                if depth == 0:
+                    hit_any |= running
+                # Rays with no real event retain the background only at depth 0.
+                scatter_pos = mi.Point3f(0.0)
+                scatter_scalar = mi.Float(0.0)
+                scatter_mask = mi.Bool(False)
+                real_event = mi.Bool(False)
+                # Integer-cell DDA: indices are advanced at exact grid planes.
+                # No world-space epsilon is used to select the next brick.
+                nx, ny, nz = shape
+                p0 = ray.o + ray.d * start
+                def initial_index(coord, direction, low, high, count):
+                    grid_coord = (coord - low) * (count / (high - low))
+                    # At an exact boundary a negative ray enters the lower cell.
+                    index = dr.select(direction < 0, dr.ceil(grid_coord) - 1,
+                                      dr.floor(grid_coord))
+                    return mi.Int32(dr.clip(index, 0, count - 1))
+                ix = initial_index(p0.x, ray.d.x, xmin, xmax, nx)
+                iy = initial_index(p0.y, ray.d.y, ymin, ymax, ny)
+                iz = initial_index(p0.z, ray.d.z, zmin, zmax, nz)
+                t = start
+                # Seed once from Mitsuba's per-pixel sampler and decorrelate
+                # across lanes. All subsequent draws have explicit loop state.
+                scatter_pos = mi.Point3f(0.0)
+                scatter_scalar = mi.Float(0.0)
+                scatter_mask = mi.Bool(False)
+                iterations = mi.UInt32(0)
+                limit = 100000  # Fail loudly instead of returning a biased frame.
+
+                def cond(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event):
+                    return running & (iterations < limit)
+
+                def body(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event):
+                    index = mi.UInt32(ix + nx * (iy + ny * iz))
+                    sigma_max = dr.gather(mi.Float, grid, index, running)
+
+                    def plane_time(index, direction, origin, low, high, count):
+                        positive = direction > 0
+                        negative = direction < 0
+                        plane = low + dr.select(positive, mi.Float(index + 1),
+                                                mi.Float(index)) * ((high - low) / count)
+                        safe_direction = dr.select(positive | negative, direction, 1.0)
+                        return dr.select(positive | negative,
+                                         (plane - origin) / safe_direction,
+                                         float("inf"))
+
+                    tx = plane_time(ix, ray.d.x, ray.o.x, xmin, xmax, nx)
+                    ty = plane_time(iy, ray.d.y, ray.o.y, ymin, ymax, ny)
+                    tz = plane_time(iz, ray.d.z, ray.o.z, zmin, zmax, nz)
+                    next_plane = dr.minimum(tx, dr.minimum(ty, tz))
+                    boundary = dr.minimum(end, next_plane)
+                    next_state, random_u = next_pcg32(rng_state)
+                    rng_state = dr.select(running, next_state, rng_state)
+                    u = dr.clip(random_u, 1e-7, 1 - 1e-7)
+                    flight = -dr.log(1 - u) / dr.maximum(sigma_max, 1e-12)
+                    candidate_t = t + flight
+                    # A float32 free-flight increment can round back to t.
+                    # Treat such an event as a boundary crossing, not a null collision.
+                    progressed = candidate_t > t
+                    candidate = running & (sigma_max > 0) & progressed & (candidate_t < boundary)
+                    sample_pos = ray.o + ray.d * candidate_t
+                    uvw = mi.Point3f((sample_pos.x-xmin)/(xmax-xmin),
+                                     (sample_pos.y-ymin)/(ymax-ymin),
+                                     (sample_pos.z-zmin)/(zmax-zmin))
+                    scalar = texture.eval(uvw, candidate)[0]
+                    scaled = dr.clip((scalar-minimum)/width, 0, 1) * (lut_size-1)
+                    i0 = mi.UInt32(dr.floor(scaled))
+                    i1 = dr.minimum(i0+1, mi.UInt32(lut_size-1))
+                    opacity = dr.lerp(dr.gather(mi.Float,lut,i0,candidate),
+                                      dr.gather(mi.Float,lut,i1,candidate),
+                                      scaled-mi.Float(i0))
+                    sigma = -dr.log(dr.maximum(1-opacity,1e-6))/reference
+                    next_state, accept_u = next_pcg32(rng_state)
+                    rng_state = dr.select(candidate, next_state, rng_state)
+                    accept = candidate & (accept_u <
+                                          dr.clip(sigma/dr.maximum(sigma_max,1e-12),0,1))
+                    # A real event is either absorption or scattering. Null
+                    # collisions do not consume path depth.
+                    next_state, scatter_u = next_pcg32(rng_state)
+                    rng_state = dr.select(accept, next_state, rng_state)
+                    real_event |= accept
+                    scattered = accept & (scatter_u < albedo)
+                    scatter_pos = dr.select(scattered, sample_pos, scatter_pos)
+                    scatter_scalar = dr.select(scattered, scalar, scatter_scalar)
+                    scatter_mask |= scattered
+                    crossing = running & ~candidate & (next_plane <= end)
+                    # Update every tied axis, including edges and corners.
+                    ix += dr.select(crossing & (tx <= next_plane),
+                                    dr.select(ray.d.x > 0, 1, -1), 0)
+                    iy += dr.select(crossing & (ty <= next_plane),
+                                    dr.select(ray.d.y > 0, 1, -1), 0)
+                    iz += dr.select(crossing & (tz <= next_plane),
+                                    dr.select(ray.d.z > 0, 1, -1), 0)
+                    t = dr.select(candidate, candidate_t, boundary)
+                    # If a computed plane is behind t because of rounding,
+                    # the integer DDA still advances the corresponding cell.
+                    t = dr.maximum(t, start)
+                    in_grid = ((ix >= 0) & (ix < nx) & (iy >= 0) &
+                               (iy < ny) & (iz >= 0) & (iz < nz))
+                    running = running & ~accept & (t < end) & in_grid
+                    return (t, ix, iy, iz, running, rng_state, iterations + 1, scatter_pos, scatter_scalar, scatter_mask, real_event)
+
+                (t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event) = dr.while_loop(
+                    state=(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event),
+                    cond=cond, body=body, label="vpt_spatial_delta_dda")
+                if dr.any(running):
+                    raise RuntimeError(
+                        "VPT spatial delta tracking exceeded 100000 iterations; "
+                        "enable VTKWEB_VPT_DEBUG=1 for majorant-grid diagnostics")
+                # A ray with no real collision reaches the surface/HDRI.
+                # For the primary ray, this reproduces absorption-only VPT.
+                if depth == 0:
+                    result += dr.select(path_active & ~real_event, background, mi.Color3f(0.0))
+                    # Absorbed rays must not contribute the background.
+                    # The tracking loop records all real collisions below.
+                if albedo > 0 and env is not None:
+                    rng_state, u1 = next_pcg32(rng_state)
+                    rng_state, u2 = next_pcg32(rng_state)
+                    ref = mi.Interaction3f()
+                    ref.p = scatter_pos
+                    ds, emitter_weight = env.sample_direction(
+                        ref, mi.Point2f(u1, u2), scatter_mask)
+                    shadow_ray = mi.Ray3f(scatter_pos, ds.d)
+                    shadow_visible = ~scene.ray_test(shadow_ray, active=scatter_mask)
+                    shadow_mask = scatter_mask & shadow_visible
+                    transmittance = shadow_ratio_tracking(
+                        shadow_ray, shadow_mask, rng_state, bounds, texture,
+                        minimum, width, lut, lut_size, grid, shape, reference)
+                    color_scaled = dr.clip(
+                        (scatter_scalar - color_min) / color_width, 0, 1) * 1023
+                    ci0 = mi.UInt32(dr.floor(color_scaled))
+                    ci1 = dr.minimum(ci0 + 1, mi.UInt32(1023))
+                    cf = color_scaled - mi.Float(ci0)
+                    rgb = [dr.lerp(dr.gather(mi.Float, channel, ci0, scatter_mask),
+                                   dr.gather(mi.Float, channel, ci1, scatter_mask), cf)
+                           for channel in color_luts]
+                    tint = mi.Color3f(*rgb)
+                    throughput = dr.select(scatter_mask, throughput * tint, throughput)
+                    result += dr.select(shadow_mask,
+                        throughput * emitter_weight * (1.0 / (4.0 * np.pi)) * transmittance,
+                        mi.Color3f(0.0))
+                if depth + 1 < max_depth:
+                    # Uniform sphere sampling: p(omega)=1/(4*pi), so the
+                    # phase/pdf factor is one. Albedo was already sampled as
+                    # the Bernoulli scattering-versus-absorption decision.
+                    rng_state, u1 = next_pcg32(rng_state)
+                    rng_state, u2 = next_pcg32(rng_state)
+                    z = 1.0 - 2.0 * u1
+                    radius = dr.sqrt(dr.maximum(0.0, 1.0 - z*z))
+                    phi = 2.0 * np.pi * u2
+                    direction = mi.Vector3f(radius * dr.cos(phi),
+                                             radius * dr.sin(phi), z)
+                    ray = mi.Ray3f(scatter_pos, direction)
+                    path_active = scatter_mask
+            return result, valid | hit_any, aovs
+    return VPTDeltaAbsorptionIntegrator()
