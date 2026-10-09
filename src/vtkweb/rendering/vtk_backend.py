@@ -297,7 +297,7 @@ class VTKRenderingBackend(RenderingBackend):
     ) -> VTKRepresentationHandle:
         source_data = source.GetOutputDataObject(representation.output_port)
 
-        if representation.kind == "volume":
+        if representation.kind == "dvr":
             mapper = vtk.vtkSmartVolumeMapper()
             if source_data is not None:
                 mapper.SetInputDataObject(source_data)
@@ -312,7 +312,7 @@ class VTKRenderingBackend(RenderingBackend):
             return VTKRepresentationHandle(
                 mapper=mapper,
                 actor=actor,
-                kind="volume",
+                kind="dvr",
                 color_function=color_function,
                 opacity_function=opacity_function,
             )
@@ -381,7 +381,7 @@ class VTKRenderingBackend(RenderingBackend):
         handle.coloring_data = None if coloring_data is source_data else coloring_data
         mapper.SetInputDataObject(coloring_data)
 
-        if handle.kind == "volume":
+        if handle.kind == "dvr":
             volume_property = actor.GetProperty()
             if properties.get("interpolation", "linear") == "nearest":
                 volume_property.SetInterpolationTypeToNearest()

@@ -21,7 +21,8 @@ REPRESENTATION_KINDS = (
     "surface",
     "wireframe",
     "outline",
-    "volume",
+    "dvr",
+    "vpt",
 )
 
 DIRECTIONAL_LIGHTS = (
@@ -42,6 +43,7 @@ VIEW_PROPERTY_GROUPS = {
 }
 
 VIEW_PROPERTY_SPECS = {
+    "hdri": {"name": "hdri", "label": "HDRI", "kind": "str", "default": "", "group": "environment"},
     "background_color": {
         "name": "background_color",
         "label": "Background",
@@ -145,26 +147,26 @@ REPRESENTATION_PROPERTY_GROUPS = {
 }
 
 REPRESENTATION_PROPERTY_SPECS = {
-    "color_by": {"label": "Color by", "kind": "array", "default": None, "kinds": {"surface", "wireframe", "volume"}, "group": "appearance"},
-    "color": {"label": "Color", "kind": "color", "default": "#ffffff", "kinds": {"surface", "wireframe", "volume"}, "group": "appearance"},
+    "color_by": {"label": "Color by", "kind": "array", "default": None, "kinds": {"surface", "wireframe", "dvr", "vpt"}, "group": "appearance"},
+    "color": {"label": "Color", "kind": "color", "default": "#ffffff", "kinds": {"surface", "wireframe", "dvr", "vpt"}, "group": "appearance"},
     "line_width": {"label": "Line width", "kind": "float", "default": 0.01, "min": 0.0, "step": 0.001, "kinds": {"wireframe", "outline"}, "group": "appearance"},
     "tube_sides": {"label": "Tube sides", "kind": "int", "default": 3, "min": 3, "step": 1, "kinds": {"wireframe", "outline"}, "group": "appearance"},
-    "interpolation": {"label": "Interpolation", "kind": "choice", "default": "linear", "options": (("Trilinear", "linear"), ("Nearest", "nearest")), "kinds": {"volume"}, "group": "sampling"},
-    "blend_mode": {"label": "Blend", "kind": "choice", "default": "composite", "options": (("Composite", "composite"), ("Maximum intensity", "maximum"), ("Minimum intensity", "minimum")), "kinds": {"volume"}, "group": "appearance"},
-    "shade": {"label": "Shading", "kind": "bool", "default": True, "kinds": {"volume"}, "group": "lighting"},
-    "ambient": {"label": "Ambient", "kind": "float", "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"volume"}, "group": "lighting"},
-    "diffuse": {"label": "Diffuse", "kind": "float", "default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"volume"}, "group": "lighting"},
-    "global_illumination_reach": {"label": "Global illumination reach", "kind": "float", "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"volume"}, "group": "sampling"},
-    "volumetric_scattering_blending": {"label": "Scattering strength", "kind": "float", "default": 2.0, "min": 0.0, "max": 2.0, "step": 0.05, "kinds": {"volume"}, "group": "scattering"},
-    "scattering_anisotropy": {"label": "Scattering anisotropy", "kind": "float", "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05, "kinds": {"volume"}, "group": "scattering"},
-    "environment_scattering_strength": {"label": "Environment scatter strength", "kind": "float", "default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05, "kinds": {"volume"}, "group": "scattering"},
-    "environment_scattering_samples": {"label": "Environment bake directions", "kind": "int", "default": 0, "min": 0, "max": 256, "step": 1, "kinds": {"volume"}, "group": "scattering"},
-    "environment_scattering_step_factor": {"label": "Environment lighting resolution factor", "kind": "float", "default": 4.0, "min": 1.0, "max": 32.0, "step": 0.5, "kinds": {"volume"}, "group": "scattering"},
-    "sample_distance": {"label": "Sample distance", "kind": "float", "default": 1.0, "min": 0.000001, "step": "any", "kinds": {"volume"}, "group": "sampling"},
-    "preintegration": {"label": "Pre-integration", "kind": "choice", "default": "512", "options": (("Off", "0"), ("256", "256"), ("512", "512"), ("1024", "1024"), ("2048", "2048"), ("4096", "4096")), "kinds": {"volume"}, "group": "sampling"},
-    "scalar_volume": {"label": "Scalar volume", "kind": "choice", "default": "f32", "options": (("FP32", "f32"), ("FP16", "f16")), "kinds": {"volume"}, "group": "volume_resources"},
-    "shadow_volume": {"label": "Shadow volume", "kind": "choice", "default": "f32", "options": (("Off", "off"), ("FP32", "f32"), ("FP16", "f16"), ("U8", "u8")), "kinds": {"volume"}, "group": "volume_resources"},
-    "environment_volume": {"label": "Environment volume", "kind": "choice", "default": "off", "options": (("Off", "off"), ("FP32", "f32"), ("FP16", "f16")), "kinds": {"volume"}, "group": "volume_resources"},
+    "interpolation": {"label": "Interpolation", "kind": "choice", "default": "linear", "options": (("Trilinear", "linear"), ("Nearest", "nearest")), "kinds": {"dvr", "vpt"}, "group": "sampling"},
+    "blend_mode": {"label": "Blend", "kind": "choice", "default": "composite", "options": (("Composite", "composite"), ("Maximum intensity", "maximum"), ("Minimum intensity", "minimum")), "kinds": {"dvr"}, "group": "appearance"},
+    "shade": {"label": "Shading", "kind": "bool", "default": True, "kinds": {"dvr"}, "group": "lighting"},
+    "ambient": {"label": "Ambient", "kind": "float", "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"dvr"}, "group": "lighting"},
+    "diffuse": {"label": "Diffuse", "kind": "float", "default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"dvr"}, "group": "lighting"},
+    "global_illumination_reach": {"label": "Global illumination reach", "kind": "float", "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "kinds": {"dvr"}, "group": "sampling"},
+    "volumetric_scattering_blending": {"label": "Scattering strength", "kind": "float", "default": 2.0, "min": 0.0, "max": 2.0, "step": 0.05, "kinds": {"dvr"}, "group": "scattering"},
+    "scattering_anisotropy": {"label": "Scattering anisotropy", "kind": "float", "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05, "kinds": {"dvr"}, "group": "scattering"},
+    "environment_scattering_strength": {"label": "Environment scatter strength", "kind": "float", "default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05, "kinds": {"dvr"}, "group": "scattering"},
+    "environment_scattering_samples": {"label": "Environment bake directions", "kind": "int", "default": 0, "min": 0, "max": 256, "step": 1, "kinds": {"dvr"}, "group": "scattering"},
+    "environment_scattering_step_factor": {"label": "Environment lighting resolution factor", "kind": "float", "default": 4.0, "min": 1.0, "max": 32.0, "step": 0.5, "kinds": {"dvr"}, "group": "scattering"},
+    "sample_distance": {"label": "Sample distance", "kind": "float", "default": 1.0, "min": 0.000001, "step": "any", "kinds": {"dvr"}, "group": "sampling"},
+    "preintegration": {"label": "Pre-integration", "kind": "choice", "default": "512", "options": (("Off", "0"), ("256", "256"), ("512", "512"), ("1024", "1024"), ("2048", "2048"), ("4096", "4096")), "kinds": {"dvr"}, "group": "sampling"},
+    "scalar_volume": {"label": "Scalar volume", "kind": "choice", "default": "f32", "options": (("FP32", "f32"), ("FP16", "f16")), "kinds": {"dvr"}, "group": "volume_resources"},
+    "shadow_volume": {"label": "Shadow volume", "kind": "choice", "default": "f32", "options": (("Off", "off"), ("FP32", "f32"), ("FP16", "f16"), ("U8", "u8")), "kinds": {"dvr"}, "group": "volume_resources"},
+    "environment_volume": {"label": "Environment volume", "kind": "choice", "default": "off", "options": (("Off", "off"), ("FP32", "f32"), ("FP16", "f16")), "kinds": {"dvr"}, "group": "volume_resources"},
 }
 
 DEFAULT_REPRESENTATION_PROPERTIES = {

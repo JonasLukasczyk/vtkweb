@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
 from trame.app import get_server
 
@@ -71,7 +73,25 @@ async def _run_worker() -> None:
     await distributed.worker_loop()
 
 
+def _startup_state_path(argv: list[str]) -> Path | None:
+    """Consume a final .py state argument without altering Trame flags."""
+    if len(argv) < 2 or not argv[-1].lower().endswith(".py"):
+        return None
+    candidate = Path(argv[-1]).expanduser().resolve()
+    if not candidate.is_file():
+        raise FileNotFoundError(f"vtkweb startup state file not found: {candidate}")
+    argv.pop()
+    return candidate
+
+
 if __name__ == "__main__":
+    state_path = _startup_state_path(sys.argv)
+    if state_path is not None:
+        # The UI/controller has already been registered above. State files
+        # execute trusted Python and must never be loaded from untrusted input.
+        server.controller.open_python_state_file(str(state_path))
+        if distributed.is_root:
+            print(f"Loaded vtkweb state: {state_path}", flush=True)
     if distributed.is_root:
         server.start()
     else:

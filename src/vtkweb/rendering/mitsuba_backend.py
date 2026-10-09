@@ -197,34 +197,12 @@ def _build_gpu_preintegration_tables(
     return tau, centroid
 
 
-def _voxelized_debug_torus(shape, bounds):
-    """TEMPORARY DEBUG PATCH: replace uploaded CT scalars with a sampled torus.
-
-    Delete the call in _create_volume_handle to restore the original CT upload.
-    Samples at the original VTK point-grid positions (z, y, x storage).
-    """
-    nz, ny, nx = shape
-    xmin, xmax, ymin, ymax, zmin, zmax = bounds
-    z, y, x = np.ogrid[-1.0:1.0:complex(nz), -1.0:1.0:complex(ny), -1.0:1.0:complex(nx)]
-    cxr, sxr = 0.9396926207859084, 0.3420201433256687
-    cyr, syr = 0.9743700647852352, 0.2249510543438650
-    y1 = cxr * y - sxr * z
-    z1 = sxr * y + cxr * z
-    x1 = cyr * x + syr * z1
-    z2 = -syr * x + cyr * z1
-    radial = np.sqrt(x1 * x1 + y1 * y1) - 0.55
-    tube = np.sqrt(radial * radial + z2 * z2)
-    bump = 0.065 * np.sin(45.0 * x1) * np.sin(45.0 * y1) * np.sin(45.0 * z2)
-    return np.ascontiguousarray(np.clip((tube - 0.20 + bump) / 0.20, -1.0, 1.0), dtype=np.float32)
-
-
-
-
 @dataclass
 class MitsubaViewHandle:
     background_color: tuple[float, float, float] = (0.1, 0.1, 0.1)
     world_ambient_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     world_ambient_intensity: float = 1.0
+    hdri: str = ""
     directional_lights: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
     width: int = 0
     height: int = 0
@@ -588,6 +566,8 @@ class MitsubaRenderingBackend(RenderingBackend):
             handle = self._views[view_id]
             if name in {"background_color", "world_ambient_color"}:
                 return _rgb_to_hex(getattr(handle, name))
+            if name == "hdri":
+                return handle.hdri
             if name == "world_ambient_intensity":
                 return float(handle.world_ambient_intensity)
             if name in DIRECTIONAL_LIGHT_PROPERTY_NAMES:
@@ -615,6 +595,10 @@ class MitsubaRenderingBackend(RenderingBackend):
                 if isinstance(value, str):
                     value = _hex_to_rgb(value)
                 setattr(handle, name, tuple(float(v) for v in value))
+                handle.render_revision += 1
+                return
+            if name == "hdri":
+                handle.hdri = str(value or "").strip()
                 handle.render_revision += 1
                 return
             if name == "world_ambient_intensity":
@@ -727,7 +711,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 and handle.height > 0
                 and any(
                     current_view_id == view_id
-                    and (rep.scene_object is not None or rep.resources.scalar.texture is not None)
+                    and (rep.kind == "vpt" or rep.scene_object is not None or rep.resources.scalar.texture is not None)
                     for (_, current_view_id), rep in self._representations.items()
                 )
             )
@@ -760,6 +744,7 @@ class MitsubaRenderingBackend(RenderingBackend):
                 "width": int(handle.width),
                 "height": int(handle.height),
                 "background_color": tuple(handle.background_color),
+                "hdri": handle.hdri,
                 "world_ambient_color": tuple(handle.world_ambient_color),
                 "world_ambient_intensity": float(handle.world_ambient_intensity),
                 "directional_lights": tuple(float(v) for v in handle.directional_lights),
@@ -772,17 +757,34 @@ class MitsubaRenderingBackend(RenderingBackend):
                         current_view_id,
                     ), rep in self._representations.items()
                     if current_view_id == view_id and rep.scene_object is not None
-                    and rep.kind != "volume"
+                    and rep.kind not in {"dvr", "vpt"}
                 ),
                 "volumes": tuple(
                     rep
                     for (_representation_id, current_view_id), rep
                     in self._representations.items()
                     if current_view_id == view_id
-                    and rep.kind == "volume"
+                    and rep.kind == "dvr"
                     and rep.resources.scalar.texture is not None
                     and rep.color_mapping is not None
                     and rep.opacity_mapping is not None
+                ),
+                "vpt_volumes": tuple(
+                    rep for (_rid, current_view_id), rep in self._representations.items()
+                    if current_view_id == view_id and rep.kind == "vpt"
+                    and rep.bounds is not None
+                    and rep.resources.scalar.texture is not None
+                    and rep.opacity_mapping is not None
+                ),
+                "vpt_bounds": tuple(
+                    rep.bounds for (_rid, current_view_id), rep in self._representations.items()
+                    if current_view_id == view_id and rep.kind == "vpt"
+                    and rep.bounds is not None
+                ),
+                "vpt_active": any(
+                    current_view_id == view_id and rep.kind == "vpt"
+                    for (_representation_id, current_view_id), rep
+                    in self._representations.items()
                 ),
                 "bounds": tuple(
                     rep.bounds
@@ -852,7 +854,16 @@ class MitsubaRenderingBackend(RenderingBackend):
             return self._create_wireframe_handle(representation, source)
         if representation.kind == "outline":
             return self._create_outline_handle(representation, source)
-        if representation.kind == "volume":
+        if representation.kind == "vpt":
+            # Share scalar upload and transfer-function metadata with DVR, not
+            # its integration or lighting caches.
+            volume = self._create_volume_handle(
+                representation, source, previous=previous,
+                activity_view_id=activity_view_id,
+            )
+            volume.kind = "vpt"
+            return volume
+        if representation.kind == "dvr":
             return self._create_volume_handle(
                 representation,
                 source,
@@ -1067,19 +1078,19 @@ class MitsubaRenderingBackend(RenderingBackend):
         data = source.GetOutputDataObject(representation.output_port)
         if not isinstance(data, vtk.vtkImageData):
             print("Mitsuba backend: volume rendering currently requires vtkImageData")
-            return MitsubaRepresentationHandle(kind="volume")
+            return MitsubaRepresentationHandle(kind="dvr")
 
         bounds = tuple(float(v) for v in data.GetBounds())
         color_by = representation.properties.get("color_by")
         if not color_by:
             print("Mitsuba backend: volume rendering requires a selected scalar array")
-            return MitsubaRepresentationHandle(kind="volume", bounds=bounds)
+            return MitsubaRepresentationHandle(kind="dvr", bounds=bounds)
 
         array_name = str(color_by[0])
         association = str(color_by[1])
         transfer_function = self._transfer_function_provider(array_name)
         if transfer_function is None:
-            return MitsubaRepresentationHandle(kind="volume", bounds=bounds)
+            return MitsubaRepresentationHandle(kind="dvr", bounds=bounds)
 
         interpolation = str(representation.properties.get("interpolation", "linear"))
         scalar_precision = self._precision(
@@ -1102,7 +1113,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             association,
             interpolation,
             scalar_precision,
-            "voxelized-debug-torus-v1",
+            "original-voxel-scalars-v1",
         )
         scalar_volume = None
         scalar_values = None
@@ -1119,12 +1130,8 @@ class MitsubaRenderingBackend(RenderingBackend):
                     "Mitsuba backend: selected volume array is unavailable or has "
                     "an incompatible tuple count"
                 )
-                return MitsubaRepresentationHandle(kind="volume", bounds=bounds)
+                return MitsubaRepresentationHandle(kind="dvr", bounds=bounds)
 
-            # TEMPORARY DEBUG PATCH: voxelize the analytic torus once, before
-            # uploading. Both the DVR and shadow baker now sample this texture.
-            # Remove this assignment to restore the original CT scalar upload.
-            scalar_values = _voxelized_debug_torus(scalar_values.shape, bounds)
             scalar_range = (float(np.min(scalar_values)), float(np.max(scalar_values)))
             activity_key = f"scalar:{activity_view_id}:{representation.id}"
             activity_started = self._activity_start(
@@ -1146,7 +1153,7 @@ class MitsubaRenderingBackend(RenderingBackend):
             self._activity_done(activity_key, activity_started)
 
         handle = MitsubaRepresentationHandle(
-            kind="volume",
+            kind="dvr",
             activity_scope=f"{activity_view_id}:{representation.id}",
             activity_view_id=str(activity_view_id),
             bounds=bounds,
@@ -1881,6 +1888,23 @@ class MitsubaRenderingBackend(RenderingBackend):
             },
         }
 
+        # VPT hello world: an empty scene with a visible environment.
+        # Mitsuba's path integrator evaluates the emitter for camera misses.
+        if snapshot["vpt_active"]:
+            scene_dict["integrator"]["hide_emitters"] = False
+
+        # Mitsuba envmap uses a lat-long HDR texture and builds its own
+        # importance distribution. Loading the scene uploads the texture to
+        # the active backend; the structural scene key controls reloads.
+        if snapshot["hdri"]:
+            from pathlib import Path
+            hdri_file = Path(snapshot["hdri"]).expanduser().resolve()
+            if not hdri_file.is_file():
+                raise FileNotFoundError(f"HDRI file does not exist: {hdri_file}")
+            scene_dict["environment"] = {
+                "type": "envmap", "filename": str(hdri_file),
+            }
+
         # Directional-light values are intentionally unitless vtkweb intensities.
         # For Mitsuba surface rendering they are used as relative irradiance.
         if snapshot["objects"]:
@@ -1904,12 +1928,22 @@ class MitsubaRenderingBackend(RenderingBackend):
         ):
             scene_dict[f"shape_{shape_index}_{representation_id}"] = scene_object
 
+        # VPT milestone 2: a diagnostic boundary shell. These six colored
+        # faces are temporary scene geometry, NOT participating medium or
+        # physical scattering. Miss rays still see the HDRI. Each face uses
+        # the actual vtkImageData world-space bounds (including spacing).
+        # VPT bounds are evaluated in a dedicated Dr.Jit integrator below.
+        # Do not add diagnostic rectangles to the scene: they would occlude
+        # surfaces and would not exercise the actual ray/AABB intersection.
+
         # Keep camera-only changes out of the expensive scene/integrator cache
         # keys. Film/crop/FOV and geometry remain structural scene inputs, while
         # pose/focus/aperture are exposed Mitsuba sensor parameters and can be
         # updated in place on the cached scene.
         scene_key = (
             tuple((kind, representation_id, id(scene_object)) for kind, representation_id, scene_object in snapshot["objects"]),
+            bool(snapshot["vpt_active"]),
+            snapshot["vpt_bounds"],
             full_size,
             region,
             float(camera["fov"]),
@@ -1917,8 +1951,15 @@ class MitsubaRenderingBackend(RenderingBackend):
             int(spp),
             tuple(float(v) for v in snapshot["world_ambient_color"]),
             float(snapshot["world_ambient_intensity"]),
+            (str(__import__("pathlib").Path(snapshot["hdri"]).expanduser().resolve()),
+             __import__("os").stat(__import__("pathlib").Path(snapshot["hdri"]).expanduser()).st_mtime_ns)
+            if snapshot["hdri"] else None,
             tuple(float(v) for v in snapshot["directional_lights"]) if snapshot["objects"] else (),
         )
+
+        # VPT currently contributes only the environment. Keep other scene
+        # objects (including outlines) visible rather than deleting them.
+        # VPT medium geometry and stochastic transport remain future work.
 
         self._ensure_configured_volume_resources(snapshot["volumes"], snapshot["directional_lights"])
 
@@ -1986,6 +2027,22 @@ class MitsubaRenderingBackend(RenderingBackend):
                 params.update()
                 handle.cached_sensor_key = sensor_key
             scene = handle.cached_scene
+
+            if snapshot["vpt_active"]:
+                seed = max(1, int(render_seed) + 1)
+                vpt_key = tuple((id(v.resources.scalar.texture), v.bounds,
+                    repr(v.opacity_mapping), v.sample_distance,
+                    v.opacity_reference_distance) for v in snapshot["vpt_volumes"])
+                if getattr(handle, "vpt_diagnostic_key", None) != vpt_key:
+                    handle.vpt_diagnostic_integrator = _make_vpt_extinction_integrator(
+                        self.mi, self.dr, snapshot["vpt_volumes"]
+                    )
+                    handle.vpt_diagnostic_key = vpt_key
+                image = self.mi.render(
+                    scene, sensor=scene.sensors()[0], spp=spp, seed=seed,
+                    integrator=handle.vpt_diagnostic_integrator,
+                )
+                return np.asarray(image, dtype=np.float32)[..., :3].copy()
 
             # Auxiliary texture presence is a Python-time specialization: each
             # volume gets a DirectVolume type matching exactly the resources it
@@ -2618,7 +2675,7 @@ def _make_direct_volume_type(
             )
 
         def _sample_scalar(self, position, active=True):
-            """Sample the uploaded voxelized scalar field (currently debug torus)."""
+            """Sample the uploaded voxelized scalar field (from the input dataset)."""
             return self.scalar_volume.eval(
                 self._texture_position(position, self.scalar_volume), active
             )[0]
@@ -3291,3 +3348,181 @@ def _volume_sample_distance(
 ) -> float:
     del image
     return max(float(properties.get("sample_distance", 1.0)), 1.0e-12)
+
+
+def _make_vpt_bounds_integrator(mi, dr, bounds_list):
+    """Diagnostic VPT integrator: world-space slab intersection, no voxel shading.
+
+    Returns the closest visible box face, or the regular path-traced scene
+    (including the HDRI) on misses. Cameras inside a box see the exit face.
+    The next milestone replaces face coloring with scalar-field transport.
+    """
+    colors = (
+        mi.Color3f(1.0, .25, .25), mi.Color3f(.25, 1.0, 1.0),
+        mi.Color3f(.25, 1.0, .25), mi.Color3f(1.0, .25, 1.0),
+        mi.Color3f(.25, .45, 1.0), mi.Color3f(1.0, .85, .25),
+    )
+
+    class VPTBoundsIntegrator(mi.SamplingIntegrator):
+        def __init__(self):
+            super().__init__(mi.Properties())
+            self.surface = mi.load_dict({"type": "path", "max_depth": 4,
+                                         "hide_emitters": False})
+
+        def sample(self, scene, sampler, ray, medium=None, active=True):
+            ray = mi.Ray3f(ray)
+            active = mi.Bool(active)
+            background, valid, aovs = self.surface.sample(
+                scene, sampler, ray, medium, active
+            )
+            si = scene.ray_intersect(ray, active=active)
+            closest = dr.select(si.is_valid(), si.t, mi.Float(float("inf")))
+            face_color = mi.Color3f(0.0)
+            hit = mi.Bool(False)
+            for bounds in bounds_list:
+                xmin, xmax, ymin, ymax, zmin, zmax = bounds
+                if not (xmin < xmax and ymin < ymax and zmin < zmax):
+                    continue
+                lower = (xmin, ymin, zmin)
+                upper = (xmax, ymax, zmax)
+                near = mi.Float(-float("inf"))
+                far = mi.Float(float("inf"))
+                near_face = mi.UInt32(0)
+                far_face = mi.UInt32(0)
+                for axis, (origin, direction) in enumerate(
+                    ((ray.o.x, ray.d.x), (ray.o.y, ray.d.y),
+                     (ray.o.z, ray.d.z))
+                ):
+                    parallel = dr.abs(direction) < 1e-12
+                    safe_dir = dr.select(parallel, mi.Float(1.0), direction)
+                    ta = (lower[axis] - origin) / safe_dir
+                    tb = (upper[axis] - origin) / safe_dir
+                    lo = dr.minimum(ta, tb)
+                    hi = dr.maximum(ta, tb)
+                    lo = dr.select(parallel, mi.Float(-float("inf")), lo)
+                    hi = dr.select(parallel, mi.Float(float("inf")), hi)
+                    inside_slab = (origin >= lower[axis]) & (origin <= upper[axis])
+                    hi = dr.select(parallel & ~inside_slab,
+                                   mi.Float(-float("inf")), hi)
+                    neg = direction > 0
+                    entering_face = mi.UInt32(2 * axis) + dr.select(neg, 0, 1)
+                    exiting_face = mi.UInt32(2 * axis) + dr.select(neg, 1, 0)
+                    near_face = dr.select(lo > near, entering_face, near_face)
+                    far_face = dr.select(hi < far, exiting_face, far_face)
+                    near = dr.maximum(near, lo)
+                    far = dr.minimum(far, hi)
+                inside = near < 0
+                distance = dr.select(inside, far, near)
+                face = dr.select(inside, far_face, near_face)
+                visible = active & (far >= dr.maximum(near, 0)) & (distance >= 0) & (distance < closest)
+                selected = mi.Color3f(0.0)
+                for i, color in enumerate(colors):
+                    selected = dr.select(face == i, color, selected)
+                face_color = dr.select(visible, selected, face_color)
+                closest = dr.select(visible, distance, closest)
+                hit |= visible
+            return dr.select(hit, face_color, background), valid | hit, aovs
+
+    return VPTBoundsIntegrator()
+
+
+def _make_vpt_extinction_integrator(mi, dr, volumes):
+    """Absorption-only VPT checkpoint: attenuate scene/HDRI radiance by voxel extinction.
+
+    No scattering or emission. Optical depth uses DVR reference-distance units.
+    """
+    compiled = []
+    for volume in volumes:
+        mapping = volume.opacity_mapping
+        size = max(2, int(volume.preintegration_size))
+        tau_lut, _ = _build_gpu_preintegration_tables(
+            mi, dr, mapping, 1.0, size=size,
+            integration_samples=PREINTEGRATION_SAMPLES, with_centroid=False,
+        )
+        tensor = mi.TensorXf(tau_lut, shape=(size, size, 1))
+        preintegration = mi.Texture2f(tensor, use_accel=False)
+        compiled.append((volume.bounds, volume.resources.scalar.texture,
+                         float(mapping["range"][0]),
+                         max(float(mapping["range"][1]) - float(mapping["range"][0]), 1e-20),
+                         preintegration, size,
+                         max(float(volume.opacity_reference_distance), 1e-12),
+                         max(float(volume.sample_distance), 1e-8)))
+
+    class VPTExtinctionIntegrator(mi.SamplingIntegrator):
+        def __init__(self):
+            super().__init__(mi.Properties())
+            self.surface = mi.load_dict({"type": "path", "max_depth": 4,
+                                         "hide_emitters": False})
+
+        def sample(self, scene, sampler, ray, medium=None, active=True):
+            ray = mi.Ray3f(ray)
+            active = mi.Bool(active)
+            background, valid, aovs = self.surface.sample(scene, sampler, ray, medium, active)
+            si = scene.ray_intersect(ray, active=active)
+            surface_t = dr.select(si.is_valid(), si.t, mi.Float(float("inf")))
+            result = background
+            total_tau = mi.Float(0)
+            hit_any = mi.Bool(False)
+            for bounds, texture, minimum, width, preintegration, table_size, reference, step in compiled:
+                xmin, xmax, ymin, ymax, zmin, zmax = bounds
+                if not (xmin < xmax and ymin < ymax and zmin < zmax):
+                    continue
+                near = mi.Float(-float("inf"))
+                far = mi.Float(float("inf"))
+                for origin, direction, low, high in (
+                    (ray.o.x, ray.d.x, xmin, xmax),
+                    (ray.o.y, ray.d.y, ymin, ymax),
+                    (ray.o.z, ray.d.z, zmin, zmax),
+                ):
+                    parallel = dr.abs(direction) < 1e-12
+                    safe = dr.select(parallel, mi.Float(1), direction)
+                    ta, tb = (low-origin)/safe, (high-origin)/safe
+                    lo, hi = dr.minimum(ta, tb), dr.maximum(ta, tb)
+                    inside = (origin >= low) & (origin <= high)
+                    near = dr.maximum(near, dr.select(parallel, -float("inf"), lo))
+                    far = dr.minimum(far, dr.select(parallel,
+                        dr.select(inside, float("inf"), -float("inf")), hi))
+                start = dr.maximum(near, mi.Float(0))
+                end = dr.minimum(far, surface_t)
+                active_volume = active & (end > start)
+                # Match DVR's physical sample distance and endpoint-based
+                # preintegration. Do not stretch a fixed sample budget across
+                # the whole volume: that changes the integration accuracy.
+                segment = dr.maximum(end - start, 0)
+                count = mi.UInt32(dr.ceil(segment / step))
+                tau = mi.Float(0)
+                index = mi.UInt32(0)
+                def sample_scalar(t, mask):
+                    pos = ray.o + ray.d * t
+                    uvw = mi.Point3f((pos.x-xmin)/(xmax-xmin),
+                                     (pos.y-ymin)/(ymax-ymin),
+                                     (pos.z-zmin)/(zmax-zmin))
+                    return dr.clip((texture.eval(uvw, mask)[0]-minimum)/width, 0, 1)
+
+                scalar0 = sample_scalar(start, active_volume)
+                def cond(index, tau, scalar0):
+                    return (index < count) & active_volume & (tau < 16.0)
+
+                def body(index, tau, scalar0):
+                    marching = active_volume & (index < count) & (tau < 16.0)
+                    t0 = start + mi.Float(index) * step
+                    ds = dr.minimum(step, dr.maximum(end - t0, 0))
+                    scalar1 = sample_scalar(t0 + ds, marching)
+                    u = (scalar1 * float(table_size - 1) + 0.5) / float(table_size)
+                    v = (scalar0 * float(table_size - 1) + 0.5) / float(table_size)
+                    tau_reference = preintegration.eval(mi.Point2f(u, v), marching)[0]
+                    tau = tau + dr.select(marching, tau_reference * ds / reference, 0)
+                    return index + 1, tau, scalar1
+
+                index, tau, scalar0 = dr.while_loop(
+                    state=(index, tau, scalar0), cond=cond, body=body,
+                    label="vpt_preintegrated_absorption",
+                )
+                total_tau += dr.select(active_volume, tau, 0)
+                hit_any |= active_volume
+            # No in-scattering or emission: attenuate the radiance behind the
+            # volume, including environment emitters and visible surfaces.
+            result = background * dr.exp(-total_tau)
+            return result, valid | hit_any, aovs
+
+    return VPTExtinctionIntegrator()

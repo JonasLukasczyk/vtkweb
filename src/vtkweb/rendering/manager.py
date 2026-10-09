@@ -301,7 +301,7 @@ class RenderManager:
             "view_ids": [],
         }
 
-        if kind == "volume":
+        if kind in {"dvr", "vpt"}:
             arrays = self.get_arrays(node_id, int(output_port))
             association = "point" if arrays["point"] else "cell"
             names = arrays[association]
@@ -513,7 +513,7 @@ class RenderManager:
         value = dict(self.state.representations[representation_id])
         value["kind"] = kind
         properties = dict(value.get("properties", {}))
-        if kind == "volume" and properties.get("color_by") is None:
+        if kind in {"dvr", "vpt"} and properties.get("color_by") is None:
             representation = self.get_representation(representation_id)
             arrays = self.get_arrays(representation.node_id, representation.output_port)
             association = "point" if arrays["point"] else "cell"
@@ -690,7 +690,9 @@ class RenderManager:
         if name not in properties:
             raise ValueError(f"Unknown view property: {name}")
 
-        if name == "camera":
+        if name == "hdri":
+            value = str(value or "").strip()
+        elif name == "camera":
             camera = dict(self.get_view_property(view_id, "camera") or {})
             camera.update(dict(value or {}))
             value = _normalize_camera(camera)

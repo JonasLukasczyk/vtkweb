@@ -298,7 +298,8 @@ def build_representations_tab(
                             {"title": "Surface", "value": "surface"},
                             {"title": "Wireframe", "value": "wireframe"},
                             {"title": "Outline", "value": "outline"},
-                            {"title": "Volume", "value": "volume"},
+                            {"title": "DVR", "value": "dvr"},
+                            {"title": "VPT", "value": "vpt"},
                         ],
                     ),
                     item_title="title",
@@ -348,11 +349,12 @@ def build_representations_tab(
             "surface",
             "wireframe",
             "outline",
-            "volume",
+            "dvr",
+            "vpt",
         ):
             with v3.VCol(cols=3):
                 v3.VBtn(
-                    kind.title(),
+                    kind.upper() if kind in {"dvr", "vpt"} else kind.title(),
                     block=True,
                     size="small",
                     click=(
