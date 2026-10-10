@@ -19,6 +19,16 @@ class _SvgTag(HtmlElement):
         ]
 
 
+class _NativeVueTag(HtmlElement):
+    """Native HTML with explicit Vue bindings for the custom preset menu."""
+    def __init__(self, tag, children=None, **kwargs):
+        super().__init__(tag, children, **kwargs)
+        self._attr_names += [
+            ["classes", "class"], ["v_for", "v-for"],
+            ["v_if", "v-if"], ["key", ":key"],
+            ["vue_style", ":style"], ["vue_click", "@click"],
+        ]
+
 
 def initialize_transfer_tab(state, ctrl) -> None:
     state.active_transfer_function = None
@@ -36,54 +46,36 @@ def initialize_transfer_tab(state, ctrl) -> None:
         state.active_transfer_function = array_name
         state.active_tf_preset = None
 
-    def apply_active_tf_preset(array_name: str | None, preset_name: str | None) -> None:
-        if array_name is None or preset_name is None:
-            return
-        state.active_tf_preset = preset_name
-        ctrl.apply_tf_preset(array_name, preset_name)
-
     ctrl.set_active_transfer_function = set_active_transfer_function
-    ctrl.apply_active_tf_preset = apply_active_tf_preset
+    # The native Vue menu uses a named Trame trigger. Register the existing
+    # MPI-aware controller operation directly; do not introduce a UI adapter.
+    ctrl.trigger("apply_tf_preset")(ctrl.apply_tf_preset)
+    for name in (
+        "set_tf_color_control_point_component",
+        "add_tf_color_control_point",
+        "remove_tf_color_control_point",
+        "set_tf_color_point_rgb_at_x",
+        "remove_tf_color_point_at_x",
+    ):
+        ctrl.trigger(name)(getattr(ctrl, name))
     update_items()
 
 
 def _mapping_range_row(ctrl, mapping_name: str) -> None:
-    with html.Div(classes="vtkweb-range-row"):
-        html.Input(
-            type="number",
-            step="any",
-            value=(
-                f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[0] ?? 0",
-            ),
-            classes="vtkweb-range-input",
-            change=(
-                ctrl.set_tf_mapping_range,
-                f"[active_transfer_function,'{mapping_name}',Number($event.target.value),"
-                f"transfer_functions[active_transfer_function].{mapping_name}.range[1]]",
-            ),
-        )
-        html.Input(
-            type="number",
-            step="any",
-            value=(
-                f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[1] ?? 1",
-            ),
-            classes="vtkweb-range-input",
-            change=(
-                ctrl.set_tf_mapping_range,
-                f"[active_transfer_function,'{mapping_name}',"
-                f"transfer_functions[active_transfer_function].{mapping_name}.range[0],"
-                "Number($event.target.value)]",
-            ),
-        )
-        v3.VBtn(
-            "Rescale",
-            size="small",
-            click=(
-                ctrl.rescale_tf_mapping,
-                f"[active_transfer_function,'{mapping_name}']",
-            ),
-        )
+    with html.Div(classes="vtkweb-tf-range-row"):
+        html.Span(mapping_name.capitalize(), classes="vtkweb-tf-range-label")
+        for bound, other in ((0, 1), (1, 0)):
+            html.Input(
+                type="number", step="any",
+                value=(f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[{bound}] ?? {bound}",),
+                classes="vtkweb-range-input",
+                change=(
+                    ctrl.set_tf_mapping_range,
+                    f"[active_transfer_function,'{mapping_name}',"
+                    + ("Number($event.target.value)," if bound == 0 else f"transfer_functions[active_transfer_function].{mapping_name}.range[0],")
+                    + (f"transfer_functions[active_transfer_function].{mapping_name}.range[1]]" if bound == 0 else "Number($event.target.value)]"),
+                ),
+            )
 
 
 def build_transfer_tab(ctrl) -> None:
@@ -100,6 +92,105 @@ def build_transfer_tab(ctrl) -> None:
                 if (!arrayName || event.target !== event.currentTarget) return;
                 const [x, opacity] = window.__vtkwebTfEditorCoords(event.currentTarget, event);
                 trigger('add_tf_opacity_control_point', [arrayName, x, opacity]);
+            };
+
+            // Only a stationary pointer gesture on the empty bar adds a point.
+            // A handle drag can never accidentally add one.
+            window.__vtkwebColorBarPointer = (arrayName, event) => {
+                const bar = event.currentTarget;
+                if (event.type === 'pointerdown') {
+                    bar.__tfAdd = event.button === 0 && event.target.classList.contains('vtkweb-tf-color-fill')
+                        ? [event.pointerId, event.clientX, event.clientY] : null;
+                    return;
+                }
+                const start = bar.__tfAdd;
+                bar.__tfAdd = null;
+                if (event.type !== 'pointerup' || !arrayName || !start ||
+                    !event.target.classList.contains('vtkweb-tf-color-fill') ||
+                    event.pointerId !== start[0] ||
+                    Math.hypot(event.clientX - start[1], event.clientY - start[2]) > 3) return;
+                trigger('add_tf_color_control_point', [arrayName]);
+            };
+            window.__vtkwebPendingColorClick = null;
+            // Server state is the only source for handle positions and gradient stops.
+            window.__vtkwebColorDrag = (arrayName, index, pointX, rgb, event) => {
+                if (!arrayName || event.button !== 0) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const handle = event.currentTarget;
+                const bar = handle && handle.parentElement;
+                if (!bar) return;
+                const identityX = Number(pointX);
+                const pointerId = event.pointerId;
+                const startX = event.clientX;
+                const startY = event.clientY;
+                const rect = bar.getBoundingClientRect();
+                let moved = false;
+                let lastSent = identityX;
+                const cleanup = () => {
+                    window.removeEventListener('pointermove', move);
+                    window.removeEventListener('pointerup', up);
+                    window.removeEventListener('pointercancel', cancel);
+                };
+                const move = e => {
+                    if (e.pointerId !== pointerId) return;
+                    if (!moved && Math.hypot(e.clientX - startX, e.clientY - startY) < 3) return;
+                    moved = true;
+                    // The backend constrains interior points between neighbors,
+                    // keeping the index stable exactly as in the opacity editor.
+                    const x = Math.max(0, Math.min(1,
+                        (e.clientX - rect.left) / Math.max(1, rect.width)));
+                    if (Math.abs(x - lastSent) < 1e-5) return;
+                    lastSent = x;
+                    trigger('set_tf_color_control_point_component', [arrayName, index, 0, x]);
+                };
+                const up = e => {
+                    if (e.pointerId !== pointerId) return;
+                    cleanup();
+                    if (!moved && handle.isConnected) {
+                        if (window.__vtkwebPendingColorClick)
+                            window.clearTimeout(window.__vtkwebPendingColorClick);
+                        window.__vtkwebPendingColorClick = window.setTimeout(() => {
+                            window.__vtkwebPendingColorClick = null;
+                            if (handle.isConnected)
+                                window.__vtkwebColorPicker(arrayName, identityX, rgb, handle);
+                        }, 300);
+                    }
+                };
+                const cancel = e => {
+                    if (e.pointerId === pointerId) cleanup();
+                };
+                window.addEventListener('pointermove', move);
+                window.addEventListener('pointerup', up);
+                window.addEventListener('pointercancel', cancel);
+            };
+            window.__vtkwebColorPicker = (arrayName, identityX, rgb, handle) => {
+                const hex = '#' + rgb.map(n => Math.round(Math.max(0, Math.min(1, Number(n))) * 255)
+                    .toString(16).padStart(2, '0')).join('');
+                const doc = handle && handle.ownerDocument;
+                if (!doc) return;
+                const input = doc.createElement('input');
+                input.type = 'color';
+                input.value = hex;
+                input.style.cssText = 'position:fixed;opacity:0;pointer-events:none;width:1px;height:1px';
+                doc.body.appendChild(input);
+                input.addEventListener('input', () => {
+                    const value = input.value;
+                    const rgb = [0, 1, 2].map(i => parseInt(value.slice(1 + i * 2, 3 + i * 2), 16) / 255);
+                    trigger('set_tf_color_point_rgb_at_x', [arrayName, identityX, rgb]);
+                });
+                input.addEventListener('change', () => input.remove(), {once:true});
+                input.addEventListener('blur', () => setTimeout(() => input.remove(), 250), {once:true});
+                input.click();
+            };
+            window.__vtkwebColorRemove = (arrayName, identityX, event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (window.__vtkwebPendingColorClick) {
+                    window.clearTimeout(window.__vtkwebPendingColorClick);
+                    window.__vtkwebPendingColorClick = null;
+                }
+                trigger('remove_tf_color_point_at_x', [arrayName, identityX]);
             };
 
             window.__vtkwebStartOpacityDrag = (arrayName, pointIndex, event) => {
@@ -125,6 +216,13 @@ def build_transfer_tab(ctrl) -> None:
             };
         """,
         before_unmount=r"""
+            delete window.__vtkwebColorBarPointer;
+            if (window.__vtkwebPendingColorClick)
+                window.clearTimeout(window.__vtkwebPendingColorClick);
+            delete window.__vtkwebPendingColorClick;
+            delete window.__vtkwebColorDrag;
+            delete window.__vtkwebColorPicker;
+            delete window.__vtkwebColorRemove;
             delete window.__vtkwebTfEditorCoords;
             delete window.__vtkwebAddOpacityPoint;
             delete window.__vtkwebStartOpacityDrag;
@@ -152,80 +250,45 @@ def build_transfer_tab(ctrl) -> None:
                 update_modelValue=(ctrl.set_active_transfer_function, "[$event]"),
             )
 
-        html.Div("Color", classes="vtkweb-tf-section-title")
-        with html.Div(classes="vtkweb-select-box mt-1"):
-            html.Span("Preset", classes="vtkweb-control-label")
-            v3.VSelect(
-                classes="vtkweb-compact-select",
-                model_value=("active_tf_preset",),
-                items=("tf_preset_items",),
-                item_title="title",
-                item_value="value",
-                item_props=True,
-                density="compact",
-                variant="plain",
-                hide_details=True,
-                placeholder="Matplotlib colormap",
-                update_modelValue=(
-                    ctrl.apply_active_tf_preset,
-                    "[active_transfer_function,$event]",
-                ),
-            )
+        # Compact toolbar: four icon-only actions, with native title tooltips.
+        with html.Div(classes="vtkweb-tf-toolbar"):
+            with _NativeVueTag("details", classes="vtkweb-tf-tool-menu vtkweb-tf-preset-menu"):
+                with _NativeVueTag("summary", classes="vtkweb-tf-tool-button", title="Choose preset color map"):
+                    v3.VIcon("mdi-palette", size="small")
+                with html.Div(classes="vtkweb-colormap-dropdown-menu"):
+                    with _NativeVueTag(
+                        "button", v_for="item in tf_preset_items", key="item.value",
+                        classes="vtkweb-colormap-dropdown-option",
+                        vue_style="{ backgroundImage: 'url(' + item.preview + ')' }",
+                        vue_click=(
+                            "active_tf_preset = item.value; "
+                            "trigger('apply_tf_preset', [active_transfer_function, item.value]); "
+                            "$event.currentTarget.closest('details').open = false"
+                        ),
+                        type="button",
+                    ):
+                        html.Span("{{ item.title }}", classes="vtkweb-colormap-dropdown-option-label")
 
-        _mapping_range_row(ctrl, "color")
+            with html.Button(
+                classes="vtkweb-tf-tool-button", title="Invert color map",
+                click=(ctrl.invert_tf_color_map, "[active_transfer_function]"),
+                type="button",
+            ):
+                v3.VIcon("mdi-swap-horizontal", size="small")
 
-        with html.Table(classes="vtkweb-tf-table"):
-            with html.Thead():
-                with html.Tr():
-                    for label in ("X", "R", "G", "B", ""):
-                        html.Th(label)
-            with html.Tbody():
-                with html.Tr(
-                    v_for=(
-                        "(point,index) in (transfer_functions[active_transfer_function]?.color?.control_points || [])",
-                    ),
-                    key=("index",),
-                ):
-                    for component_index in range(4):
-                        with html.Td():
-                            html.Input(
-                                type="number",
-                                min="0",
-                                max="1",
-                                step="0.01",
-                                value=(f"point[{component_index}]",),
-                                classes="vtkweb-range-input",
-                                change=(
-                                    ctrl.set_tf_color_control_point_component,
-                                    f"[active_transfer_function,index,{component_index},Number($event.target.value)]",
-                                ),
-                            )
-                    with html.Td():
-                        v3.VBtn(
-                            "×",
-                            size="x-small",
-                            disabled=(
-                                "transfer_functions[active_transfer_function].color.control_points.length <= 2",
-                            ),
-                            click=(
-                                ctrl.remove_tf_color_control_point,
-                                "[active_transfer_function,index]",
-                            ),
-                        )
+            with html.Button(
+                classes="vtkweb-tf-tool-button", title="Automatically adjust color and opacity ranges to data",
+                click=(ctrl.rescale_tf_both_mappings, "[active_transfer_function]"),
+                type="button",
+            ):
+                v3.VIcon("mdi-auto-fix", size="small")
 
-        v3.VBtn(
-            "Add color point",
-            classes="mt-1",
-            size="small",
-            click=(ctrl.add_tf_color_control_point, "[active_transfer_function]"),
-        )
-
-        html.Div("Opacity", classes="vtkweb-tf-section-title")
-        _mapping_range_row(ctrl, "opacity")
-        html.Div(
-            "Click to add a point. Drag points to edit opacity; endpoint x positions stay fixed.",
-            classes="vtkweb-tf-help",
-        )
+            with _NativeVueTag("details", classes="vtkweb-tf-tool-menu"):
+                with _NativeVueTag("summary", classes="vtkweb-tf-tool-button", title="Set data range"):
+                    v3.VIcon("mdi-arrow-expand-horizontal", size="small")
+                with html.Div(classes="vtkweb-tf-tool-panel"):
+                    _mapping_range_row(ctrl, "color")
+                    _mapping_range_row(ctrl, "opacity")
 
         with html.Svg(
             classes="vtkweb-opacity-editor",
@@ -263,7 +326,44 @@ def build_transfer_tab(ctrl) -> None:
                 ],
             )
 
-        html.Div(
-            "Double-click an interior opacity point to remove it.",
-            classes="vtkweb-tf-help",
-        )
+        # Single reactive source for BOTH gradient stops and handles. No
+        # Python-derived CSS styles, duplicate preview state, or DOM overrides.
+        with html.Svg(
+            classes="vtkweb-tf-color-svg",
+            raw_attrs=[
+                'viewBox="0 0 300 30"',
+                'preserveAspectRatio="none"',
+                '@pointerdown="window.__vtkwebColorBarPointer(active_transfer_function, $event)"',
+                '@pointerup="window.__vtkwebColorBarPointer(active_transfer_function, $event)"',
+                '@pointercancel="window.__vtkwebColorBarPointer(active_transfer_function, $event)"',
+            ],
+        ):
+            with _SvgTag("defs"):
+                with _SvgTag("linearGradient", raw_attrs=[
+                    'id="vtkweb-tf-color-gradient"',
+                    'x1="0%"', 'y1="0%"', 'x2="100%"', 'y2="0%"',
+                ]):
+                    _SvgTag(
+                        "stop",
+                        v_for="(point,index) in (transfer_functions[active_transfer_function]?.color?.control_points || [])",
+                        key="index",
+                        raw_attrs=[
+                            ":offset=\"(point[0] * 100) + '%'\"",
+                            ":stop-color=\"'rgb(' + point.slice(1,4).map(v => Math.round(v * 255)).join(',') + ')'\"",
+                        ],
+                    )
+            _SvgTag("rect", x="0", y="0", width="300", height="30",
+                    classes="vtkweb-tf-color-fill",
+                    raw_attrs=['fill="url(#vtkweb-tf-color-gradient)"'])
+            _SvgTag(
+                "circle",
+                v_for="(point,index) in (transfer_functions[active_transfer_function]?.color?.control_points || [])",
+                key="index",
+                cx=("point[0] * 300",), cy="15", r="7",
+                classes="vtkweb-tf-color-svg-handle",
+                raw_attrs=[
+                    ":fill=\"'rgb(' + point.slice(1,4).map(v => Math.round(v * 255)).join(',') + ')'\"",
+                    '@pointerdown.stop="window.__vtkwebColorDrag(active_transfer_function, index, point[0], point.slice(1,4), $event)"',
+                    '@dblclick.stop="window.__vtkwebColorRemove(active_transfer_function, point[0], $event)"',
+                ],
+            )

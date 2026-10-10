@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import contextmanager
+import itertools
+import gc
 import os
 import math
 import threading
@@ -26,6 +29,7 @@ from vtkweb.rendering.base import (
 # Values are averaged over active lights before quantization, and restored
 # to summed illumination when sampled. Other volume formats are unchanged.
 
+# Temporary unconditional startup diagnostics. Disable with VTKWEB_VPT_TRACE=0.
 VPT_DEBUG = os.environ.get("VTKWEB_VPT_DEBUG", "0").lower() in ("1", "true", "yes")
 
 DEBUG_SHADOW_STORAGE = True  # Print actual GPU array types and logical storage size after baking.
@@ -260,6 +264,11 @@ class MitsubaRepresentationHandle:
     scattering_albedo: float = 0.8
     vpt_max_depth: int = 1
     vpt_anisotropy: float = 0.0
+    vpt_performance_log: bool = False
+    vpt_majorant_brick_size: int = 8
+    vpt_transmittance_cache: bool = False
+    vpt_transmittance_cache_directions: int = 26
+    vpt_spp_per_frame: int = 1
     opacity_reference_distance: float = 1.0
     shade: bool = False
     ambient: float = 0.1
@@ -547,6 +556,22 @@ class MitsubaRenderingBackend(RenderingBackend):
             details=details,
             determinate=determinate,
         )
+
+    def _vpt_cache_activity(self, view_id: str, label: str, fraction: float) -> None:
+        # Cache building is performed on the render worker; updates use the
+        # same activity interface as the DVR preprocessing operations.
+        key = f"vpt-cache:{view_id}"
+        if fraction <= 0:
+            started = self._activity_start(key, label, view_id=view_id,
+                                           determinate=True)
+            self._vpt_cache_started = (key, started)
+        elif fraction >= 1:
+            entry = getattr(self, "_vpt_cache_started", None)
+            if entry is not None and entry[0] == key:
+                self._activity_done(*entry)
+                self._vpt_cache_started = None
+        else:
+            self._activity_progress(key, fraction)
 
     def _activity_progress(self, key: str, progress: float) -> None:
         if self._activity is not None:
@@ -1177,6 +1202,11 @@ class MitsubaRenderingBackend(RenderingBackend):
             scattering_albedo=float(representation.properties.get("scattering_albedo", 0.8)),
             vpt_max_depth=int(representation.properties.get("vpt_max_depth", 1)),
             vpt_anisotropy=float(representation.properties.get("vpt_anisotropy", 0.0)),
+            vpt_performance_log=bool(representation.properties.get("vpt_performance_log", False)),
+            vpt_majorant_brick_size=int(representation.properties.get("vpt_majorant_brick_size", "8")),
+            vpt_transmittance_cache=bool(representation.properties.get("vpt_transmittance_cache", False)),
+            vpt_transmittance_cache_directions=int(representation.properties.get("vpt_transmittance_cache_directions", "26")),
+            vpt_spp_per_frame=max(1, min(64, int(representation.properties.get("vpt_spp_per_frame", 1)))),
             opacity_reference_distance=_volume_opacity_reference_distance(data),
             shade=bool(representation.properties.get("shade", True)),
             ambient=float(representation.properties.get("ambient", 0.1)),
@@ -2044,30 +2074,85 @@ class MitsubaRenderingBackend(RenderingBackend):
                 vpt_key = tuple((id(v.resources.scalar.texture), v.bounds,
                     repr(v.opacity_mapping), v.sample_distance,
                     v.opacity_reference_distance, v.vpt_transport, v.scattering_albedo, v.vpt_max_depth, v.vpt_anisotropy,
-                    repr(v.color_mapping)) for v in snapshot["vpt_volumes"])
-                if getattr(handle, "vpt_diagnostic_key", None) != vpt_key:
+                    repr(v.color_mapping), v.vpt_majorant_brick_size, v.vpt_transmittance_cache, v.vpt_transmittance_cache_directions) for v in snapshot["vpt_volumes"])
+                vpt_perf_enabled = any(v.vpt_performance_log for v in snapshot["vpt_volumes"])
+                vpt_build_start = time.perf_counter() if vpt_perf_enabled else None
+                vpt_rebuild = getattr(handle, "vpt_diagnostic_key", None) != vpt_key
+                if vpt_rebuild:
+                    # Release the previous integrator before constructing GPU caches.
+                    # Its closure captures the old directional and majorant arrays.
+                    handle.vpt_diagnostic_integrator = None
+                    handle.vpt_diagnostic_key = None
+                    gc.collect()
+                    valid_directional_keys = set()
+                    valid_majorant_keys = set()
+                    for v in snapshot["vpt_volumes"]:
+                        scalar_shape = tuple(np.asarray(v.scalar_values).shape)
+                        valid_directional_keys.add((v.resources.scalar.key, scalar_shape,
+                            repr(v.opacity_mapping), float(v.opacity_reference_distance),
+                            tuple(v.bounds), int(v.vpt_transmittance_cache_directions)))
+                        valid_majorant_keys.add((v.resources.scalar.key, scalar_shape,
+                            repr(v.opacity_mapping), float(v.opacity_reference_distance),
+                            max(4, min(16, int(v.vpt_majorant_brick_size)))))
+                    for stale_key in tuple(_VPT_TRANSMITTANCE_CACHE):
+                        if stale_key not in valid_directional_keys:
+                            del _VPT_TRANSMITTANCE_CACHE[stale_key]
+                    for stale_key in tuple(_VPT_MAJORANT_CACHE):
+                        if stale_key not in valid_majorant_keys:
+                            del _VPT_MAJORANT_CACHE[stale_key]
+                    gc.collect()
                     use_delta = all(v.vpt_transport == "delta" for v in snapshot["vpt_volumes"])
                     if VPT_DEBUG:
                         print(f"[VPT DEBUG] build integrator: transport={'delta' if use_delta else 'deterministic'} volumes={len(snapshot['vpt_volumes'])} spp={spp} seed={seed}", flush=True)
                         for vi, v in enumerate(snapshot["vpt_volumes"]):
                             print(f"[VPT DEBUG] volume[{vi}]: bounds={v.bounds} reference_distance={v.opacity_reference_distance} texture={type(v.resources.scalar.texture).__name__}", flush=True)
-                    handle.vpt_diagnostic_integrator = (
-                        _make_vpt_delta_integrator(self.mi, self.dr, snapshot["vpt_volumes"])
-                        if use_delta
-                        else _make_vpt_extinction_integrator(self.mi, self.dr, snapshot["vpt_volumes"])
+                    vpt_activity_key = f"vpt-kernel:{view_id}"
+                    vpt_activity_started = self._activity_start(
+                        vpt_activity_key, "Preparing VPT rendering kernel",
+                        view_id=view_id,
+                        details={"volumes": len(snapshot["vpt_volumes"]),
+                                 "transmittance_cache": any(v.vpt_transmittance_cache for v in snapshot["vpt_volumes"])},
+                        determinate=False,
                     )
-                    handle.vpt_diagnostic_key = vpt_key
+                    try:
+                        handle.vpt_diagnostic_integrator = (
+                            _make_vpt_delta_integrator(
+                                self.mi, self.dr, snapshot["vpt_volumes"],
+                                progress=lambda label, fraction: self._vpt_cache_activity(view_id, label, fraction),
+                            )
+                            if use_delta
+                            else _make_vpt_extinction_integrator(self.mi, self.dr, snapshot["vpt_volumes"])
+                        )
+                        handle.vpt_diagnostic_key = vpt_key
+                    finally:
+                        self._activity_done(vpt_activity_key, vpt_activity_started)
+                if vpt_perf_enabled:
+                    print(f"[VPT PERF] integrator_rebuilt={vpt_rebuild} "
+                          f"integrator_prepare_ms={(time.perf_counter()-vpt_build_start)*1000:.3f}", flush=True)
                 try:
+                    vpt_render_start = time.perf_counter()
                     image = self.mi.render(
                         scene, sensor=scene.sensors()[0], spp=spp, seed=seed,
                         integrator=handle.vpt_diagnostic_integrator,
                     )
-                    return np.asarray(image, dtype=np.float32)[..., :3].copy()
+                    # Deliberately no extra dr.sync_thread(): the NumPy readback
+                    # below is the natural synchronization point. This keeps
+                    # diagnostic timing from changing the execution schedule.
+                    result_image = np.asarray(image, dtype=np.float32)[..., :3].copy()
+                    if vpt_perf_enabled:
+                        elapsed_ms = (time.perf_counter()-vpt_render_start)*1000
+                        print(f"[VPT PERF] render_and_readback_ms={elapsed_ms:.3f} "
+                              f"spp={spp} pixels={result_image.shape[0]*result_image.shape[1]} "
+                              f"ms_per_megapixel_spp={elapsed_ms/(max(spp,1)*max(result_image.shape[0]*result_image.shape[1],1)/1e6):.3f}", flush=True)
+                    return result_image
                 except Exception as exc:
                     import traceback
-                    if VPT_DEBUG:
-                        print(f"[VPT DEBUG] mi.render failed: {type(exc).__name__}: {exc}", flush=True)
-                        traceback.print_exception(type(exc), exc, exc.__traceback__)
+                    print(f"[VPT ERROR] mi.render failed: {type(exc).__name__}: {exc}", flush=True)
+                    traceback.print_exception(type(exc), exc, exc.__traceback__)
+                    cause = exc.__cause__ or exc.__context__
+                    if cause is not None:
+                        print("[VPT ERROR] nested exception:", flush=True)
+                        traceback.print_exception(type(cause), cause, cause.__traceback__)
                     raise
 
             # Auxiliary texture presence is a Python-time specialization: each
@@ -2269,34 +2354,34 @@ class MitsubaRenderingBackend(RenderingBackend):
                 render_seed=dvr_seed,
             )
             self._accumulate_pass_worker(
-                handle,
-                sample,
-                spp=1,
-                render_key=render_key,
+                handle, sample, spp=1, render_key=render_key,
             )
-            return self._resolved_accumulated_frame_worker(handle)
+            frame = self._resolved_accumulated_frame_worker(handle)
+            return frame
+
+        # VPT only: render multiple samples in one Mitsuba call, amortizing
+        # GPU readback, frame accumulation and RGB encoding. Keep DVR at 1 spp.
+        vpt_spp = max((v.vpt_spp_per_frame for v in snapshot["vpt_volumes"]), default=1)
 
         # Surface-only scenes also use the custom integrator. Give
         # every pass a fresh seed so path tracing / sub-pixel sampling continues
         # to converge instead of replaying the identical sample forever.
         surface_seed = handle.next_seed
-        handle.next_seed += 1
+        handle.next_seed += vpt_spp
         sample = self.render_pass(
             view_id,
             snapshot,
             render_key,
             region=region,
             full_size=full_size,
-            spp=1,
+            spp=vpt_spp,
             render_seed=surface_seed,
         )
         self._accumulate_pass_worker(
-            handle,
-            sample,
-            spp=1,
-            render_key=render_key,
+            handle, sample, spp=vpt_spp, render_key=render_key,
         )
-        return self._resolved_accumulated_frame_worker(handle)
+        frame = self._resolved_accumulated_frame_worker(handle)
+        return frame
 
     def _visible_bounds_unlocked(
         self, view_id: str
@@ -3559,45 +3644,210 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
     return VPTExtinctionIntegrator()
 
 
-def _vpt_brick_majorants(volume, brick_size=8):
-    """Conservative extinction bounds for trilinearly interpolated scalar data.
+# Internal CPU majorant preprocessing reuse (not a rendering-mode toggle).
+# The scalar resource key includes VTK image modification time, so a properly
+# marked data edit invalidates the grid. Bounded FIFO avoids unlimited residency.
+_VPT_MAJORANT_CACHE = {}
+_VPT_MAJORANT_CACHE_LIMIT = 1
 
-    The one-voxel halo covers texture interpolation at brick boundaries.
-    A piecewise-linear opacity TF reaches its maximum on a scalar interval
-    at an interval endpoint or an interior control point.
+
+def _vpt_get_majorants(volume, mi, dr):
+    """Reuse GPU-resident conservative majorants, keyed by VTK scalar resource."""
+    brick = max(4, min(16, int(volume.vpt_majorant_brick_size)))
+    key = (volume.resources.scalar.key, tuple(np.asarray(volume.scalar_values).shape),
+           repr(volume.opacity_mapping), float(volume.opacity_reference_distance), brick)
+    cached = _VPT_MAJORANT_CACHE.get(key)
+    if cached is not None:
+        return cached, True
+    # Drop obsolete GPU grids before allocating a replacement.
+    _VPT_MAJORANT_CACHE.clear()
+    result = _vpt_brick_majorants_gpu(volume, brick, mi, dr)
+    _VPT_MAJORANT_CACHE[key] = result
+    return result, False
+
+
+def _vpt_brick_majorants_gpu(volume, brick_size, mi, dr):
+    """Separable GPU min/max reduction with a conservative 1-voxel halo.
+
+    Each pass evaluates independent output lanes on CUDA. The scalar source
+    originates in VTK host memory, so one upload is unavoidable, but neither
+    brick reduction nor the transfer-function bound runs in Python voxel loops.
     """
-    values = np.asarray(volume.scalar_values)
+    values = np.asarray(volume.scalar_values, dtype=np.float32)
     if values.ndim != 3:
         raise ValueError("VPT requires a 3D scalar array")
     nz, ny, nx = values.shape
     bx, by, bz = [(n + brick_size - 1) // brick_size for n in (nx, ny, nz)]
-    points = np.asarray(volume.opacity_mapping["control_points"], dtype=np.float64)
-    reference = max(float(volume.opacity_reference_distance), 1e-12)
-    lo, hi = map(float, volume.opacity_mapping["range"])
-    width = max(hi - lo, 1e-20)
-    result = np.zeros((bz, by, bx), dtype=np.float32)
-    for z in range(bz):
-        for y in range(by):
-            for x in range(bx):
-                # Texture coordinates map across the whole image extent. Include
-                # a halo so no trilinear footprint crosses outside this range.
-                patch = values[max(0,z*brick_size-1):min(nz,(z+1)*brick_size+2),
-                               max(0,y*brick_size-1):min(ny,(y+1)*brick_size+2),
-                               max(0,x*brick_size-1):min(nx,(x+1)*brick_size+2)]
-                vmin = np.clip((float(np.min(patch))-lo)/width, 0, 1)
-                vmax = np.clip((float(np.max(patch))-lo)/width, 0, 1)
-                candidates = [vmin, vmax]
-                candidates.extend(float(q) for q in points[:,0] if vmin <= q <= vmax)
-                alpha = max(float(np.interp(q, points[:,0], points[:,1])) for q in candidates)
-                sigma = -np.log1p(-min(max(alpha, 0.0), 1-1e-6)) / reference
-                result[z,y,x] = np.float32(sigma * (1 + 1e-5) + 1e-7) if sigma > 0 else np.float32(0)
-    return np.ascontiguousarray(result), (bx, by, bz)
+    scalar = mi.Float(np.ascontiguousarray(values).reshape(-1))
+
+    # Stage X: (z, y, brick_x) -> min/max over the brick and halo.
+    lane = dr.arange(mi.UInt32, nz*ny*bx)
+    xx = lane % bx
+    yy = (lane // bx) % ny
+    zz = lane // (bx*ny)
+    low_x = mi.Float(float('inf'))
+    high_x = mi.Float(-float('inf'))
+    for offset in range(-1, brick_size+2):
+        sx = dr.clip(mi.Int32(xx*brick_size) + offset, 0, nx-1)
+        v = dr.gather(mi.Float, scalar, (zz*ny+yy)*nx + mi.UInt32(sx))
+        low_x = dr.minimum(low_x, v)
+        high_x = dr.maximum(high_x, v)
+
+    # Stage Y: (z, brick_y, brick_x).
+    lane = dr.arange(mi.UInt32, nz*by*bx)
+    xx = lane % bx
+    yy = (lane // bx) % by
+    zz = lane // (bx*by)
+    low_y = mi.Float(float('inf'))
+    high_y = mi.Float(-float('inf'))
+    for offset in range(-1, brick_size+2):
+        sy = dr.clip(mi.Int32(yy*brick_size) + offset, 0, ny-1)
+        idx = (zz*ny + mi.UInt32(sy))*bx + xx
+        low_y = dr.minimum(low_y, dr.gather(mi.Float, low_x, idx))
+        high_y = dr.maximum(high_y, dr.gather(mi.Float, high_x, idx))
+
+    # Stage Z: one GPU lane per brick.
+    lane = dr.arange(mi.UInt32, bz*by*bx)
+    xx = lane % bx
+    yy = (lane // bx) % by
+    zz = lane // (bx*by)
+    vmin = mi.Float(float('inf'))
+    vmax = mi.Float(-float('inf'))
+    for offset in range(-1, brick_size+2):
+        sz = dr.clip(mi.Int32(zz*brick_size) + offset, 0, nz-1)
+        idx = (mi.UInt32(sz)*by + yy)*bx + xx
+        vmin = dr.minimum(vmin, dr.gather(mi.Float, low_y, idx))
+        vmax = dr.maximum(vmax, dr.gather(mi.Float, high_y, idx))
+
+    points = np.asarray(volume.opacity_mapping['control_points'], dtype=np.float64)
+    lo, hi = map(float, volume.opacity_mapping['range'])
+    width = max(hi-lo, 1e-20)
+    vmin = dr.clip((vmin-lo)/width, 0.0, 1.0)
+    vmax = dr.clip((vmax-lo)/width, 0.0, 1.0)
+    # Evaluate piecewise-linear opacity at interval endpoints and all
+    # interior control points, so non-monotone TFs remain conservative.
+    def opacity_at(q):
+        result = mi.Float(float(points[0, 1]))
+        for i in range(len(points)-1):
+            x0, a0 = map(float, points[i])
+            x1, a1 = map(float, points[i+1])
+            t = dr.clip((q-x0)/max(x1-x0, 1e-20), 0.0, 1.0)
+            segment = a0 + t*(a1-a0)
+            result = dr.select(q >= x0, segment, result)
+        return result
+    alpha = dr.maximum(opacity_at(vmin), opacity_at(vmax))
+    for point in points:
+        x0, a0 = map(float, point)
+        alpha = dr.maximum(alpha, dr.select((vmin <= x0) & (x0 <= vmax), a0, 0.0))
+    alpha = dr.clip(alpha, 0.0, 1.0-1e-6)
+    sigma = -dr.log(1.0-alpha) / max(float(volume.opacity_reference_distance), 1e-12)
+    majorants = dr.select(sigma > 0.0, sigma*(1.0+1e-5)+1e-7, 0.0)
+    # Force evaluation now so subsequent rendering doesn't pay the build
+    # cost. The trace measures host submission, not GPU wall time.
+    dr.eval(majorants)
+    return majorants, (bx, by, bz)
 
 
-def _make_vpt_delta_integrator(mi, dr, volumes):
+# Approximate directional optical-depth cache. Directions are physical-space
+# normalized 3x3x3 neighbor offsets; six axes are a supported comparison mode.
+_VPT_TRANSMITTANCE_CACHE = {}
+_VPT_TRANSMITTANCE_CACHE_LIMIT = 1
+_VPT_CACHE_DIRECTIONS = tuple((x,y,z) for x,y,z in itertools.product((-1,0,1), repeat=3)
+                              if (x,y,z) != (0,0,0))
+_VPT_CACHE_AXES = ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1))
+
+
+def _vpt_directional_transmittance(volume, mi, dr, progress=None):
+    """Build 6/26 discrete optical-depth fields entirely with Dr.Jit CUDA.
+
+    The inclusive directional scan uses logarithmic gather passes. A half-cell
+    correction preserves the previous CPU cache's voxel-center convention.
+    No optical-depth fields are downloaded to NumPy.
+    """
+    count = int(volume.vpt_transmittance_cache_directions)
+    if count not in (6, 26):
+        raise ValueError("VPT transmittance directions must be 6 or 26")
+    values = np.asarray(volume.scalar_values)
+    nz, ny, nx = values.shape
+    key = (volume.resources.scalar.key, values.shape,
+           repr(volume.opacity_mapping), float(volume.opacity_reference_distance),
+           tuple(volume.bounds), count)
+    cached = _VPT_TRANSMITTANCE_CACHE.get(key)
+    if cached is not None:
+        return cached, True
+    # Single active generation: discard stale GPU fields before construction.
+    _VPT_TRANSMITTANCE_CACHE.clear()
+    gc.collect()
+    voxel_count = nx * ny * nz
+    directions = _VPT_CACHE_AXES if count == 6 else _VPT_CACHE_DIRECTIONS
+    xmin, xmax, ymin, ymax, zmin, zmax = volume.bounds
+    spacing = ((xmax-xmin)/max(nx, 1), (ymax-ymin)/max(ny, 1),
+               (zmax-zmin)/max(nz, 1))
+    vectors = np.asarray([(dx*spacing[0], dy*spacing[1], dz*spacing[2])
+                          for dx,dy,dz in directions], dtype=np.float32)
+    distances = np.linalg.norm(vectors, axis=1)
+    vectors /= distances[:, None]
+    if progress is not None:
+        progress("Building VPT directional transmittance cache", 0.0)
+    scalar = mi.Float(np.ascontiguousarray(values, dtype=np.float32).reshape(-1))
+    mapping = volume.opacity_mapping
+    points = np.asarray(mapping["control_points"], dtype=np.float32)
+    lo, hi = map(float, mapping["range"])
+    normalized = dr.clip((scalar-lo)/max(hi-lo, 1e-20), 0.0, 1.0)
+    # Match np.interp's piecewise-linear transfer-function evaluation.
+    alpha = mi.Float(float(np.clip(points[0, 1], 0, 1-1e-6)))
+    for j in range(len(points)-1):
+        x0, a0 = map(float, points[j]); x1, a1 = map(float, points[j+1])
+        interpolated = a0 + (a1-a0)*dr.clip((normalized-x0)/max(x1-x0, 1e-20), 0, 1)
+        alpha = dr.select(normalized >= x0, interpolated, alpha)
+    alpha = dr.clip(alpha, 0.0, 1.0-1e-6)
+    sigma = -dr.log(1.0-alpha)/max(float(volume.opacity_reference_distance), 1e-12)
+    dr.eval(sigma)
+    packed = dr.zeros(mi.Float, voxel_count*count)
+    indices = dr.arange(mi.UInt32, voxel_count)
+    # Signed coordinates are required for negative scan directions.
+    # Keep the scatter offsets unsigned, but calculate neighbor positions
+    # in signed GPU integer arithmetic.
+    x = mi.Int32(indices % nx)
+    y = mi.Int32((indices // nx) % ny)
+    z = mi.Int32(indices // (nx*ny))
+    max_dim = max(nx, ny, nz)
+    for direction_index, (dx,dy,dz) in enumerate(directions):
+        distance = float(distances[direction_index])
+        # Inclusive scan from each cell towards the volume exit. At each
+        # doubling step, gather the accumulated sum 2**k cells ahead.
+        running = sigma * distance
+        jump = 1
+        while jump < max_dim:
+            tx = x + mi.Int32(dx*jump)
+            ty = y + mi.Int32(dy*jump)
+            tz = z + mi.Int32(dz*jump)
+            valid = ((tx >= 0) & (tx < nx) & (ty >= 0) & (ty < ny)
+                     & (tz >= 0) & (tz < nz))
+            target = mi.UInt32(dr.select(valid, tz*(nx*ny)+ty*nx+tx, 0))
+            ahead = dr.gather(mi.Float, running, target, valid)
+            running = running + dr.select(valid, ahead, 0.0)
+            jump *= 2
+        # CPU reference: half of current voxel + all voxels ahead.
+        tau = dr.clip(running - 0.5*sigma*distance, 0.0, 80.0)
+        dr.scatter(packed, tau, indices+direction_index*voxel_count)
+        dr.eval(packed)
+        if progress is not None:
+            progress("Building VPT directional transmittance cache",
+                     (direction_index+1)/(count+1))
+    result = (packed, (nx,ny,nz), vectors)
+    _VPT_TRANSMITTANCE_CACHE[key] = result
+    if progress is not None:
+        progress("Building VPT directional transmittance cache", 1.0)
+    return result, False
+
+
+def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
     """Spatial-majorant delta tracking with optional HDRI single scattering."""
     compiled = []
-    for volume in volumes:
+    compile_start = time.perf_counter()
+    for volume_index, volume in enumerate(volumes):
+        volume_compile_start = time.perf_counter()
         mapping = volume.opacity_mapping
         points = np.asarray(mapping["control_points"], dtype=np.float32)
         x = np.linspace(0.0, 1.0, 1024, dtype=np.float32)
@@ -3614,19 +3864,33 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
         )
         color_min = float(color_mapping["range"][0])
         color_width = max(float(color_mapping["range"][1]) - color_min, 1e-20)
-        grid, shape = _vpt_brick_majorants(volume)
+        majorant_start = time.perf_counter()
+        (grid, shape), majorant_hit = _vpt_get_majorants(volume, mi, dr)
+        if volume.vpt_performance_log:
+            print(f"[VPT PERF] majorants build_or_lookup_ms={(time.perf_counter()-majorant_start)*1000:.3f} "
+                  f"cache_hit={majorant_hit} brick={volume.vpt_majorant_brick_size} "
+                  f"bricks={shape[0]*shape[1]*shape[2]} nonzero=GPU_not_read_back", flush=True)
         if VPT_DEBUG:
-            print(f"[VPT DEBUG] majorant grid: shape={shape} min={float(np.min(grid)):.6g} max={float(np.max(grid)):.6g} nonzero={int(np.count_nonzero(grid))}/{grid.size}", flush=True)
+            pass
+        directional = None
+        if volume.vpt_transmittance_cache:
+            cache_start = time.perf_counter()
+            directional, directional_hit = _vpt_directional_transmittance(
+                volume, mi, dr, progress=progress)
+            if volume.vpt_performance_log:
+                nx, ny, nz = directional[1]
+                print(f"[VPT PERF] transmittance_cache_ms={(time.perf_counter()-cache_start)*1000:.3f} "
+                      f"cache_hit={directional_hit} bytes={nx*ny*nz*len(directional[2])*4}", flush=True)
         compiled.append((volume.bounds, volume.resources.scalar.texture,
                          float(mapping["range"][0]),
                          max(float(mapping["range"][1])-float(mapping["range"][0]), 1e-20),
                          mi.Float(np.ascontiguousarray(lut)), len(lut),
-                         mi.Float(grid.ravel()), shape,
+                         grid, shape,
                          max(float(volume.opacity_reference_distance), 1e-12),
                          float(np.clip(volume.scattering_albedo, 0, 1)),
                          color_min, color_width, color_luts,
-                         max(1, min(4, int(volume.vpt_max_depth))),
-                         float(np.clip(volume.vpt_anisotropy, -0.9, 0.9))))
+                         max(1, min(16, int(volume.vpt_max_depth))),
+                         float(np.clip(volume.vpt_anisotropy, -0.9, 0.9)), directional))
 
     def next_pcg32(state):
         """Advance a per-lane 32-bit PCG hash state explicitly."""
@@ -3736,7 +4000,13 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
             cond=cond, body=body, label="vpt_shadow_ratio_tracking")
         if dr.any(running):
             raise RuntimeError("VPT shadow ratio tracking exceeded 100000 iterations")
-        return weight
+        return weight, rng_state
+
+    def mis_weight(pdf_a, pdf_b):
+        """Power heuristic for two single-sample direction strategies."""
+        a2 = pdf_a * pdf_a
+        b2 = pdf_b * pdf_b
+        return a2 / dr.maximum(a2 + b2, 1e-30)
 
     def hg_phase(cos_theta, g):
         """Henyey-Greenstein phase density per steradian."""
@@ -3777,7 +4047,7 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
             if len(compiled) != 1:
                 raise ValueError("VPT multiple scattering currently supports exactly one volume")
             (bounds, texture, minimum, width, lut, lut_size, grid, shape,
-             reference, albedo, color_min, color_width, color_luts, max_depth, g) = compiled[0]
+             reference, albedo, color_min, color_width, color_luts, max_depth, g, directional) = compiled[0]
             xmin, xmax, ymin, ymax, zmin, zmax = bounds
             env = scene.environment()
             seed_u = sampler.next_1d(active)
@@ -3788,7 +4058,25 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
             result = mi.Color3f(0.0)
             path_active = active
             hit_any = mi.Bool(False)
+            # Previous phase-sampling vertex for emitter-hit MIS.
+            previous_scatter_pos = mi.Point3f(0.0)
+            previous_phase_pdf = mi.Float(0.0)
+            def mis_probe(stage, *values):
+                if not VPT_DEBUG:
+                    return
+                print(f"[VPT MIS TRACE] depth={depth} stage={stage} BEGIN", flush=True)
+                try:
+                    if values:
+                        dr.eval(*values)
+                    print(f"[VPT MIS TRACE] depth={depth} stage={stage} OK", flush=True)
+                except Exception as probe_exc:
+                    import traceback
+                    print(f"[VPT MIS TRACE] depth={depth} stage={stage} FAILED: "
+                          f"{type(probe_exc).__name__}: {probe_exc}", flush=True)
+                    traceback.print_exc()
+                    raise RuntimeError(f"VPT MIS failed at depth={depth}, stage={stage}") from probe_exc
             for depth in range(max_depth):
+                mis_probe("bounce-entry", ray.o.x, ray.d.x, throughput)
                 # Recompute the entry/exit interval for the current path ray.
                 near = mi.Float(-float("inf"))
                 far = mi.Float(float("inf"))
@@ -3920,6 +4208,7 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
                 (t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event) = dr.while_loop(
                     state=(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event),
                     cond=cond, body=body, label="vpt_spatial_delta_dda")
+                mis_probe("delta-tracking", iterations, real_event, scatter_mask, scatter_pos.x)
                 if dr.any(running):
                     raise RuntimeError(
                         "VPT spatial delta tracking exceeded 100000 iterations; "
@@ -3930,19 +4219,91 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
                     result += dr.select(path_active & ~real_event, background, mi.Color3f(0.0))
                     # Absorbed rays must not contribute the background.
                     # The tracking loop records all real collisions below.
+                elif env is not None:
+                    # Phase-sampled rays that escape the volume contribute
+                    # the environment as the second MIS strategy. Only rays
+                    # without a surface hit can see the infinite emitter.
+                    escaped = path_active & ~real_event & ~secondary_si.is_valid()
+                    # Default-constructed Mitsuba records contain zero-width
+                    # Dr.Jit fields. The envmap emitter accesses more than p/d
+                    # (e.g. UV and wavelength state), so allocate *every* field
+                    # at the full ray wavefront width before assigning values.
+                    wavefront_size = dr.width(ray.d.x)
+                    ref_escape = dr.zeros(mi.Interaction3f, wavefront_size)
+                    ref_escape.p = previous_scatter_pos
+                    ds_escape = dr.zeros(mi.DirectionSample3f, wavefront_size)
+                    ds_escape.d = ray.d
+                    mis_probe("escape-inputs", escaped, previous_scatter_pos.x, previous_phase_pdf)
+                    print("[VPT MIS TRACE] escape: env.pdf_direction", flush=True) if VPT_DEBUG else None
+                    env_pdf = env.pdf_direction(ref_escape, ds_escape, escaped)
+                    mis_probe("escape-pdf", env_pdf)
+                    print("[VPT MIS TRACE] escape: env.eval_direction", flush=True) if VPT_DEBUG else None
+                    env_value = env.eval_direction(ref_escape, ds_escape, escaped)
+                    mis_probe("escape-radiance", env_value)
+                    result += dr.select(escaped,
+                        throughput * env_value * mis_weight(previous_phase_pdf, env_pdf),
+                        mi.Color3f(0.0))
+                    mis_probe("escape-contribution", result)
                 if albedo > 0 and env is not None:
                     rng_state, u1 = next_pcg32(rng_state)
                     rng_state, u2 = next_pcg32(rng_state)
                     ref = mi.Interaction3f()
                     ref.p = scatter_pos
+                    mis_probe("nee-inputs", scatter_mask, scatter_pos.x)
                     ds, emitter_weight = env.sample_direction(
                         ref, mi.Point2f(u1, u2), scatter_mask)
+                    mis_probe("nee-sampled", ds.d.x, ds.pdf, emitter_weight)
                     shadow_ray = mi.Ray3f(scatter_pos, ds.d)
                     shadow_visible = ~scene.ray_test(shadow_ray, active=scatter_mask)
                     shadow_mask = scatter_mask & shadow_visible
-                    transmittance = shadow_ratio_tracking(
-                        shadow_ray, shadow_mask, rng_state, bounds, texture,
-                        minimum, width, lut, lut_size, grid, shape, reference)
+                    if directional is None:
+                        transmittance, rng_state = shadow_ratio_tracking(
+                            shadow_ray, shadow_mask, rng_state, bounds, texture,
+                            minimum, width, lut, lut_size, grid, shape, reference)
+                    else:
+                        # Trilinear optical-depth lookup and angular weighting
+                        # over the nearest three physical-space directions.
+                        field, (sx, sy, sz), vectors = directional
+                        fx = dr.clip((scatter_pos.x - xmin) / max(xmax-xmin, 1e-20) * sx - 0.5, 0, sx-1)
+                        fy = dr.clip((scatter_pos.y - ymin) / max(ymax-ymin, 1e-20) * sy - 0.5, 0, sy-1)
+                        fz = dr.clip((scatter_pos.z - zmin) / max(zmax-zmin, 1e-20) * sz - 0.5, 0, sz-1)
+                        ix0 = mi.UInt32(dr.floor(fx)); iy0 = mi.UInt32(dr.floor(fy)); iz0 = mi.UInt32(dr.floor(fz))
+                        ix1 = dr.minimum(ix0+1, mi.UInt32(sx-1))
+                        iy1 = dr.minimum(iy0+1, mi.UInt32(sy-1))
+                        iz1 = dr.minimum(iz0+1, mi.UInt32(sz-1))
+                        tx = fx-mi.Float(ix0); ty = fy-mi.Float(iy0); tz = fz-mi.Float(iz0)
+                        def lookup_tau(direction_index):
+                            offset = direction_index * mi.UInt32(sx*sy*sz)
+                            layers = []
+                            for zz in (iz0,iz1):
+                                rows = []
+                                for yy in (iy0,iy1):
+                                    v0 = dr.gather(mi.Float, field, offset+(zz*sy+yy)*sx+ix0, shadow_mask)
+                                    v1 = dr.gather(mi.Float, field, offset+(zz*sy+yy)*sx+ix1, shadow_mask)
+                                    rows.append(dr.lerp(v0,v1,tx))
+                                layers.append(dr.lerp(rows[0],rows[1],ty))
+                            return dr.lerp(layers[0],layers[1],tz)
+                        # Select the three closest directions by cosine. Use
+                        # nonnegative angular weights; no sign-dependent axes.
+                        best_dot = [mi.Float(-2.0),mi.Float(-2.0),mi.Float(-2.0)]
+                        best_id = [mi.UInt32(0),mi.UInt32(0),mi.UInt32(0)]
+                        for index, (vx,vy,vz) in enumerate(vectors):
+                            candidate_dot = ds.d.x*float(vx)+ds.d.y*float(vy)+ds.d.z*float(vz)
+                            candidate_id = mi.UInt32(index)
+                            for rank in range(3):
+                                replace = candidate_dot > best_dot[rank]
+                                displaced_dot = best_dot[rank]
+                                displaced_id = best_id[rank]
+                                best_dot[rank] = dr.select(replace,candidate_dot,displaced_dot)
+                                best_id[rank] = dr.select(replace,candidate_id,displaced_id)
+                                candidate_dot = dr.select(replace,displaced_dot,candidate_dot)
+                                candidate_id = dr.select(replace,displaced_id,candidate_id)
+                        # Stable angular blending: prefer closest direction,
+                        # with remaining two used only if positively aligned.
+                        weights = [dr.maximum(best_dot[i],mi.Float(0.0))**8 for i in range(3)]
+                        total_weight = weights[0]+weights[1]+weights[2]+mi.Float(1e-12)
+                        tau = sum(lookup_tau(best_id[i])*weights[i] for i in range(3))/total_weight
+                        transmittance = dr.exp(-dr.clip(tau,0,80))
                     color_scaled = dr.clip(
                         (scatter_scalar - color_min) / color_width, 0, 1) * 1023
                     ci0 = mi.UInt32(dr.floor(color_scaled))
@@ -3953,16 +4314,43 @@ def _make_vpt_delta_integrator(mi, dr, volumes):
                            for channel in color_luts]
                     tint = mi.Color3f(*rgb)
                     throughput = dr.select(scatter_mask, throughput * tint, throughput)
+                    mis_probe("nee-transmittance-tint", transmittance, tint)
+                    # Russian roulette applies to the *continuation* strategy,
+                    # not to this vertex's direct-light sample. Include its
+                    # survival probability in the competing MIS density.
+                    if depth >= 2 and depth + 1 < max_depth:
+                        rr_probability = dr.clip(dr.maximum(throughput.x,
+                            dr.maximum(throughput.y, throughput.z)), 0.05, 0.95)
+                    else:
+                        rr_probability = mi.Float(1.0)
+                    phase_pdf = hg_phase(dr.dot(ray.d, ds.d), g)
+                    mis_probe("nee-phase-pdf", phase_pdf, ds.pdf)
                     result += dr.select(shadow_mask,
-                        throughput * emitter_weight * hg_phase(dr.dot(ray.d, ds.d), g) * transmittance,
+                        throughput * emitter_weight * phase_pdf *
+                        (mis_weight(ds.pdf, phase_pdf * rr_probability) if depth + 1 < max_depth else mi.Float(1.0)) * transmittance,
                         mi.Color3f(0.0))
+                mis_probe("bounce-result", result, throughput)
                 if depth + 1 < max_depth:
                     # Sample the HG phase density around the incoming
                     # propagation direction. The phase/pdf ratio is 1.
                     rng_state, u1 = next_pcg32(rng_state)
                     rng_state, u2 = next_pcg32(rng_state)
                     direction = sample_hg_direction(ray.d, u1, u2, g)
+                    previous_phase_pdf = hg_phase(dr.dot(ray.d, direction), g) * rr_probability
+                    mis_probe("phase-sampled", direction.x, previous_phase_pdf)
+                    previous_scatter_pos = scatter_pos
                     ray = mi.Ray3f(scatter_pos, direction)
-                    path_active = scatter_mask
+                    # No roulette for the first two continuations. Starting
+                    # after the third event, terminate low-throughput paths.
+                    # Surviving paths receive the inverse-probability weight.
+                    if depth >= 2:
+                        rng_state, rr_u = next_pcg32(rng_state)
+                        survived = rr_u < rr_probability
+                        path_active = scatter_mask & survived
+                        throughput = dr.select(path_active,
+                            throughput / rr_probability, throughput)
+                    else:
+                        path_active = scatter_mask
+            mis_probe("final-result", result)
             return result, valid | hit_any, aovs
     return VPTDeltaAbsorptionIntegrator()

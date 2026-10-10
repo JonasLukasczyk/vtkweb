@@ -67,6 +67,7 @@ def build_inspector_view(
             ),
         ):
             with v3.VTabs(
+                classes="vtkweb-inspector-icon-tabs",
                 model_value=("inspector_tab",),
                 density="compact",
                 style="flex:0 0 auto;",
@@ -113,6 +114,11 @@ def build_inspector_view(
                     "min-height:0;"
                     "overflow-x:hidden;"
                     "overflow-y:auto;"
+                    # Move the scrollbar into the card's right padding,
+                    # while keeping tab content aligned with the padded inset.
+                    "margin-right:-12px;"
+                    "padding-right:12px;"
+                    "box-sizing:border-box;"
                 ),
             ):
                 with html.Div(

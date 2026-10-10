@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+from functools import lru_cache
+from io import BytesIO
 from copy import deepcopy
 from math import isfinite
 from typing import Any
 
 import numpy as np
+from PIL import Image
 from matplotlib import colormaps
 
 
@@ -28,39 +31,27 @@ DEFAULT_TRANSFER_FUNCTION = {
 
 
 def available_presets() -> list[dict[str, Any]]:
-    """Return Matplotlib colormaps with small inline selector previews."""
+    """Return Matplotlib colormaps with full-width gradient menu backgrounds."""
     names = set(colormaps)
     visible = sorted(
         name for name in names if not (name.endswith("_r") and name[:-2] in names)
     )
     return [
-        {
-            "title": name,
-            "value": name,
-            "props": {"appendAvatar": _preset_preview_uri(name)},
-        }
+        {"title": name, "value": name, "preview": _preset_preview_uri(name)}
         for name in visible
     ]
 
 
-def _preset_preview_uri(name: str, samples: int = 24) -> str:
-    """Create a tiny SVG gradient preview without adding image files/assets."""
+@lru_cache(maxsize=256)
+def _preset_preview_uri(name: str, samples: int = 1024) -> str:
+    """Encode an exact 1024x1 colormap strip as a PNG data URI, once per preset."""
     cmap = colormaps[name]
-    stops = []
-    for index, t in enumerate(np.linspace(0.0, 1.0, max(2, int(samples)))):
-        r, g, b, _ = cmap(float(t))
-        color = f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
-        offset = 100.0 * index / (max(2, int(samples)) - 1)
-        stops.append(f'<stop offset="{offset:.2f}%" stop-color="{color}"/>')
-    svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="16" '
-        'viewBox="0 0 96 16" preserveAspectRatio="none">'
-        '<defs><linearGradient id="g">'
-        + "".join(stops)
-        + '</linearGradient></defs><rect width="96" height="16" fill="url(#g)"/></svg>'
-    )
-    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-    return f"data:image/svg+xml;base64,{encoded}"
+    rgba = np.asarray(cmap(np.linspace(0.0, 1.0, samples)), dtype=np.float64)
+    rgb = np.clip(np.rint(rgba[:, :3] * 255.0), 0, 255).astype(np.uint8)
+    image = Image.fromarray(rgb.reshape(1, samples, 3), mode="RGB")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def color_points_from_colormap(name: str, samples: int = 16) -> list[list[float]]:
@@ -133,6 +124,24 @@ class TransferFunctionManager:
         current["color"]["control_points"] = color_points_from_colormap(preset_name)
         self.set_tf_data(array_name, current)
 
+    def invert_tf_color_map(self, array_name: str) -> None:
+        current = self.ensure(array_name)
+        points = current["color"]["control_points"]
+        current["color"]["control_points"] = sorted(
+            [[1.0 - float(p[0]), *p[1:]] for p in points], key=lambda p: p[0]
+        )
+        self.set_tf_data(array_name, current)
+
+    def rescale_tf_both_mappings(self, array_name: str) -> None:
+        data_range = self.rendering.get_global_array_range(array_name)
+        if data_range is None:
+            return
+        current = self.ensure(array_name)
+        normalized_range = _normalize_range(data_range)
+        current["color"]["range"] = list(normalized_range)
+        current["opacity"]["range"] = list(normalized_range)
+        self.set_tf_data(array_name, current)
+
     def set_tf_mapping_range(
         self,
         array_name: str,
@@ -163,8 +172,65 @@ class TransferFunctionManager:
         component_index = int(component_index)
         if not (0 <= point_index < len(points)) or not (0 <= component_index <= 3):
             return
-        points[point_index][component_index] = _clamp01(value)
-        points.sort(key=lambda point: point[0])
+        value = _clamp01(value)
+        if component_index == 0:
+            # Keep point identity/order stable throughout pointer dragging.
+            if point_index == 0 or point_index == len(points) - 1:
+                return
+            epsilon = 1e-5
+            lower = float(points[point_index - 1][0]) + epsilon
+            upper = float(points[point_index + 1][0]) - epsilon
+            if lower > upper:
+                return
+            value = max(lower, min(upper, value))
+        points[point_index][component_index] = value
+        current["color"]["control_points"] = points
+        self.set_tf_data(array_name, current)
+
+    def _tf_color_point_index_at_x(self, points, x):
+        """Resolve a color point by its original position, never a stale UI index."""
+        if not points:
+            return None
+        x = float(x)
+        candidates = [i for i, p in enumerate(points) if abs(float(p[0]) - x) < 1e-6]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def move_tf_color_point_at_x(self, array_name: str, original_x: float, new_x: float) -> None:
+        """Commit one drag using the point's position at pointer-down.
+
+        Resolving by the original x avoids stale indices after insertions/removals.
+        """
+        current = self.ensure(array_name)
+        points = [list(p) for p in current["color"]["control_points"]]
+        index = self._tf_color_point_index_at_x(points, original_x)
+        if index is None or index in (0, len(points) - 1):
+            return
+        epsilon = 1e-5
+        lower = float(points[index - 1][0]) + epsilon
+        upper = float(points[index + 1][0]) - epsilon
+        if lower > upper:
+            return
+        points[index][0] = max(lower, min(upper, _clamp01(new_x)))
+        current["color"]["control_points"] = points
+        self.set_tf_data(array_name, current)
+
+    def set_tf_color_point_rgb_at_x(self, array_name: str, x: float, rgb) -> None:
+        current = self.ensure(array_name)
+        points = [list(p) for p in current["color"]["control_points"]]
+        index = self._tf_color_point_index_at_x(points, x)
+        if index is None or len(rgb) != 3:
+            return
+        points[index][1:4] = [_clamp01(v) for v in rgb]
+        current["color"]["control_points"] = points
+        self.set_tf_data(array_name, current)
+
+    def remove_tf_color_point_at_x(self, array_name: str, x: float) -> None:
+        current = self.ensure(array_name)
+        points = [list(p) for p in current["color"]["control_points"]]
+        index = self._tf_color_point_index_at_x(points, x)
+        if index is None or len(points) <= 2 or index in (0, len(points) - 1):
+            return
+        points.pop(index)
         current["color"]["control_points"] = points
         self.set_tf_data(array_name, current)
 

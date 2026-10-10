@@ -77,7 +77,8 @@ MAIN_LAYOUT_STYLE = """
     width: 33%;
     height: 100%;
     max-height: 100%;
-    flex: 0 0 33%;
+    /* Respect the width set by the splitter drag handler. */
+    flex: 0 0 auto;
 
     min-width: 240px;
     min-height: 0;

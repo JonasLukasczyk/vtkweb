@@ -1,4 +1,15 @@
 INSPECTOR_STYLE = """
+/* Icon-only inspector tabs: share available width without Vuetify's
+   default text-tab minimum width. */
+.vtkweb-inspector-icon-tabs .v-slide-group__content {
+    width: 100%;
+}
+.vtkweb-inspector-icon-tabs .v-tab {
+    min-width: 0 !important;
+    flex: 1 1 0;
+    padding-inline: 4px;
+}
+
 .vtkweb-section-title {
     margin-bottom: 6px;
     font-size: 12px;
@@ -681,5 +692,98 @@ INSPECTOR_STYLE = """
 .vtkweb-opacity-point:active {
     cursor: grabbing;
 }
+
+
+/* The generic select-box clips overflow, hiding the custom preset menu. */
+.vtkweb-select-box.vtkweb-colormap-select-box {
+    overflow: visible;
+    position: relative;
+    z-index: 2;
+}
+.vtkweb-select-box.vtkweb-colormap-select-box:has(.vtkweb-colormap-dropdown[open]) {
+    z-index: 100;
+}
+
+/* Custom native/Vue colormap selector. Unlike VSelect, the gradient is
+ * painted on our own button elements, not forwarded through Vuetify props. */
+.vtkweb-colormap-dropdown { position: relative; min-width: 0; flex: 1 1 auto; }
+.vtkweb-colormap-dropdown-trigger {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; min-height: 32px; padding: 3px 8px;
+    border-radius: 4px; cursor: pointer; list-style: none;
+    color: rgba(var(--v-theme-on-surface), .9);
+    border-bottom: 1px solid rgba(var(--v-theme-on-surface), .38);
+    font-size: 14px;
+}
+.vtkweb-colormap-dropdown-trigger::-webkit-details-marker { display: none; }
+.vtkweb-colormap-dropdown-trigger:hover { background: rgba(var(--v-theme-on-surface), .05); }
+.vtkweb-colormap-dropdown[open] .vtkweb-colormap-dropdown-trigger { border-bottom-color: rgb(var(--v-theme-primary)); }
+.vtkweb-colormap-dropdown-chevron { opacity: .65; font-size: 14px; }
+.vtkweb-colormap-dropdown-menu {
+    position: absolute; z-index: 1000; top: calc(100% + 3px); left: 0;
+    width: max(100%, 240px); max-height: 340px; overflow-y: auto;
+    overscroll-behavior-y: contain; /* Do not scroll the inspector at menu edges. */
+    padding: 4px; border-radius: 6px;
+    background: rgb(var(--v-theme-surface));
+    box-shadow: 0 5px 18px rgba(0,0,0,.30);
+    border: 1px solid rgba(var(--v-theme-on-surface), .15);
+}
+.vtkweb-colormap-dropdown-option {
+    display: flex; align-items: center; width: 100%; min-height: 34px;
+    padding: 4px 10px; margin: 1px 0; border: 0; border-radius: 3px;
+    cursor: pointer; text-align: left; font: inherit;
+    background-size: 100% 100%; background-repeat: no-repeat;
+    background-position: center;
+}
+.vtkweb-colormap-dropdown-option:hover,
+.vtkweb-colormap-dropdown-option:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: -2px; }
+.vtkweb-colormap-dropdown-option-label {
+    color: #fff; font-size: 13px; font-weight: 600;
+    text-shadow: 0 1px 3px #000, 0 0 5px #000, 1px 0 2px #000;
+}
+
+
+
+
+/* Combined opacity / color transfer-function editor. */
+.vtkweb-tf-color-bar { position: relative; height: 27px; margin: 8px 9px 12px; border: 1px solid rgba(128,128,128,.6); border-radius: 3px; cursor: crosshair; touch-action: none; }
+.vtkweb-tf-color-handle { position: absolute; top: 50%; width: 14px; height: 14px; transform: translate(-50%, -50%); border-radius: 50%; border: 2px solid white; box-shadow: 0 0 0 1px #333, 0 1px 4px #3339; cursor: grab; touch-action: none; }
+.vtkweb-tf-color-handle:active { cursor: grabbing; }
+.vtkweb-tf-color-picker-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+.vtkweb-tf-native-color-picker { width: 40px; height: 26px; padding: 1px; cursor: pointer; }
+.vtkweb-tf-toolbar { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
+
+/* Native color input lives inside the disc; clicking the disc opens it directly. */
+.vtkweb-tf-handle-color-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+    padding: 0;
+    border: 0;
+}
+
+
+.vtkweb-tf-color-preview { cursor: crosshair; touch-action: none; }
+.vtkweb-tf-color-preview .vtkweb-tf-color-handle { cursor: grab; pointer-events: auto; }
+
+/* Compact transfer-function toolbar above the combined editor. */
+.vtkweb-tf-toolbar { display: flex; align-items: center; gap: 5px; margin: 9px 0 5px; position: relative; z-index: 5; }
+.vtkweb-tf-tool-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 1px solid rgba(128,128,128,.35); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; list-style: none; }
+.vtkweb-tf-tool-button::-webkit-details-marker { display: none; }
+.vtkweb-tf-tool-button:hover { background: rgba(128,128,128,.13); }
+.vtkweb-tf-tool-menu { position: relative; }
+.vtkweb-tf-tool-panel { position: absolute; left: 0; top: 36px; min-width: 250px; padding: 12px; background: rgb(var(--v-theme-surface)); border: 1px solid rgba(128,128,128,.35); border-radius: 6px; box-shadow: 0 5px 18px #0004; z-index: 20; }
+.vtkweb-tf-preset-menu .vtkweb-colormap-dropdown-menu { left: 0; top: 36px; width: 260px; }
+.vtkweb-tf-range-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; }
+.vtkweb-tf-range-label { min-width: 46px; font-size: 12px; }
+.vtkweb-tf-range-row .vtkweb-range-input { width: 78px; min-width: 0; }
+.vtkweb-tf-color-bar { margin-top: 2px; }
+
+/* SVG color editor: gradient and handles read the same Vue state. */
+.vtkweb-tf-color-svg { display: block; width: calc(100% - 18px); height: 30px; margin: 2px 9px 12px; overflow: visible; touch-action: none; cursor: crosshair; }
+.vtkweb-tf-color-svg-handle { stroke: white; stroke-width: 2px; cursor: grab; pointer-events: all; vector-effect: non-scaling-stroke; }
+.vtkweb-tf-color-svg-handle:active { cursor: grabbing; }
 
 """
