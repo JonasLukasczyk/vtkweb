@@ -51,7 +51,9 @@ def _preset_preview_uri(name: str, samples: int = 1024) -> str:
     image = Image.fromarray(rgb.reshape(1, samples, 3), mode="RGB")
     buffer = BytesIO()
     image.save(buffer, format="PNG", optimize=True)
-    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode(
+        "ascii"
+    )
 
 
 def color_points_from_colormap(name: str, samples: int = 16) -> list[list[float]]:
@@ -67,9 +69,7 @@ def color_points_from_colormap(name: str, samples: int = 16) -> list[list[float]
 def sync_transfer_function_ui_state(state) -> None:
     """Keep the transfer-function selector state consistent with TF data."""
     names = sorted((getattr(state, "transfer_functions", None) or {}).keys())
-    state.transfer_function_items = [
-        {"title": name, "value": name} for name in names
-    ]
+    state.transfer_function_items = [{"title": name, "value": name} for name in names]
     active = getattr(state, "active_transfer_function", None)
     if not names:
         state.active_transfer_function = None
@@ -195,7 +195,9 @@ class TransferFunctionManager:
         candidates = [i for i, p in enumerate(points) if abs(float(p[0]) - x) < 1e-6]
         return candidates[0] if len(candidates) == 1 else None
 
-    def move_tf_color_point_at_x(self, array_name: str, original_x: float, new_x: float) -> None:
+    def move_tf_color_point_at_x(
+        self, array_name: str, original_x: float, new_x: float
+    ) -> None:
         """Commit one drag using the point's position at pointer-down.
 
         Resolving by the original x avoids stale indices after insertions/removals.
@@ -308,7 +310,9 @@ class TransferFunctionManager:
         current["opacity"]["control_points"] = points
         self.set_tf_data(array_name, current)
 
-    def remove_tf_opacity_control_point(self, array_name: str, point_index: int) -> None:
+    def remove_tf_opacity_control_point(
+        self, array_name: str, point_index: int
+    ) -> None:
         current = self.ensure(array_name)
         points = [list(point) for point in current["opacity"]["control_points"]]
         point_index = int(point_index)
@@ -353,7 +357,9 @@ def _mapping(value: dict[str, Any], name: str) -> dict[str, Any]:
 
 def _normalize_tf(value: dict[str, Any]) -> dict[str, Any]:
     if set(value) != {"color", "opacity"}:
-        raise ValueError("transfer function must contain exactly color and opacity mappings")
+        raise ValueError(
+            "transfer function must contain exactly color and opacity mappings"
+        )
 
     color = value["color"]
     opacity = value["opacity"]
@@ -399,7 +405,9 @@ def _normalize_opacity_points(value) -> list[list[float]]:
     points[-1][0] = 1.0
     for index in range(1, len(points)):
         if points[index][0] <= points[index - 1][0]:
-            raise ValueError("opacity control-point x coordinates must be strictly increasing")
+            raise ValueError(
+                "opacity control-point x coordinates must be strictly increasing"
+            )
     return points
 
 

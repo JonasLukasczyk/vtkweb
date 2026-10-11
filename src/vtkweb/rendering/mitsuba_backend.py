@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import itertools
 import gc
 import os
+from pathlib import Path
 import math
 import threading
 import time
@@ -32,7 +33,9 @@ from vtkweb.rendering.base import (
 # Temporary unconditional startup diagnostics. Disable with VTKWEB_VPT_TRACE=0.
 VPT_DEBUG = os.environ.get("VTKWEB_VPT_DEBUG", "0").lower() in ("1", "true", "yes")
 
-DEBUG_SHADOW_STORAGE = True  # Print actual GPU array types and logical storage size after baking.
+DEBUG_SHADOW_STORAGE = (
+    True  # Print actual GPU array types and logical storage size after baking.
+)
 
 
 def _debug_shadow_array(label, data, voxel_count, expected_bytes):
@@ -49,7 +52,8 @@ def _debug_shadow_array(label, data, voxel_count, expected_bytes):
         f"[shadow-storage] {label}: class={cls.__module__}.{cls.__name__}, "
         f"dtype={dtype_name}, elements={voxel_count:,}, "
         f"bytes/element={element_bytes}, logical_bytes={actual_bytes}, "
-        f"expected_bytes={expected_bytes:,}", flush=True,
+        f"expected_bytes={expected_bytes:,}",
+        flush=True,
     )
     return element_bytes
 
@@ -71,21 +75,25 @@ class _ShadowUNorm8:
         fx = dr.clip(uv.x * nx - 0.5, 0.0, float(nx - 1))
         fy = dr.clip(uv.y * ny - 0.5, 0.0, float(ny - 1))
         fz = dr.clip(uv.z * nz - 0.5, 0.0, float(nz - 1))
-        x0 = mi.UInt32(dr.floor(fx)); y0 = mi.UInt32(dr.floor(fy)); z0 = mi.UInt32(dr.floor(fz))
+        x0 = mi.UInt32(dr.floor(fx))
+        y0 = mi.UInt32(dr.floor(fy))
+        z0 = mi.UInt32(dr.floor(fz))
         x1 = dr.minimum(x0 + 1, nx - 1)
         y1 = dr.minimum(y0 + 1, ny - 1)
         z1 = dr.minimum(z0 + 1, nz - 1)
-        tx = fx - mi.Float(x0); ty = fy - mi.Float(y0); tz = fz - mi.Float(z0)
+        tx = fx - mi.Float(x0)
+        ty = fy - mi.Float(y0)
+        tz = fz - mi.Float(z0)
 
         def at(x, y, z):
             index = (z * ny + y) * nx + x
             return mi.Float(dr.gather(type(self.data), self.data, index, active))
 
-        a00 = dr.lerp(at(x0,y0,z0), at(x1,y0,z0), tx)
-        a10 = dr.lerp(at(x0,y1,z0), at(x1,y1,z0), tx)
-        a01 = dr.lerp(at(x0,y0,z1), at(x1,y0,z1), tx)
-        a11 = dr.lerp(at(x0,y1,z1), at(x1,y1,z1), tx)
-        value = dr.lerp(dr.lerp(a00,a10,ty), dr.lerp(a01,a11,ty), tz)
+        a00 = dr.lerp(at(x0, y0, z0), at(x1, y0, z0), tx)
+        a10 = dr.lerp(at(x0, y1, z0), at(x1, y1, z0), tx)
+        a01 = dr.lerp(at(x0, y0, z1), at(x1, y0, z1), tx)
+        a11 = dr.lerp(at(x0, y1, z1), at(x1, y1, z1), tx)
+        value = dr.lerp(dr.lerp(a00, a10, ty), dr.lerp(a01, a11, ty), tz)
         return (value * (self.light_count / 255.0),)
 
 
@@ -95,7 +103,9 @@ PREINTEGRATION_SIZE = 512
 # Measured in scalar-voxel spacings along the active axis-aligned light.
 # 0.0 restores the original cached-only path.
 DEBUG_HYBRID_SHADOW_VOXELS = 4.0
-DEBUG_HYBRID_ENV_VOXELS = 2.0  # 0 = six cached lookups; 2 = two voxels of live correction
+DEBUG_HYBRID_ENV_VOXELS = (
+    2.0  # 0 = six cached lookups; 2 = two voxels of live correction
+)
 
 
 PREINTEGRATION_SAMPLES = 48
@@ -103,17 +113,32 @@ PREINTEGRATION_SAMPLES = 48
 
 def _diagnose_drjit_exception(stage, exc):
     """Report nested exceptions on stderr without swallowing the original."""
-    print(f"[Mitsuba DIAGNOSTIC] {stage}: {type(exc).__name__}: {exc!r}", file=sys.stderr, flush=True)
-    traceback.print_exception(type(exc), exc, exc.__traceback__, chain=True, file=sys.stderr)
+    print(
+        f"[Mitsuba DIAGNOSTIC] {stage}: {type(exc).__name__}: {exc!r}",
+        file=sys.stderr,
+        flush=True,
+    )
+    traceback.print_exception(
+        type(exc), exc, exc.__traceback__, chain=True, file=sys.stderr
+    )
     cause = exc.__cause__ or exc.__context__
     if cause is not None:
-        print(f"[Mitsuba DIAGNOSTIC] underlying: {type(cause).__name__}: {cause!r}", file=sys.stderr, flush=True)
-
+        print(
+            f"[Mitsuba DIAGNOSTIC] underlying: {type(cause).__name__}: {cause!r}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _build_gpu_preintegration_tables(
-    mi, dr, mapping, step_ratio, *, size=PREINTEGRATION_SIZE,
-    integration_samples=PREINTEGRATION_SAMPLES, with_centroid=True,
+    mi,
+    dr,
+    mapping,
+    step_ratio,
+    *,
+    size=PREINTEGRATION_SIZE,
+    integration_samples=PREINTEGRATION_SAMPLES,
+    with_centroid=True,
 ):
     """Generate preintegrated extinction and centroid directly on the GPU.
 
@@ -181,17 +206,21 @@ def _build_gpu_preintegration_tables(
     try:
         _k, tau, _optical_depth, weighted_t, weight_sum = dr.while_loop(
             state=(k, total, optical_depth, weighted_t, weight_sum),
-            cond=cond, body=body, label="gpu_preintegration",
+            cond=cond,
+            body=body,
+            label="gpu_preintegration",
         )
     except Exception as exc:
         _diagnose_drjit_exception(
             f"GPU preintegration loop size={size} samples={integration_samples} "
-            f"points={point_count} centroid={with_centroid}", exc
+            f"points={point_count} centroid={with_centroid}",
+            exc,
         )
         raise
     centroid = (
         dr.select(weight_sum > 1.0e-8, weighted_t / dr.maximum(weight_sum, 1.0e-8), 0.5)
-        if with_centroid else None
+        if with_centroid
+        else None
     )
     try:
         if centroid is None:
@@ -210,6 +239,12 @@ class MitsubaViewHandle:
     world_ambient_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     world_ambient_intensity: float = 1.0
     hdri: str = ""
+    hdri_rotation: tuple = (0.0, 0.0, 0.0)
+    hdri_follow_camera: bool = False
+    hdri_show: bool = True
+    hdri_follow_anchor: Any | None = None
+    hdri_frozen_rotation: Any | None = None
+    hdri_environment_revision: int = 0
     directional_lights: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
     width: int = 0
     height: int = 0
@@ -230,6 +265,7 @@ class MitsubaViewHandle:
     cached_scene_key: tuple | None = None
     cached_scene_params: Any | None = None
     cached_sensor_key: tuple | None = None
+    cached_environment_key: tuple | None = None
     integrator: Any | None = None
     integrator_key: tuple | None = None
 
@@ -245,7 +281,9 @@ class VolumeResource:
 class VolumeResources:
     scalar: VolumeResource = field(default_factory=lambda: VolumeResource("f32"))
     shadow: VolumeResource = field(default_factory=lambda: VolumeResource("f32", ()))
-    environment: VolumeResource = field(default_factory=lambda: VolumeResource("f32", ()))
+    environment: VolumeResource = field(
+        default_factory=lambda: VolumeResource("f32", ())
+    )
 
 
 @dataclass
@@ -264,10 +302,10 @@ class MitsubaRepresentationHandle:
     scattering_albedo: float = 0.8
     vpt_max_depth: int = 1
     vpt_anisotropy: float = 0.0
-    vpt_performance_log: bool = False
     vpt_majorant_brick_size: int = 8
     vpt_transmittance_cache: bool = False
     vpt_transmittance_cache_directions: int = 26
+    vpt_transmittance_cache_interpolation: str = "optical_depth"
     vpt_spp_per_frame: int = 1
     opacity_reference_distance: float = 1.0
     shade: bool = False
@@ -335,7 +373,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             break
 
         if selected_variant is None:
-            details = "; ".join(variant_errors) or "no preferred variants reported by Mitsuba"
+            details = (
+                "; ".join(variant_errors) or "no preferred variants reported by Mitsuba"
+            )
             raise RuntimeError(
                 "Mitsuba backend initialization failed: none of the preferred variants "
                 f"could execute ({', '.join(preferred_variants)}). {details}"
@@ -343,6 +383,7 @@ class MitsubaRenderingBackend(RenderingBackend):
 
         try:
             from vtkweb.distributed import context as distributed_context
+
             mpi_rank = int(distributed_context.rank)
         except Exception:
             mpi_rank = 0
@@ -388,7 +429,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             )
         return tensor_type, array_type, texture_type
 
-    def _texture_from_tensor(self, tensor, precision: str, *, interpolation: str = "linear"):
+    def _texture_from_tensor(
+        self, tensor, precision: str, *, interpolation: str = "linear"
+    ):
         _tensor_type, _array_type, texture_type = self._texture_storage_types(precision)
         filter_mode = (
             self.dr.FilterMode.Nearest
@@ -487,7 +530,11 @@ class MitsubaRenderingBackend(RenderingBackend):
         if abs(width) < 1.0e-20:
             width = 1.0
         tau, _centroid = _build_gpu_preintegration_tables(
-            self.mi, self.dr, mapping, 1.0, with_centroid=False,
+            self.mi,
+            self.dr,
+            mapping,
+            1.0,
+            with_centroid=False,
         )
         return (
             self.dr.opaque(self.mi.Float, minimum),
@@ -562,8 +609,9 @@ class MitsubaRenderingBackend(RenderingBackend):
         # same activity interface as the DVR preprocessing operations.
         key = f"vpt-cache:{view_id}"
         if fraction <= 0:
-            started = self._activity_start(key, label, view_id=view_id,
-                                           determinate=True)
+            started = self._activity_start(
+                key, label, view_id=view_id, determinate=True
+            )
             self._vpt_cache_started = (key, started)
         elif fraction >= 1:
             entry = getattr(self, "_vpt_cache_started", None)
@@ -593,6 +641,87 @@ class MitsubaRenderingBackend(RenderingBackend):
                 self._representations.pop(key, None)
             self._views.pop(view_id, None)
 
+    def _uniform_environment(self, snapshot):
+        """Uniform linear radiance used when no HDRI file is provided."""
+        rgb = self._srgb_to_linear(snapshot["world_ambient_color"])
+        intensity = float(snapshot["world_ambient_intensity"])
+        return {
+            "type": "constant",
+            "radiance": {"type": "rgb", "value": [float(c) * intensity for c in rgb]},
+        }
+
+    def _camera_rotation(self, camera):
+        """Camera-to-world orientation with translation removed."""
+        pose = self.mi.ScalarTransform4f().look_at(
+            origin=camera["position"], target=camera["target"], up=camera["up"]
+        )
+        return (
+            self.mi.ScalarTransform4f.translate([-float(v) for v in camera["position"]])
+            @ pose
+        )
+
+    def _manual_hdri_rotation(self, angles):
+        """Compose yaw (Y), pitch (X) and roll (Z), in degrees."""
+        yaw, pitch, roll = angles
+        return (
+            self.mi.ScalarTransform4f.rotate([0, 1, 0], yaw)
+            @ self.mi.ScalarTransform4f.rotate([1, 0, 0], pitch)
+            @ self.mi.ScalarTransform4f.rotate([0, 0, 1], roll)
+        )
+
+    def _set_hdri_follow_camera(self, handle, enabled: bool) -> bool:
+        """Switch tracking modes without changing the current HDRI orientation."""
+        if enabled == handle.hdri_follow_camera:
+            return False
+        camera = {
+            "position": handle.camera_origin,
+            "target": handle.camera_target,
+            "up": handle.camera_up,
+        }
+        pose = self._camera_rotation(camera)
+        manual = self._manual_hdri_rotation(handle.hdri_rotation)
+        if enabled:
+            current = handle.hdri_frozen_rotation
+            if current is None:
+                current = manual
+            handle.hdri_follow_anchor = pose.inverse() @ current @ manual.inverse()
+            handle.hdri_frozen_rotation = None
+        else:
+            handle.hdri_frozen_rotation = pose @ handle.hdri_follow_anchor @ manual
+            handle.hdri_follow_anchor = None
+        handle.hdri_follow_camera = enabled
+        return True
+
+    def _environment_rotation(self, snapshot, camera):
+        manual = self._manual_hdri_rotation(snapshot["hdri_rotation"])
+        if (
+            snapshot["hdri_follow_camera"]
+            and snapshot["hdri_follow_anchor"] is not None
+        ):
+            return (
+                self._camera_rotation(camera) @ snapshot["hdri_follow_anchor"] @ manual
+            )
+        if snapshot["hdri_frozen_rotation"] is not None:
+            return snapshot["hdri_frozen_rotation"]
+        return manual
+
+    @staticmethod
+    def _environment_key(snapshot, camera):
+        """Track transform changes without relying on Python object identities."""
+        return (
+            snapshot["hdri_environment_revision"],
+            (tuple(camera["position"]), tuple(camera["target"]), tuple(camera["up"]))
+            if snapshot["hdri_follow_camera"]
+            else None,
+        )
+
+    @staticmethod
+    def _hdri_file_key(filename: str):
+        if not filename:
+            return None
+        path = Path(filename).expanduser()
+        return (str(path.resolve()), path.stat().st_mtime_ns)
+
     def get_view_property(self, view_id: str, name: str) -> Any:
         with self._state_lock:
             handle = self._views[view_id]
@@ -600,10 +729,20 @@ class MitsubaRenderingBackend(RenderingBackend):
                 return _rgb_to_hex(getattr(handle, name))
             if name == "hdri":
                 return handle.hdri
+            if name == "hdri_rotation":
+                return tuple(handle.hdri_rotation)
+            if name == "hdri_follow_camera":
+                return bool(handle.hdri_follow_camera)
+            if name == "hdri_show":
+                return bool(handle.hdri_show)
             if name == "world_ambient_intensity":
                 return float(handle.world_ambient_intensity)
             if name in DIRECTIONAL_LIGHT_PROPERTY_NAMES:
-                return float(handle.directional_lights[DIRECTIONAL_LIGHT_PROPERTY_NAMES.index(name)])
+                return float(
+                    handle.directional_lights[
+                        DIRECTIONAL_LIGHT_PROPERTY_NAMES.index(name)
+                    ]
+                )
             if name == "camera_focal_length_mm":
                 return float(handle.camera_focal_length_mm)
             if name == "camera_focus_distance":
@@ -630,8 +769,34 @@ class MitsubaRenderingBackend(RenderingBackend):
                 handle.render_revision += 1
                 return
             if name == "hdri":
-                handle.hdri = str(value or "").strip()
-                handle.render_revision += 1
+                filename = str(value or "").strip()
+                if filename != handle.hdri:
+                    handle.hdri = filename
+                    handle.render_revision += 1
+                return
+            if name == "hdri_rotation":
+                angles = tuple(float(v) for v in value)
+                if len(angles) != 3:
+                    raise ValueError("HDRI Rotation requires yaw, pitch and roll")
+                if (
+                    angles != handle.hdri_rotation
+                    or handle.hdri_frozen_rotation is not None
+                ):
+                    handle.hdri_rotation = angles
+                    handle.hdri_frozen_rotation = None
+                    handle.hdri_environment_revision += 1
+                    handle.render_revision += 1
+                return
+            if name == "hdri_follow_camera":
+                if self._set_hdri_follow_camera(handle, bool(value)):
+                    handle.hdri_environment_revision += 1
+                    handle.render_revision += 1
+                return
+            if name == "hdri_show":
+                shown = bool(value)
+                if shown != handle.hdri_show:
+                    handle.hdri_show = shown
+                    handle.render_revision += 1
                 return
             if name == "world_ambient_intensity":
                 handle.world_ambient_intensity = float(value)
@@ -639,7 +804,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 return
             if name in DIRECTIONAL_LIGHT_PROPERTY_NAMES:
                 lights = list(handle.directional_lights)
-                lights[DIRECTIONAL_LIGHT_PROPERTY_NAMES.index(name)] = max(0.0, float(value))
+                lights[DIRECTIONAL_LIGHT_PROPERTY_NAMES.index(name)] = max(
+                    0.0, float(value)
+                )
                 handle.directional_lights = tuple(lights)
                 handle.render_revision += 1
                 return
@@ -743,7 +910,11 @@ class MitsubaRenderingBackend(RenderingBackend):
                 and handle.height > 0
                 and any(
                     current_view_id == view_id
-                    and (rep.kind == "vpt" or rep.scene_object is not None or rep.resources.scalar.texture is not None)
+                    and (
+                        rep.kind == "vpt"
+                        or rep.scene_object is not None
+                        or rep.resources.scalar.texture is not None
+                    )
                     for (_, current_view_id), rep in self._representations.items()
                 )
             )
@@ -777,9 +948,17 @@ class MitsubaRenderingBackend(RenderingBackend):
                 "height": int(handle.height),
                 "background_color": tuple(handle.background_color),
                 "hdri": handle.hdri,
+                "hdri_rotation": tuple(handle.hdri_rotation),
+                "hdri_follow_camera": bool(handle.hdri_follow_camera),
+                "hdri_frozen_rotation": handle.hdri_frozen_rotation,
+                "hdri_follow_anchor": handle.hdri_follow_anchor,
+                "hdri_show": bool(handle.hdri_show),
+                "hdri_environment_revision": handle.hdri_environment_revision,
                 "world_ambient_color": tuple(handle.world_ambient_color),
                 "world_ambient_intensity": float(handle.world_ambient_intensity),
-                "directional_lights": tuple(float(v) for v in handle.directional_lights),
+                "directional_lights": tuple(
+                    float(v) for v in handle.directional_lights
+                ),
                 # Keep strong references to exactly the scene objects represented
                 # by this revision even if the server thread replaces them later.
                 "objects": tuple(
@@ -788,13 +967,16 @@ class MitsubaRenderingBackend(RenderingBackend):
                         representation_id,
                         current_view_id,
                     ), rep in self._representations.items()
-                    if current_view_id == view_id and rep.scene_object is not None
+                    if current_view_id == view_id
+                    and rep.scene_object is not None
                     and rep.kind not in {"dvr", "vpt"}
                 ),
                 "volumes": tuple(
                     rep
-                    for (_representation_id, current_view_id), rep
-                    in self._representations.items()
+                    for (
+                        _representation_id,
+                        current_view_id,
+                    ), rep in self._representations.items()
                     if current_view_id == view_id
                     and rep.kind == "dvr"
                     and rep.resources.scalar.texture is not None
@@ -802,26 +984,34 @@ class MitsubaRenderingBackend(RenderingBackend):
                     and rep.opacity_mapping is not None
                 ),
                 "vpt_volumes": tuple(
-                    rep for (_rid, current_view_id), rep in self._representations.items()
-                    if current_view_id == view_id and rep.kind == "vpt"
+                    rep
+                    for (_rid, current_view_id), rep in self._representations.items()
+                    if current_view_id == view_id
+                    and rep.kind == "vpt"
                     and rep.bounds is not None
                     and rep.resources.scalar.texture is not None
                     and rep.opacity_mapping is not None
                 ),
                 "vpt_bounds": tuple(
-                    rep.bounds for (_rid, current_view_id), rep in self._representations.items()
-                    if current_view_id == view_id and rep.kind == "vpt"
+                    rep.bounds
+                    for (_rid, current_view_id), rep in self._representations.items()
+                    if current_view_id == view_id
+                    and rep.kind == "vpt"
                     and rep.bounds is not None
                 ),
                 "vpt_active": any(
                     current_view_id == view_id and rep.kind == "vpt"
-                    for (_representation_id, current_view_id), rep
-                    in self._representations.items()
+                    for (
+                        _representation_id,
+                        current_view_id,
+                    ), rep in self._representations.items()
                 ),
                 "bounds": tuple(
                     rep.bounds
-                    for (_representation_id, current_view_id), rep
-                    in self._representations.items()
+                    for (
+                        _representation_id,
+                        current_view_id,
+                    ), rep in self._representations.items()
                     if current_view_id == view_id and rep.bounds is not None
                 ),
             }
@@ -890,7 +1080,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             # Share scalar upload and transfer-function metadata with DVR, not
             # its integration or lighting caches.
             volume = self._create_volume_handle(
-                representation, source, previous=previous,
+                representation,
+                source,
+                previous=previous,
                 activity_view_id=activity_view_id,
             )
             volume.kind = "vpt"
@@ -1197,16 +1389,34 @@ class MitsubaRenderingBackend(RenderingBackend):
             color_mapping=transfer_function["color"],
             opacity_mapping=transfer_function["opacity"],
             sample_distance=_volume_sample_distance(data, representation.properties),
-            preintegration_size=int(representation.properties.get("preintegration", "512")),
-            vpt_transport=str(representation.properties.get("vpt_transport", "delta")),
-            scattering_albedo=float(representation.properties.get("scattering_albedo", 0.8)),
+            preintegration_size=int(
+                representation.properties.get("preintegration", "512")
+            ),
+            vpt_transport="delta",
+            scattering_albedo=float(
+                representation.properties.get("scattering_albedo", 0.8)
+            ),
             vpt_max_depth=int(representation.properties.get("vpt_max_depth", 1)),
             vpt_anisotropy=float(representation.properties.get("vpt_anisotropy", 0.0)),
-            vpt_performance_log=bool(representation.properties.get("vpt_performance_log", False)),
-            vpt_majorant_brick_size=int(representation.properties.get("vpt_majorant_brick_size", "8")),
-            vpt_transmittance_cache=bool(representation.properties.get("vpt_transmittance_cache", False)),
-            vpt_transmittance_cache_directions=int(representation.properties.get("vpt_transmittance_cache_directions", "26")),
-            vpt_spp_per_frame=max(1, min(64, int(representation.properties.get("vpt_spp_per_frame", 1)))),
+            vpt_majorant_brick_size=int(
+                representation.properties.get("vpt_majorant_brick_size", "8")
+            ),
+            vpt_transmittance_cache=bool(
+                representation.properties.get("vpt_transmittance_cache", False)
+            ),
+            vpt_transmittance_cache_directions=int(
+                representation.properties.get(
+                    "vpt_transmittance_cache_directions", "26"
+                )
+            ),
+            vpt_transmittance_cache_interpolation=str(
+                representation.properties.get(
+                    "vpt_transmittance_cache_interpolation", "optical_depth"
+                )
+            ),
+            vpt_spp_per_frame=max(
+                1, min(64, int(representation.properties.get("vpt_spp_per_frame", 1)))
+            ),
             opacity_reference_distance=_volume_opacity_reference_distance(data),
             shade=bool(representation.properties.get("shade", True)),
             ambient=float(representation.properties.get("ambient", 0.1)),
@@ -1221,13 +1431,24 @@ class MitsubaRenderingBackend(RenderingBackend):
                 representation.properties.get("scattering_anisotropy", 0.0)
             ),
             environment_scattering_strength=max(
-                0.0, float(representation.properties.get("environment_scattering_strength", 1.0))
+                0.0,
+                float(
+                    representation.properties.get(
+                        "environment_scattering_strength", 1.0
+                    )
+                ),
             ),
             environment_scattering_samples=max(
-                0, int(representation.properties.get("environment_scattering_samples", 0))
+                0,
+                int(representation.properties.get("environment_scattering_samples", 0)),
             ),
             environment_scattering_step_factor=max(
-                1.0, float(representation.properties.get("environment_scattering_step_factor", 4.0))
+                1.0,
+                float(
+                    representation.properties.get(
+                        "environment_scattering_step_factor", 4.0
+                    )
+                ),
             ),
             scalar_range=scalar_range or (0.0, 1.0),
             scalar_values=scalar_values,
@@ -1239,7 +1460,9 @@ class MitsubaRenderingBackend(RenderingBackend):
         if previous is not None:
             handle.resources.shadow.texture = previous.resources.shadow.texture
             handle.resources.shadow.key = previous.resources.shadow.key
-            handle.resources.environment.texture = previous.resources.environment.texture
+            handle.resources.environment.texture = (
+                previous.resources.environment.texture
+            )
             handle.resources.environment.key = previous.resources.environment.key
 
         # Auxiliary textures are built lazily in render_pass() only when the
@@ -1268,7 +1491,8 @@ class MitsubaRenderingBackend(RenderingBackend):
             return
 
         active_indices = tuple(
-            index for index, intensity in enumerate(directional_lights)
+            index
+            for index, intensity in enumerate(directional_lights)
             if float(intensity) > 0.0
         )
         if not active_indices:
@@ -1293,7 +1517,10 @@ class MitsubaRenderingBackend(RenderingBackend):
             PREINTEGRATION_SIZE,
             "gpu-axis-torus-combined-illumination-u8-v1",
         )
-        if volume.resources.shadow.texture and volume.resources.shadow.key == shadow_key:
+        if (
+            volume.resources.shadow.texture
+            and volume.resources.shadow.key == shadow_key
+        ):
             return
 
         nz, ny, nx = (int(v) for v in scalars.shape)
@@ -1307,11 +1534,17 @@ class MitsubaRenderingBackend(RenderingBackend):
             backend_module = importlib.import_module(self.mi.Float.__module__)
             uint8_type = getattr(backend_module, "UInt8", None)
             if uint8_type is None:
-                raise RuntimeError("This Dr.Jit backend does not expose a GPU UInt8 array")
+                raise RuntimeError(
+                    "This Dr.Jit backend does not expose a GPU UInt8 array"
+                )
         else:
-            _tensor_type, storage_type, _texture_type = self._texture_storage_types(precision)
+            _tensor_type, storage_type, _texture_type = self._texture_storage_types(
+                precision
+            )
         preintegration = self._compile_gpu_preintegration_tau(mapping)
-        opacity_reference_distance = max(float(volume.opacity_reference_distance), 1.0e-12)
+        opacity_reference_distance = max(
+            float(volume.opacity_reference_distance), 1.0e-12
+        )
 
         start = time.perf_counter()
         activity_key = f"shadow:{volume.activity_scope}"
@@ -1323,7 +1556,9 @@ class MitsubaRenderingBackend(RenderingBackend):
             details={
                 "shape": (nz, ny, nx),
                 "preintegration": f"{PREINTEGRATION_SIZE}x{PREINTEGRATION_SIZE}",
-                "directions": [DIRECTIONAL_LIGHT_PROPERTY_NAMES[i] for i in active_indices],
+                "directions": [
+                    DIRECTIONAL_LIGHT_PROPERTY_NAMES[i] for i in active_indices
+                ],
                 "dtype": precision,
                 "device": self.mi.variant(),
             },
@@ -1367,13 +1602,25 @@ class MitsubaRenderingBackend(RenderingBackend):
                 # marcher also begins at the sample point (no exterior half-cell).
                 boundary = count - 1 if sign > 0 else 0
                 if axis == 0:
-                    boundary_indices = z_fixed * self.mi.UInt32(ny * nx) + y_fixed * self.mi.UInt32(nx) + self.mi.UInt32(boundary)
+                    boundary_indices = (
+                        z_fixed * self.mi.UInt32(ny * nx)
+                        + y_fixed * self.mi.UInt32(nx)
+                        + self.mi.UInt32(boundary)
+                    )
                 elif axis == 1:
-                    boundary_indices = z_fixed * self.mi.UInt32(ny * nx) + self.mi.UInt32(boundary * nx) + x_fixed
+                    boundary_indices = (
+                        z_fixed * self.mi.UInt32(ny * nx)
+                        + self.mi.UInt32(boundary * nx)
+                        + x_fixed
+                    )
                 else:
                     boundary_indices = local + self.mi.UInt32(boundary * ny * nx)
                 previous = self.dr.gather(self.mi.Float, illumination, boundary_indices)
-                self.dr.scatter(illumination, previous + float(directional_lights[light_index]), boundary_indices)
+                self.dr.scatter(
+                    illumination,
+                    previous + float(directional_lights[light_index]),
+                    boundary_indices,
+                )
                 # One symbolic GPU loop per light: no per-plane dr.eval() or
                 # progress callbacks. Rows remain parallel; planes are sequential.
                 self.dr.eval(illumination)
@@ -1389,24 +1636,60 @@ class MitsubaRenderingBackend(RenderingBackend):
                     segment_end = segment_start + 1
                     if axis == 0:
                         p0 = self._gpu_texture_position_from_indices(
-                            self.mi, self.mi.Float(segment_start), y_fixed, z_fixed, nx, ny, nz
+                            self.mi,
+                            self.mi.Float(segment_start),
+                            y_fixed,
+                            z_fixed,
+                            nx,
+                            ny,
+                            nz,
                         )
                         p1 = self._gpu_texture_position_from_indices(
-                            self.mi, self.mi.Float(segment_end), y_fixed, z_fixed, nx, ny, nz
+                            self.mi,
+                            self.mi.Float(segment_end),
+                            y_fixed,
+                            z_fixed,
+                            nx,
+                            ny,
+                            nz,
                         )
                     elif axis == 1:
                         p0 = self._gpu_texture_position_from_indices(
-                            self.mi, x_fixed, self.mi.Float(segment_start), z_fixed, nx, ny, nz
+                            self.mi,
+                            x_fixed,
+                            self.mi.Float(segment_start),
+                            z_fixed,
+                            nx,
+                            ny,
+                            nz,
                         )
                         p1 = self._gpu_texture_position_from_indices(
-                            self.mi, x_fixed, self.mi.Float(segment_end), z_fixed, nx, ny, nz
+                            self.mi,
+                            x_fixed,
+                            self.mi.Float(segment_end),
+                            z_fixed,
+                            nx,
+                            ny,
+                            nz,
                         )
                     else:
                         p0 = self._gpu_texture_position_from_indices(
-                            self.mi, x_fixed, y_fixed, self.mi.Float(segment_start), nx, ny, nz
+                            self.mi,
+                            x_fixed,
+                            y_fixed,
+                            self.mi.Float(segment_start),
+                            nx,
+                            ny,
+                            nz,
                         )
                         p1 = self._gpu_texture_position_from_indices(
-                            self.mi, x_fixed, y_fixed, self.mi.Float(segment_end), nx, ny, nz
+                            self.mi,
+                            x_fixed,
+                            y_fixed,
+                            self.mi.Float(segment_end),
+                            nx,
+                            ny,
+                            nz,
                         )
                     # Both endpoints use the same voxelized scalar texture as DVR.
                     scalar0 = texture.eval(p0)[0]
@@ -1414,7 +1697,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                     tau_reference = self._gpu_preintegration_tau(
                         scalar0, scalar1, preintegration
                     )
-                    segment_tau = tau_reference * (axis_step / opacity_reference_distance)
+                    segment_tau = tau_reference * (
+                        axis_step / opacity_reference_distance
+                    )
                     running_tau = running_tau + segment_tau
                     if axis == 0:
                         indices = (
@@ -1431,7 +1716,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                     else:
                         indices = local + self.mi.UInt32(k * ny * nx)
                     previous = self.dr.gather(self.mi.Float, illumination, indices)
-                    contribution = float(directional_lights[light_index]) * self.dr.exp(-running_tau)
+                    contribution = float(directional_lights[light_index]) * self.dr.exp(
+                        -running_tau
+                    )
                     self.dr.scatter(illumination, previous + contribution, indices)
                     return k + delta_k, running_tau, illumination
 
@@ -1446,7 +1733,8 @@ class MitsubaRenderingBackend(RenderingBackend):
                     self.dr.eval(illumination)
                 except Exception as exc:
                     _diagnose_drjit_exception(
-                        f"directional illumination loop light_index={light_index} axis={axis}", exc
+                        f"directional illumination loop light_index={light_index} axis={axis}",
+                        exc,
                     )
                     raise
 
@@ -1455,7 +1743,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 # A single byte stores the mean light contribution, not the sum.
                 # At render time, _ShadowUNorm8 restores the sum by multiplying
                 # by the number of active lights (e.g. (0.5+0.6)/2 -> 0.55 -> 1.1).
-                normalized = self.dr.clip(illumination / float(len(active_indices)), 0.0, 1.0)
+                normalized = self.dr.clip(
+                    illumination / float(len(active_indices)), 0.0, 1.0
+                )
                 quantized = uint8_type(self.dr.floor(normalized * 255.0 + 0.5))
                 volume.resources.shadow.texture = _ShadowUNorm8(
                     quantized, (nz, ny, nx, 1), self.mi, self.dr, len(active_indices)
@@ -1463,7 +1753,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 if DEBUG_SHADOW_STORAGE:
                     self.dr.eval(quantized)
                     nvox = nx * ny * nz
-                    itemsize = _debug_shadow_array("quantized backing array", quantized, nvox, nvox)
+                    itemsize = _debug_shadow_array(
+                        "quantized backing array", quantized, nvox, nvox
+                    )
                     print(
                         f"[shadow-storage] storage wrapper={type(volume.resources.shadow.texture).__name__}; "
                         f"backing array is {'8-bit (confirmed)' if itemsize == 1 else 'NOT confirmed 8-bit'}; "
@@ -1474,14 +1766,24 @@ class MitsubaRenderingBackend(RenderingBackend):
             else:
                 stored = storage_type(illumination)
                 volume.resources.shadow.texture = self._make_texture3d_device(
-                    stored, (nz, ny, nx, 1), precision,
+                    stored,
+                    (nz, ny, nx, 1),
+                    precision,
                     interpolation="linear",
                 )
                 if DEBUG_SHADOW_STORAGE:
                     nvox = nx * ny * nz
-                    _debug_shadow_array("floating texture source", stored, nvox, nvox * (2 if precision == "f16" else 4))
-                    print(f"[shadow-storage] texture wrapper={type(volume.resources.shadow.texture).__name__}; "
-                          "GPU texture allocation may have backend-specific padding/representation", flush=True)
+                    _debug_shadow_array(
+                        "floating texture source",
+                        stored,
+                        nvox,
+                        nvox * (2 if precision == "f16" else 4),
+                    )
+                    print(
+                        f"[shadow-storage] texture wrapper={type(volume.resources.shadow.texture).__name__}; "
+                        "GPU texture allocation may have backend-specific padding/representation",
+                        flush=True,
+                    )
             self.dr.eval(illumination)
 
         volume.resources.shadow.key = shadow_key
@@ -1498,11 +1800,7 @@ class MitsubaRenderingBackend(RenderingBackend):
         iz = self.mi.Int32(z)
         iy = self.mi.Int32(y)
         ix = self.mi.Int32(x)
-        valid = (
-            (iz >= 0) & (iz < nz) &
-            (iy >= 0) & (iy < ny) &
-            (ix >= 0) & (ix < nx)
-        )
+        valid = (iz >= 0) & (iz < nz) & (iy >= 0) & (iy < ny) & (ix >= 0) & (ix < nx)
         izc = self.dr.minimum(self.dr.maximum(iz, 0), nz - 1)
         iyc = self.dr.minimum(self.dr.maximum(iy, 0), ny - 1)
         ixc = self.dr.minimum(self.dr.maximum(ix, 0), nx - 1)
@@ -1531,7 +1829,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                     wx = fx if dx else 1.0 - fx
                     result += (
                         self._gpu_gather_zyx(data, shape, z0 + dz, y0 + dy, x0 + dx)
-                        * wz * wy * wx
+                        * wz
+                        * wy
+                        * wx
                     )
         return result
 
@@ -1561,9 +1861,11 @@ class MitsubaRenderingBackend(RenderingBackend):
                 coords[dominant] = self.mi.Int32(fixed_index)
                 coords[o0] = a0 + da
                 coords[o1] = b0 + db
-                result += self._gpu_gather_zyx(
-                    tau, shape, coords[0], coords[1], coords[2]
-                ) * wa * wb
+                result += (
+                    self._gpu_gather_zyx(tau, shape, coords[0], coords[1], coords[2])
+                    * wa
+                    * wb
+                )
         return result
 
     @staticmethod
@@ -1603,8 +1905,11 @@ class MitsubaRenderingBackend(RenderingBackend):
         memory use is limited to tiny direction/LUT metadata and the original
         VTK scalar buffer.
         """
-        if (volume.environment_scattering_samples != 6 or not volume.shade
-                or abs(volume.scattering_anisotropy) >= 0.01):
+        if (
+            volume.environment_scattering_samples != 6
+            or not volume.shade
+            or abs(volume.scattering_anisotropy) >= 0.01
+        ):
             volume.resources.environment.texture = ()
             volume.resources.environment.key = None
             return
@@ -1612,12 +1917,19 @@ class MitsubaRenderingBackend(RenderingBackend):
         bounds = volume.bounds
         scalars = volume.scalar_values
         scalar_texture = volume.resources.scalar.texture
-        if mapping is None or bounds is None or scalars is None or scalar_texture is None:
+        if (
+            mapping is None
+            or bounds is None
+            or scalars is None
+            or scalar_texture is None
+        ):
             return
 
         opacity_signature = (
             tuple(float(v) for v in mapping["range"]),
-            tuple(tuple(float(c) for c in point) for point in mapping["control_points"]),
+            tuple(
+                tuple(float(c) for c in point) for point in mapping["control_points"]
+            ),
         )
         precision = volume.resources.environment.mode
         if precision == "off":
@@ -1638,7 +1950,10 @@ class MitsubaRenderingBackend(RenderingBackend):
             precision,
             "gpu-environment-six-direction-hybrid-preintegrated-v2",
         )
-        if volume.resources.environment.key == key and volume.resources.environment.texture:
+        if (
+            volume.resources.environment.key == key
+            and volume.resources.environment.texture
+        ):
             return
 
         nz, ny, nx = (int(v) for v in scalars.shape)
@@ -1648,7 +1963,9 @@ class MitsubaRenderingBackend(RenderingBackend):
         reduced_shape = (rz, ry, rx)
         reduced_count = int(rz * ry * rx)
         preintegration = self._compile_gpu_preintegration_tau(mapping)
-        opacity_reference_distance = max(float(volume.opacity_reference_distance), 1.0e-12)
+        opacity_reference_distance = max(
+            float(volume.opacity_reference_distance), 1.0e-12
+        )
         directions = _environment_directions(direction_count)
 
         start = time.perf_counter()
@@ -1700,7 +2017,9 @@ class MitsubaRenderingBackend(RenderingBackend):
                 # GPU loop over planes, no Python per-plane launch/sync.
                 for direction_index, direction in enumerate(directions, start=1):
                     d_axis = (direction[2], direction[1], direction[0])
-                    dominant = next(i for i, component in enumerate(d_axis) if component)
+                    dominant = next(
+                        i for i, component in enumerate(d_axis) if component
+                    )
                     sign = int(d_axis[dominant])
                     sizes = reduced_shape
                     others = [i for i in range(3) if i != dominant]
@@ -1721,8 +2040,11 @@ class MitsubaRenderingBackend(RenderingBackend):
                         coords[dominant] = self.mi.UInt32(fixed)
                         coords[o0] = a
                         coords[o1] = b
-                        return (coords[0] * self.mi.UInt32(ry * rx)
-                                + coords[1] * self.mi.UInt32(rx) + coords[2])
+                        return (
+                            coords[0] * self.mi.UInt32(ry * rx)
+                            + coords[1] * self.mi.UInt32(rx)
+                            + coords[2]
+                        )
 
                     def cond(k, running, tau):
                         return k >= 0 if sign > 0 else k < sizes[dominant]
@@ -1749,14 +2071,19 @@ class MitsubaRenderingBackend(RenderingBackend):
                         tau_reference = self._gpu_preintegration_tau(
                             scalar0, scalar1, preintegration
                         )
-                        running = running + tau_reference * (step_length / opacity_reference_distance)
+                        running = running + tau_reference * (
+                            step_length / opacity_reference_distance
+                        )
                         self.dr.scatter(tau, running, here)
                         return k - sign, running, tau
 
                     try:
                         k, running, tau = self.dr.while_loop(
-                            state=(k, running, tau), cond=cond, body=body,
-                            mode="symbolic", label="vtkweb environment axis prefix",
+                            state=(k, running, tau),
+                            cond=cond,
+                            body=body,
+                            mode="symbolic",
+                            label="vtkweb environment axis prefix",
                         )
                         self.dr.eval(tau)
                     except Exception as exc:
@@ -1770,7 +2097,8 @@ class MitsubaRenderingBackend(RenderingBackend):
                         float(direction[0]) * reach / max(sx, 1.0e-12),
                     )
                     tau_end = self._gpu_trilinear_flat(
-                        tau, reduced_shape,
+                        tau,
+                        reduced_shape,
                         self.mi.Float(z_all) + offsets[0],
                         self.mi.Float(y_all) + offsets[1],
                         self.mi.Float(x_all) + offsets[2],
@@ -1778,19 +2106,25 @@ class MitsubaRenderingBackend(RenderingBackend):
                     visibility = self.dr.exp(-self.dr.maximum(tau - tau_end, 0.0))
                     # Store the unweighted directional transmittance. Live and
                     # hybrid paths apply the same 1/6 and phase weighting.
-                    _tensor_type, storage_type, _texture_type = self._texture_storage_types(precision)
+                    _tensor_type, storage_type, _texture_type = (
+                        self._texture_storage_types(precision)
+                    )
                     packed = storage_type(visibility)
                     self.dr.eval(packed)
-                    directional_textures.append(self._make_texture3d_device(
-                        packed, (rz, ry, rx, 1), precision, interpolation="linear"
-                    ))
+                    directional_textures.append(
+                        self._make_texture3d_device(
+                            packed, (rz, ry, rx, 1), precision, interpolation="linear"
+                        )
+                    )
                     print(
                         f"Mitsuba bake environment lighting (device): "
                         f"direction {direction_index}/{len(directions)} finished",
                         flush=True,
                     )
             else:
-                raise ValueError("Scalar environment cache requires exactly six axis directions")
+                raise ValueError(
+                    "Scalar environment cache requires exactly six axis directions"
+                )
 
             volume.resources.environment.texture = tuple(directional_textures)
 
@@ -1825,7 +2159,10 @@ class MitsubaRenderingBackend(RenderingBackend):
             if volume.volumetric_scattering_blending <= 0.0:
                 continue
 
-            if volume.resources.shadow.mode != "off" and abs(volume.scattering_anisotropy) < 0.01:
+            if (
+                volume.resources.shadow.mode != "off"
+                and abs(volume.scattering_anisotropy) < 0.01
+            ):
                 self._build_directional_shadow_field(volume, directional_lights)
             else:
                 volume.resources.shadow.texture = ()
@@ -1876,18 +2213,18 @@ class MitsubaRenderingBackend(RenderingBackend):
                 up=camera["up"],
             ),
             "film": {
-                    "type": "hdrfilm",
-                    # Keep the full logical film size so camera rays match the
-                    # browser viewport, but ask Mitsuba to trace only this
-                    # rank's crop window. The rendered tensor is tile-sized.
-                    "width": full_width,
-                    "height": full_height,
-                    "crop_offset_x": x,
-                    "crop_offset_y": y,
-                    "crop_width": width,
-                    "crop_height": height,
-                    "pixel_format": "rgb",
-                },
+                "type": "hdrfilm",
+                # Keep the full logical film size so camera rays match the
+                # browser viewport, but ask Mitsuba to trace only this
+                # rank's crop window. The rendered tensor is tile-sized.
+                "width": full_width,
+                "height": full_height,
+                "crop_offset_x": x,
+                "crop_offset_y": y,
+                "crop_width": width,
+                "crop_height": height,
+                "pixel_format": "rgb",
+            },
             "sampler": {"type": "independent", "sample_count": spp},
         }
         if dof_enabled:
@@ -1914,19 +2251,8 @@ class MitsubaRenderingBackend(RenderingBackend):
                 "hide_emitters": True,
             },
             "sensor": sensor_dict,
-            "environment": {
-                "type": "constant",
-                "radiance": {
-                    "type": "rgb",
-                    "value": (
-                        np.asarray(
-                            self._srgb_to_linear(snapshot["world_ambient_color"]),
-                            dtype=np.float32,
-                        )
-                        * snapshot["world_ambient_intensity"]
-                    ).tolist(),
-                },
-            },
+            # Without an HDRI file, illuminate uniformly using world ambient radiance.
+            "environment": self._uniform_environment(snapshot),
         }
 
         # VPT hello world: an empty scene with a visible environment.
@@ -1934,16 +2260,24 @@ class MitsubaRenderingBackend(RenderingBackend):
         if snapshot["vpt_active"]:
             scene_dict["integrator"]["hide_emitters"] = False
 
+        # A specified HDRI replaces the uniform ambient emitter. Otherwise,
+        # World Ambient Color and Ambient Intensity provide constant radiance
+        # from every direction, including for VPT environment sampling.
         # Mitsuba envmap uses a lat-long HDR texture and builds its own
         # importance distribution. Loading the scene uploads the texture to
         # the active backend; the structural scene key controls reloads.
         if snapshot["hdri"]:
             from pathlib import Path
+
             hdri_file = Path(snapshot["hdri"]).expanduser().resolve()
             if not hdri_file.is_file():
                 raise FileNotFoundError(f"HDRI file does not exist: {hdri_file}")
+            transform = self._environment_rotation(snapshot, camera)
             scene_dict["environment"] = {
-                "type": "envmap", "filename": str(hdri_file),
+                "type": "envmap",
+                "filename": str(hdri_file),
+                "to_world": transform,
+                "scale": float(snapshot["world_ambient_intensity"]),
             }
 
         # Directional-light values are intentionally unitless vtkweb intensities.
@@ -1982,7 +2316,10 @@ class MitsubaRenderingBackend(RenderingBackend):
         # pose/focus/aperture are exposed Mitsuba sensor parameters and can be
         # updated in place on the cached scene.
         scene_key = (
-            tuple((kind, representation_id, id(scene_object)) for kind, representation_id, scene_object in snapshot["objects"]),
+            tuple(
+                (kind, representation_id, id(scene_object))
+                for kind, representation_id, scene_object in snapshot["objects"]
+            ),
             bool(snapshot["vpt_active"]),
             snapshot["vpt_bounds"],
             full_size,
@@ -1992,17 +2329,19 @@ class MitsubaRenderingBackend(RenderingBackend):
             int(spp),
             tuple(float(v) for v in snapshot["world_ambient_color"]),
             float(snapshot["world_ambient_intensity"]),
-            (str(__import__("pathlib").Path(snapshot["hdri"]).expanduser().resolve()),
-             __import__("os").stat(__import__("pathlib").Path(snapshot["hdri"]).expanduser()).st_mtime_ns)
-            if snapshot["hdri"] else None,
-            tuple(float(v) for v in snapshot["directional_lights"]) if snapshot["objects"] else (),
+            self._hdri_file_key(snapshot["hdri"]),
+            tuple(float(v) for v in snapshot["directional_lights"])
+            if snapshot["objects"]
+            else (),
         )
 
         # VPT currently contributes only the environment. Keep other scene
         # objects (including outlines) visible rather than deleting them.
         # VPT medium geometry and stochastic transport remain future work.
 
-        self._ensure_configured_volume_resources(snapshot["volumes"], snapshot["directional_lights"])
+        self._ensure_configured_volume_resources(
+            snapshot["volumes"], snapshot["directional_lights"]
+        )
 
         # Scene creation and render/materialization all touch Dr.Jit runtime
         # state. Keep them serialized across Mitsuba views within this rank.
@@ -2039,7 +2378,11 @@ class MitsubaRenderingBackend(RenderingBackend):
                 )
 
             if handle.cached_scene is None or handle.cached_scene_key != scene_key:
-                reason = "initial" if handle.cached_scene is None else "structural-key-change"
+                reason = (
+                    "initial"
+                    if handle.cached_scene is None
+                    else "structural-key-change"
+                )
                 print(
                     f"[Mitsuba] scene rebuild: view={view_id} reason={reason} "
                     f"objects={len(snapshot['objects'])} volumes={len(snapshot['volumes'])} "
@@ -2050,33 +2393,61 @@ class MitsubaRenderingBackend(RenderingBackend):
                 handle.cached_scene_key = scene_key
                 handle.cached_scene_params = self.mi.traverse(handle.cached_scene)
                 handle.cached_sensor_key = sensor_key
-            elif handle.cached_sensor_key != sensor_key:
+                handle.cached_environment_key = self._environment_key(snapshot, camera)
+            else:
                 # Camera pose is traversable for both sensor types. Thin-lens
                 # focus/aperture are updated only while DOF is actually enabled.
                 params = handle.cached_scene_params
                 if params is None:
                     params = self.mi.traverse(handle.cached_scene)
                     handle.cached_scene_params = params
-                params["sensor.to_world"] = self.mi.ScalarTransform4f().look_at(
-                    origin=camera["position"],
-                    target=camera["target"],
-                    up=camera["up"],
-                )
-                if dof_enabled:
-                    params["sensor.focus_distance"] = float(focus_distance)
-                    params["sensor.aperture_radius"] = aperture_size
-                params.update()
-                handle.cached_sensor_key = sensor_key
+                changed = False
+                if handle.cached_sensor_key != sensor_key:
+                    params["sensor.to_world"] = self.mi.ScalarTransform4f().look_at(
+                        origin=camera["position"],
+                        target=camera["target"],
+                        up=camera["up"],
+                    )
+                    if dof_enabled:
+                        params["sensor.focus_distance"] = float(focus_distance)
+                        params["sensor.aperture_radius"] = aperture_size
+                    handle.cached_sensor_key = sensor_key
+                    changed = True
+                environment_key = self._environment_key(snapshot, camera)
+                if (
+                    snapshot["hdri"]
+                    and handle.cached_environment_key != environment_key
+                ):
+                    params["environment.to_world"] = self._environment_rotation(
+                        snapshot, camera
+                    )
+                    changed = True
+                if changed:
+                    params.update()
+                handle.cached_environment_key = environment_key
             scene = handle.cached_scene
 
             if snapshot["vpt_active"]:
                 seed = max(1, int(render_seed) + 1)
-                vpt_key = tuple((id(v.resources.scalar.texture), v.bounds,
-                    repr(v.opacity_mapping), v.sample_distance,
-                    v.opacity_reference_distance, v.vpt_transport, v.scattering_albedo, v.vpt_max_depth, v.vpt_anisotropy,
-                    repr(v.color_mapping), v.vpt_majorant_brick_size, v.vpt_transmittance_cache, v.vpt_transmittance_cache_directions) for v in snapshot["vpt_volumes"])
-                vpt_perf_enabled = any(v.vpt_performance_log for v in snapshot["vpt_volumes"])
-                vpt_build_start = time.perf_counter() if vpt_perf_enabled else None
+                vpt_key = tuple(
+                    (
+                        id(v.resources.scalar.texture),
+                        v.bounds,
+                        repr(v.opacity_mapping),
+                        v.sample_distance,
+                        v.opacity_reference_distance,
+                        v.vpt_transport,
+                        v.scattering_albedo,
+                        v.vpt_max_depth,
+                        v.vpt_anisotropy,
+                        repr(v.color_mapping),
+                        v.vpt_majorant_brick_size,
+                        v.vpt_transmittance_cache,
+                        v.vpt_transmittance_cache_directions,
+                        v.vpt_transmittance_cache_interpolation,
+                    )
+                    for v in snapshot["vpt_volumes"]
+                )
                 vpt_rebuild = getattr(handle, "vpt_diagnostic_key", None) != vpt_key
                 if vpt_rebuild:
                     # Release the previous integrator before constructing GPU caches.
@@ -2088,12 +2459,25 @@ class MitsubaRenderingBackend(RenderingBackend):
                     valid_majorant_keys = set()
                     for v in snapshot["vpt_volumes"]:
                         scalar_shape = tuple(np.asarray(v.scalar_values).shape)
-                        valid_directional_keys.add((v.resources.scalar.key, scalar_shape,
-                            repr(v.opacity_mapping), float(v.opacity_reference_distance),
-                            tuple(v.bounds), int(v.vpt_transmittance_cache_directions)))
-                        valid_majorant_keys.add((v.resources.scalar.key, scalar_shape,
-                            repr(v.opacity_mapping), float(v.opacity_reference_distance),
-                            max(4, min(16, int(v.vpt_majorant_brick_size)))))
+                        valid_directional_keys.add(
+                            (
+                                v.resources.scalar.key,
+                                scalar_shape,
+                                repr(v.opacity_mapping),
+                                float(v.opacity_reference_distance),
+                                tuple(v.bounds),
+                                int(v.vpt_transmittance_cache_directions),
+                            )
+                        )
+                        valid_majorant_keys.add(
+                            (
+                                v.resources.scalar.key,
+                                scalar_shape,
+                                repr(v.opacity_mapping),
+                                float(v.opacity_reference_distance),
+                                max(4, min(16, int(v.vpt_majorant_brick_size))),
+                            )
+                        )
                     for stale_key in tuple(_VPT_TRANSMITTANCE_CACHE):
                         if stale_key not in valid_directional_keys:
                             del _VPT_TRANSMITTANCE_CACHE[stale_key]
@@ -2101,58 +2485,83 @@ class MitsubaRenderingBackend(RenderingBackend):
                         if stale_key not in valid_majorant_keys:
                             del _VPT_MAJORANT_CACHE[stale_key]
                     gc.collect()
-                    use_delta = all(v.vpt_transport == "delta" for v in snapshot["vpt_volumes"])
+                    use_delta = all(
+                        v.vpt_transport == "delta" for v in snapshot["vpt_volumes"]
+                    )
                     if VPT_DEBUG:
-                        print(f"[VPT DEBUG] build integrator: transport={'delta' if use_delta else 'deterministic'} volumes={len(snapshot['vpt_volumes'])} spp={spp} seed={seed}", flush=True)
+                        print(
+                            f"[VPT DEBUG] build integrator: transport={'delta' if use_delta else 'deterministic'} volumes={len(snapshot['vpt_volumes'])} spp={spp} seed={seed}",
+                            flush=True,
+                        )
                         for vi, v in enumerate(snapshot["vpt_volumes"]):
-                            print(f"[VPT DEBUG] volume[{vi}]: bounds={v.bounds} reference_distance={v.opacity_reference_distance} texture={type(v.resources.scalar.texture).__name__}", flush=True)
+                            print(
+                                f"[VPT DEBUG] volume[{vi}]: bounds={v.bounds} reference_distance={v.opacity_reference_distance} texture={type(v.resources.scalar.texture).__name__}",
+                                flush=True,
+                            )
                     vpt_activity_key = f"vpt-kernel:{view_id}"
                     vpt_activity_started = self._activity_start(
-                        vpt_activity_key, "Preparing VPT rendering kernel",
+                        vpt_activity_key,
+                        "Preparing VPT rendering kernel",
                         view_id=view_id,
-                        details={"volumes": len(snapshot["vpt_volumes"]),
-                                 "transmittance_cache": any(v.vpt_transmittance_cache for v in snapshot["vpt_volumes"])},
+                        details={
+                            "volumes": len(snapshot["vpt_volumes"]),
+                            "transmittance_cache": any(
+                                v.vpt_transmittance_cache
+                                for v in snapshot["vpt_volumes"]
+                            ),
+                        },
                         determinate=False,
                     )
                     try:
                         handle.vpt_diagnostic_integrator = (
                             _make_vpt_delta_integrator(
-                                self.mi, self.dr, snapshot["vpt_volumes"],
-                                progress=lambda label, fraction: self._vpt_cache_activity(view_id, label, fraction),
+                                self.mi,
+                                self.dr,
+                                snapshot["vpt_volumes"],
+                                progress=lambda label, fraction: (
+                                    self._vpt_cache_activity(view_id, label, fraction)
+                                ),
                             )
                             if use_delta
-                            else _make_vpt_extinction_integrator(self.mi, self.dr, snapshot["vpt_volumes"])
+                            else _make_vpt_extinction_integrator(
+                                self.mi, self.dr, snapshot["vpt_volumes"]
+                            )
                         )
                         handle.vpt_diagnostic_key = vpt_key
                     finally:
                         self._activity_done(vpt_activity_key, vpt_activity_started)
-                if vpt_perf_enabled:
-                    print(f"[VPT PERF] integrator_rebuilt={vpt_rebuild} "
-                          f"integrator_prepare_ms={(time.perf_counter()-vpt_build_start)*1000:.3f}", flush=True)
                 try:
-                    vpt_render_start = time.perf_counter()
+                    vpt_integrator = handle.vpt_diagnostic_integrator
+                    vpt_integrator.show_hdri = snapshot["hdri_show"]
+                    vpt_integrator.background_color = self.mi.Color3f(
+                        *self._srgb_to_linear(snapshot["background_color"])
+                    )
                     image = self.mi.render(
-                        scene, sensor=scene.sensors()[0], spp=spp, seed=seed,
-                        integrator=handle.vpt_diagnostic_integrator,
+                        scene,
+                        sensor=scene.sensors()[0],
+                        spp=spp,
+                        seed=seed,
+                        integrator=vpt_integrator,
                     )
                     # Deliberately no extra dr.sync_thread(): the NumPy readback
                     # below is the natural synchronization point. This keeps
                     # diagnostic timing from changing the execution schedule.
                     result_image = np.asarray(image, dtype=np.float32)[..., :3].copy()
-                    if vpt_perf_enabled:
-                        elapsed_ms = (time.perf_counter()-vpt_render_start)*1000
-                        print(f"[VPT PERF] render_and_readback_ms={elapsed_ms:.3f} "
-                              f"spp={spp} pixels={result_image.shape[0]*result_image.shape[1]} "
-                              f"ms_per_megapixel_spp={elapsed_ms/(max(spp,1)*max(result_image.shape[0]*result_image.shape[1],1)/1e6):.3f}", flush=True)
                     return result_image
                 except Exception as exc:
                     import traceback
-                    print(f"[VPT ERROR] mi.render failed: {type(exc).__name__}: {exc}", flush=True)
+
+                    print(
+                        f"[VPT ERROR] mi.render failed: {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
                     traceback.print_exception(type(exc), exc, exc.__traceback__)
                     cause = exc.__cause__ or exc.__context__
                     if cause is not None:
                         print("[VPT ERROR] nested exception:", flush=True)
-                        traceback.print_exception(type(cause), cause, cause.__traceback__)
+                        traceback.print_exception(
+                            type(cause), cause, cause.__traceback__
+                        )
                     raise
 
             # Auxiliary texture presence is a Python-time specialization: each
@@ -2163,9 +2572,16 @@ class MitsubaRenderingBackend(RenderingBackend):
                 (
                     id(volume.resources.scalar.texture),
                     tuple(float(v) for v in volume.bounds),
-                    (volume.resources.shadow.mode, type(volume.resources.shadow.texture).__name__)
-                    if volume.resources.shadow.texture else None,
-                    tuple(type(field).__name__ for field in volume.resources.environment.texture),
+                    (
+                        volume.resources.shadow.mode,
+                        type(volume.resources.shadow.texture).__name__,
+                    )
+                    if volume.resources.shadow.texture
+                    else None,
+                    tuple(
+                        type(field).__name__
+                        for field in volume.resources.environment.texture
+                    ),
                     bool(volume.shade),
                     int(volume.environment_scattering_samples),
                     bool(float(volume.volumetric_scattering_blending) > 0.0),
@@ -2176,10 +2592,15 @@ class MitsubaRenderingBackend(RenderingBackend):
                 for volume in snapshot["volumes"]
             )
             active_light_indices = tuple(
-                index for index, intensity in enumerate(snapshot["directional_lights"])
+                index
+                for index, intensity in enumerate(snapshot["directional_lights"])
                 if float(intensity) > 0.0
             )
-            integrator_key = (structural_volume_key, bool(snapshot["objects"]), active_light_indices)
+            integrator_key = (
+                structural_volume_key,
+                bool(snapshot["objects"]),
+                active_light_indices,
+            )
             ambient_light = tuple(
                 component * snapshot["world_ambient_intensity"]
                 for component in self._srgb_to_linear(snapshot["world_ambient_color"])
@@ -2193,15 +2614,19 @@ class MitsubaRenderingBackend(RenderingBackend):
                     details={
                         "volumes": len(snapshot["volumes"]),
                         "surfaces": bool(snapshot["objects"]),
-                        "shadow": [v.resources.shadow.mode for v in snapshot["volumes"]],
-                        "environment": [v.resources.environment.mode for v in snapshot["volumes"]],
+                        "shadow": [
+                            v.resources.shadow.mode for v in snapshot["volumes"]
+                        ],
+                        "environment": [
+                            v.resources.environment.mode for v in snapshot["volumes"]
+                        ],
                     },
                     determinate=False,
                 )
                 print(
                     f"[Mitsuba] integrator rebuild: view={view_id} "
                     f"volumes={len(snapshot['volumes'])} surfaces={bool(snapshot['objects'])} "
-                    f"resources={[ (v.resources.shadow.mode, v.resources.environment.mode) for v in snapshot['volumes'] ]}",
+                    f"resources={[(v.resources.shadow.mode, v.resources.environment.mode) for v in snapshot['volumes']]}",
                     flush=True,
                 )
                 direct_volumes = tuple(
@@ -2354,7 +2779,10 @@ class MitsubaRenderingBackend(RenderingBackend):
                 render_seed=dvr_seed,
             )
             self._accumulate_pass_worker(
-                handle, sample, spp=1, render_key=render_key,
+                handle,
+                sample,
+                spp=1,
+                render_key=render_key,
             )
             frame = self._resolved_accumulated_frame_worker(handle)
             return frame
@@ -2378,7 +2806,10 @@ class MitsubaRenderingBackend(RenderingBackend):
             render_seed=surface_seed,
         )
         self._accumulate_pass_worker(
-            handle, sample, spp=vpt_spp, render_key=render_key,
+            handle,
+            sample,
+            spp=vpt_spp,
+            render_key=render_key,
         )
         frame = self._resolved_accumulated_frame_worker(handle)
         return frame
@@ -2458,14 +2889,11 @@ def _evaluate_transfer_function(
     positions = points[:, 0]
     rgb = np.column_stack(
         [
-            np.interp(
-                normalized, positions, np.clip(points[:, channel], 0.0, 1.0)
-            )
+            np.interp(normalized, positions, np.clip(points[:, channel], 0.0, 1.0))
             for channel in (1, 2, 3)
         ]
     )
     return np.asarray(rgb, dtype=np.float32)
-
 
 
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
@@ -2488,9 +2916,14 @@ def _environment_directions(count: int) -> tuple[tuple[float, float, float], ...
     """Return the deterministic sphere directions shared by baked/live lighting."""
     count = max(1, int(count))
     if count == 6:
-        return ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
-                (0.0, 1.0, 0.0), (0.0, -1.0, 0.0),
-                (0.0, 0.0, 1.0), (0.0, 0.0, -1.0))
+        return (
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        )
     golden_angle = math.pi * (3.0 - math.sqrt(5.0))
     directions = []
     for index in range(count):
@@ -2538,9 +2971,13 @@ def _make_direct_volume_type(
         ) -> None:
             self.scalar_volume = scalar_volume
             self.bounds = tuple(map(float, bounds))
-            self.sample_distance = dr.opaque(mi.Float, max(float(sample_distance), 1.0e-12))
+            self.sample_distance = dr.opaque(
+                mi.Float, max(float(sample_distance), 1.0e-12)
+            )
             self.preintegration_size = int(preintegration_size)
-            self.opacity_reference_distance = max(float(opacity_reference_distance), 1.0e-12)
+            self.opacity_reference_distance = max(
+                float(opacity_reference_distance), 1.0e-12
+            )
             self.shade = bool(shade)
             self.ambient = dr.opaque(mi.Float, max(0.0, float(ambient)))
             self.diffuse = dr.opaque(mi.Float, max(0.0, float(diffuse)))
@@ -2556,7 +2993,8 @@ def _make_direct_volume_type(
             self.scalar_range = tuple(map(float, scalar_range))
             self.ambient_light = mi.Color3f(*map(float, ambient_light))
             self.light_indices = tuple(
-                index for index, intensity in enumerate(directional_lights)
+                index
+                for index, intensity in enumerate(directional_lights)
                 if float(intensity) > 0.0
             )
             self.light_directions = tuple(
@@ -2568,11 +3006,16 @@ def _make_direct_volume_type(
                 for index in self.light_indices
             )
             self.total_light_intensity = dr.opaque(
-                mi.Float, sum(float(directional_lights[index]) for index in self.light_indices)
+                mi.Float,
+                sum(float(directional_lights[index]) for index in self.light_indices),
             )
             self.shadow_volumes = shadow_volume
-            self.hybrid_shadow_voxels = dr.opaque(mi.Float, max(0.0, DEBUG_HYBRID_SHADOW_VOXELS))
-            self.hybrid_env_voxels = dr.opaque(mi.Float, max(0.0, DEBUG_HYBRID_ENV_VOXELS))
+            self.hybrid_shadow_voxels = dr.opaque(
+                mi.Float, max(0.0, DEBUG_HYBRID_SHADOW_VOXELS)
+            )
+            self.hybrid_env_voxels = dr.opaque(
+                mi.Float, max(0.0, DEBUG_HYBRID_ENV_VOXELS)
+            )
             self.environment_scattering_strength = dr.opaque(
                 mi.Float, max(0.0, float(environment_scattering_strength))
             )
@@ -2582,20 +3025,25 @@ def _make_direct_volume_type(
             self.environment_scattering_step_factor = max(
                 1.0, float(environment_scattering_step_factor)
             )
-            self.environment_lighting_volumes = tuple(environment_lighting_volumes or ())
+            self.environment_lighting_volumes = tuple(
+                environment_lighting_volumes or ()
+            )
             self._color_mapping_signature = self._mapping_signature(color_mapping)
             self._opacity_mapping_signature = self._mapping_signature(opacity_mapping)
             self.color = self._compile_mapping(color_mapping)
             self.opacity = self._compile_mapping(opacity_mapping)
-            self._preintegration_ratio = max(float(sample_distance), 1.0e-12) / self.opacity_reference_distance
+            self._preintegration_ratio = (
+                max(float(sample_distance), 1.0e-12) / self.opacity_reference_distance
+            )
             self.preintegration = (
                 self._compile_preintegration(
-                    opacity_mapping, self._preintegration_ratio, self.preintegration_size
+                    opacity_mapping,
+                    self._preintegration_ratio,
+                    self.preintegration_size,
                 )
                 if has_preintegration
                 else None
             )
-
 
         @staticmethod
         def _mapping_signature(mapping):
@@ -2607,9 +3055,7 @@ def _make_direct_volume_type(
                 ),
             )
 
-        def update_runtime(
-            self, volume, *, ambient_light, directional_lights
-        ) -> None:
+        def update_runtime(self, volume, *, ambient_light, directional_lights) -> None:
             """Refresh non-structural inputs without replacing the integrator.
 
             Structural inputs are deliberately handled by the compact cache key
@@ -2626,13 +3072,20 @@ def _make_direct_volume_type(
                 self.opacity = self._compile_mapping(volume.opacity_mapping)
                 self._opacity_mapping_signature = opacity_signature
 
-            self.sample_distance = dr.opaque(mi.Float, max(float(volume.sample_distance), 1.0e-12))
+            self.sample_distance = dr.opaque(
+                mi.Float, max(float(volume.sample_distance), 1.0e-12)
+            )
             self.preintegration_size = int(volume.preintegration_size)
             self.opacity_reference_distance = max(
                 float(volume.opacity_reference_distance), 1.0e-12
             )
-            preintegration_ratio = max(float(volume.sample_distance), 1.0e-12) / self.opacity_reference_distance
-            ratio_changed = abs(preintegration_ratio - self._preintegration_ratio) > 1.0e-6
+            preintegration_ratio = (
+                max(float(volume.sample_distance), 1.0e-12)
+                / self.opacity_reference_distance
+            )
+            ratio_changed = (
+                abs(preintegration_ratio - self._preintegration_ratio) > 1.0e-6
+            )
             if has_preintegration and (
                 opacity_changed
                 or ratio_changed
@@ -2640,7 +3093,9 @@ def _make_direct_volume_type(
                 or self.preintegration[1] != self.preintegration_size
             ):
                 self.preintegration = self._compile_preintegration(
-                    volume.opacity_mapping, preintegration_ratio, self.preintegration_size
+                    volume.opacity_mapping,
+                    preintegration_ratio,
+                    self.preintegration_size,
                 )
             self._preintegration_ratio = preintegration_ratio
             self.ambient = dr.opaque(mi.Float, max(0.0, float(volume.ambient)))
@@ -2661,7 +3116,8 @@ def _make_direct_volume_type(
                 for index in self.light_indices
             )
             self.total_light_intensity = dr.opaque(
-                mi.Float, sum(float(directional_lights[index]) for index in self.light_indices)
+                mi.Float,
+                sum(float(directional_lights[index]) for index in self.light_indices),
             )
             self.environment_scattering_strength = dr.opaque(
                 mi.Float, max(0.0, float(volume.environment_scattering_strength))
@@ -2670,8 +3126,12 @@ def _make_direct_volume_type(
                 1.0, float(volume.environment_scattering_step_factor)
             )
             self.shadow_volumes = volume.resources.shadow.texture
-            self.hybrid_shadow_voxels = dr.opaque(mi.Float, max(0.0, DEBUG_HYBRID_SHADOW_VOXELS))
-            self.hybrid_env_voxels = dr.opaque(mi.Float, max(0.0, DEBUG_HYBRID_ENV_VOXELS))
+            self.hybrid_shadow_voxels = dr.opaque(
+                mi.Float, max(0.0, DEBUG_HYBRID_SHADOW_VOXELS)
+            )
+            self.hybrid_env_voxels = dr.opaque(
+                mi.Float, max(0.0, DEBUG_HYBRID_ENV_VOXELS)
+            )
             self.environment_lighting_volumes = tuple(
                 volume.resources.environment.texture or ()
             )
@@ -2695,7 +3155,9 @@ def _make_direct_volume_type(
             return (
                 dr.opaque(mi.Float, minimum),
                 dr.opaque(mi.Float, 1.0 / width),
-                tuple(mi.Float(np.ascontiguousarray(lut[:, c])) for c in range(channels)),
+                tuple(
+                    mi.Float(np.ascontiguousarray(lut[:, c])) for c in range(channels)
+                ),
                 size,
             )
 
@@ -2708,7 +3170,10 @@ def _make_direct_volume_type(
         ):
             """Compile interval extinction and contribution-centroid tables."""
             tau, centroid = _build_gpu_preintegration_tables(
-                mi, dr, mapping, step_ratio,
+                mi,
+                dr,
+                mapping,
+                step_ratio,
                 size=size,
                 integration_samples=integration_samples,
             )
@@ -2832,13 +3297,20 @@ def _make_direct_volume_type(
             return dr.maximum(dr.minimum(tx, dr.minimum(ty, tz)), 0.0)
 
         def _segment_preintegration(
-            self, start_position, direction, step_distance, active=True,
+            self,
+            start_position,
+            direction,
+            step_distance,
+            active=True,
             scalar_start=None,
         ):
             """Pre-integrate extinction, optionally reusing the start scalar."""
             end_position = start_position + direction * step_distance
-            scalar0 = (self._sample_scalar(start_position, active)
-                       if scalar_start is None else scalar_start)
+            scalar0 = (
+                self._sample_scalar(start_position, active)
+                if scalar_start is None
+                else scalar_start
+            )
             scalar1 = self._sample_scalar(end_position, active)
             x0 = self._normalized_scalar(scalar0, self.opacity)
             x1 = self._normalized_scalar(scalar1, self.opacity)
@@ -2865,12 +3337,19 @@ def _make_direct_volume_type(
             return alpha, scalar, position, scalar
 
         def _segment_eval(
-            self, start_position, direction, step_distance, active=True,
+            self,
+            start_position,
+            direction,
+            step_distance,
+            active=True,
             scalar_start=None,
         ):
             if has_preintegration:
                 return self._segment_preintegration(
-                    start_position, direction, step_distance, active,
+                    start_position,
+                    direction,
+                    step_distance,
+                    active,
                     scalar_start=scalar_start,
                 )
             return self._segment_point_sample(
@@ -2904,12 +3383,18 @@ def _make_direct_volume_type(
                 self._distance_to_volume_exit(position, direction),
             )
             if distance_limit is not None:
-                max_distance = dr.minimum(max_distance, dr.maximum(mi.Float(distance_limit), 0.0))
+                max_distance = dr.minimum(
+                    max_distance, dr.maximum(mi.Float(distance_limit), 0.0)
+                )
             t = mi.Float(0.0)
             transmission = mi.Float(1.0)
             first_segment = mi.Bool(True)
             march_active = active & (max_distance > 0.0)
-            scalar_start = self._sample_scalar(position, march_active) if has_preintegration else mi.Float(0.0)
+            scalar_start = (
+                self._sample_scalar(position, march_active)
+                if has_preintegration
+                else mi.Float(0.0)
+            )
 
             def loop_cond(t, transmission, first_segment, march_active, scalar_start):
                 del t, transmission, first_segment, scalar_start
@@ -2923,7 +3408,10 @@ def _make_direct_volume_type(
                 current_step = dr.select(use_phase_step, phase_step, regular_step)
                 segment_start = position + direction * t
                 alpha, _scalar, _position, scalar_end = self._segment_eval(
-                    segment_start, direction, current_step, march_active,
+                    segment_start,
+                    direction,
+                    current_step,
+                    march_active,
                     scalar_start=scalar_start if has_preintegration else None,
                 )
                 segment_transmission = 1.0 - alpha
@@ -2940,12 +3428,20 @@ def _make_direct_volume_type(
                 return t, transmission, first_segment, march_active, scalar_start
 
             try:
-                t, transmission, first_segment, march_active, scalar_start = dr.while_loop(
-                    state=(t, transmission, first_segment, march_active, scalar_start),
-                    cond=loop_cond,
-                    body=loop_body,
-                    mode="symbolic",
-                    label="vtkweb live secondary volume march",
+                t, transmission, first_segment, march_active, scalar_start = (
+                    dr.while_loop(
+                        state=(
+                            t,
+                            transmission,
+                            first_segment,
+                            march_active,
+                            scalar_start,
+                        ),
+                        cond=loop_cond,
+                        body=loop_body,
+                        mode="symbolic",
+                        label="vtkweb live secondary volume march",
+                    )
                 )
             except Exception as exc:
                 _diagnose_drjit_exception("live secondary volume march", exc)
@@ -2955,16 +3451,27 @@ def _make_direct_volume_type(
                 return transmission, position + direction * t, t
             return transmission
 
-        def _volume_shadow(self, position, light_direction, light_index,
-                           sample_index, march_phase, active=True):
+        def _volume_shadow(
+            self,
+            position,
+            light_direction,
+            light_index,
+            sample_index,
+            march_phase,
+            active=True,
+        ):
             """Live shadow fallback (used when no baked illumination exists)."""
             return self._live_transmittance(
-                position, dr.normalize(light_direction),
+                position,
+                dr.normalize(light_direction),
                 step_distance=self.sample_distance,
-                march_phase=march_phase, active=active,
+                march_phase=march_phase,
+                active=active,
             )
 
-        def _hybrid_cached_shadow(self, position, light_direction, march_phase, active=True):
+        def _hybrid_cached_shadow(
+            self, position, light_direction, march_phase, active=True
+        ):
             """Live first, then read the baseline combined illumination cache.
 
             Valid only with exactly one active directional light, where the
@@ -2976,13 +3483,21 @@ def _make_direct_volume_type(
             nz, ny, nx = shape[-4:-1] if len(shape) >= 4 else shape[:3]
             # Light directions in this renderer are axis aligned. Convert the
             # debug voxel count to world-space distance along the light ray.
-            spacings = ((xmax - xmin) / max(nx - 1, 1),
-                        (ymax - ymin) / max(ny - 1, 1),
-                        (zmax - zmin) / max(nz - 1, 1))
-            light_axis = max(range(3), key=lambda i: abs(float(DIRECTIONAL_LIGHT_DIRECTIONS[self.light_indices[0]][i])))
+            spacings = (
+                (xmax - xmin) / max(nx - 1, 1),
+                (ymax - ymin) / max(ny - 1, 1),
+                (zmax - zmin) / max(nz - 1, 1),
+            )
+            light_axis = max(
+                range(3),
+                key=lambda i: abs(
+                    float(DIRECTIONAL_LIGHT_DIRECTIONS[self.light_indices[0]][i])
+                ),
+            )
             target = self.hybrid_shadow_voxels * spacings[light_axis]
             local, endpoint, travelled = self._live_transmittance(
-                position, direction,
+                position,
+                direction,
                 step_distance=self.sample_distance,
                 march_phase=march_phase,
                 active=active,
@@ -2992,7 +3507,9 @@ def _make_direct_volume_type(
             exit_distance = self._distance_to_volume_exit(position, direction)
             # No cache needed when the local ray reaches the lightward boundary
             # or when local attenuation has already extinguished the ray.
-            lookup_active = active & (travelled < exit_distance - 1.0e-6) & (local > 1.0e-4)
+            lookup_active = (
+                active & (travelled < exit_distance - 1.0e-6) & (local > 1.0e-4)
+            )
             cached = self.shadow_volumes.eval(
                 self._texture_position(endpoint, self.shadow_volumes), lookup_active
             )[0]
@@ -3032,41 +3549,62 @@ def _make_direct_volume_type(
                 xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
                 shape = tuple(int(v) for v in self.scalar_volume.shape)
                 nz, ny, nx = shape[-4:-1] if len(shape) >= 4 else shape[:3]
-                spacings = ((xmax - xmin) / max(nx - 1, 1),
-                            (ymax - ymin) / max(ny - 1, 1),
-                            (zmax - zmin) / max(nz - 1, 1))
+                spacings = (
+                    (xmax - xmin) / max(nx - 1, 1),
+                    (ymax - ymin) / max(ny - 1, 1),
+                    (zmax - zmin) / max(nz - 1, 1),
+                )
                 total = mi.Float(0.0)
                 for i, direction_tuple in enumerate(directions):
                     direction = mi.Vector3f(*direction_tuple)
                     texture = self.environment_lighting_volumes[i]
                     if DEBUG_HYBRID_ENV_VOXELS > 0.0:
-                        axis = next(j for j, component in enumerate(direction_tuple) if component)
+                        axis = next(
+                            j
+                            for j, component in enumerate(direction_tuple)
+                            if component
+                        )
                         distance = self.hybrid_env_voxels * spacings[axis]
                         local, endpoint, travelled = self._live_transmittance(
-                            position, direction, step_distance=self.sample_distance,
-                            march_phase=march_phase, active=active,
-                            distance_limit=distance, return_endpoint=True,
+                            position,
+                            direction,
+                            step_distance=self.sample_distance,
+                            march_phase=march_phase,
+                            active=active,
+                            distance_limit=distance,
+                            return_endpoint=True,
                         )
-                        exit_distance = self._distance_to_volume_exit(position, direction)
+                        exit_distance = self._distance_to_volume_exit(
+                            position, direction
+                        )
                         # If the local segment reaches the exit or the lighting
                         # reach, there is no remaining cached segment to consume.
-                        lookup_active = (active & (travelled < exit_distance - 1.0e-6)
-                                         & (travelled < mi.Float(self._shadow_extent()) - 1.0e-6)
-                                         & (local > 1.0e-4))
+                        lookup_active = (
+                            active
+                            & (travelled < exit_distance - 1.0e-6)
+                            & (travelled < mi.Float(self._shadow_extent()) - 1.0e-6)
+                            & (local > 1.0e-4)
+                        )
                         cached = texture.eval(
                             self._texture_position(endpoint, texture), lookup_active
                         )[0]
-                        visibility = local * dr.select(lookup_active, cached, mi.Float(1.0))
+                        visibility = local * dr.select(
+                            lookup_active, cached, mi.Float(1.0)
+                        )
                     else:
                         visibility = texture.eval(
                             self._texture_position(position, texture), active
                         )[0]
                     total += visibility
-                total *= 1.0 / 6.0  # Match the live isotropic phase convention (phase = 1).
+                total *= (
+                    1.0 / 6.0
+                )  # Match the live isotropic phase convention (phase = 1).
             else:
                 # Live mode evaluates visibility from the current opacity TF for
                 # the same deterministic sphere directions used by the baker.
-                directions = _environment_directions(self.environment_scattering_samples)
+                directions = _environment_directions(
+                    self.environment_scattering_samples
+                )
                 query_view = dr.normalize(view)
                 total = mi.Float(0.0)
                 # Match primary and directional-shadow segment lengths exactly.
@@ -3127,7 +3665,10 @@ def _make_direct_volume_type(
                     baked = self.shadow_volumes.eval(
                         self._texture_position(position, self.shadow_volumes), active
                     )[0]
-                lighting = self.ambient * self.total_light_intensity + (1.0 - self.ambient) * baked
+                lighting = (
+                    self.ambient * self.total_light_intensity
+                    + (1.0 - self.ambient) * baked
+                )
                 secondary = color * self.diffuse * lighting
             else:
                 for light_index, light_direction, intensity in zip(
@@ -3167,7 +3708,10 @@ def _make_direct_volume_type(
             evaluated once at the extinction-weighted contribution centroid.
             """
             alpha, scalar, position, scalar_end = self._segment_eval(
-                start_position, direction, step_distance, active,
+                start_position,
+                direction,
+                step_distance,
+                active,
                 scalar_start=scalar_start,
             )
             color_x = self._normalized_scalar(scalar, self.color)
@@ -3293,26 +3837,38 @@ def _make_dvr_integrator_type(mi, dr):
                 march_phase = pixel_phase
                 t = entry
                 sample_index = mi.UInt32(0)
-                march_active = (
-                    volume_active
-                    & (t < exit)
-                    & (accumulated_alpha < 0.995)
+                march_active = volume_active & (t < exit) & (accumulated_alpha < 0.995)
+
+                scalar_start = (
+                    volume._sample_scalar(ray.o + ray.d * entry, march_active)
+                    if volume.preintegration is not None
+                    else mi.Float(0.0)
                 )
 
-                scalar_start = (volume._sample_scalar(ray.o + ray.d * entry, march_active)
-                                if volume.preintegration is not None else mi.Float(0.0))
-
-                def loop_cond(t, sample_index, result, accumulated_alpha, march_active, scalar_start):
+                def loop_cond(
+                    t,
+                    sample_index,
+                    result,
+                    accumulated_alpha,
+                    march_active,
+                    scalar_start,
+                ):
                     del t, sample_index, result, accumulated_alpha, scalar_start
                     return march_active
 
-                def loop_body(t, sample_index, result, accumulated_alpha, march_active, scalar_start):
+                def loop_body(
+                    t,
+                    sample_index,
+                    result,
+                    accumulated_alpha,
+                    march_active,
+                    scalar_start,
+                ):
                     remaining = dr.maximum(exit - t, 0.0)
                     regular_step = dr.minimum(step, remaining)
                     phase_step = dr.minimum(step * march_phase, remaining)
-                    use_phase_step = (
-                        (sample_index == mi.UInt32(0))
-                        & (phase_step > step * 1.0e-6)
+                    use_phase_step = (sample_index == mi.UInt32(0)) & (
+                        phase_step > step * 1.0e-6
                     )
                     current_step = dr.select(use_phase_step, phase_step, regular_step)
                     segment_start = ray.o + ray.d * t
@@ -3324,7 +3880,9 @@ def _make_dvr_integrator_type(mi, dr):
                         march_phase,
                         march_active,
                         sample_index,
-                        scalar_start=scalar_start if volume.preintegration is not None else None,
+                        scalar_start=scalar_start
+                        if volume.preintegration is not None
+                        else None,
                     )
                     scalar_start = dr.select(march_active, scalar_end, scalar_start)
                     alpha_before = accumulated_alpha
@@ -3341,7 +3899,14 @@ def _make_dvr_integrator_type(mi, dr):
                         & (current_step > 0.0)
                         & (accumulated_alpha < 0.995)
                     )
-                    return (t, sample_index, result, accumulated_alpha, march_active, scalar_start)
+                    return (
+                        t,
+                        sample_index,
+                        result,
+                        accumulated_alpha,
+                        march_active,
+                        scalar_start,
+                    )
 
                 try:
                     (
@@ -3352,7 +3917,14 @@ def _make_dvr_integrator_type(mi, dr):
                         march_active,
                         scalar_start,
                     ) = dr.while_loop(
-                        state=(t, sample_index, result, accumulated_alpha, march_active, scalar_start),
+                        state=(
+                            t,
+                            sample_index,
+                            result,
+                            accumulated_alpha,
+                            march_active,
+                            scalar_start,
+                        ),
                         cond=loop_cond,
                         body=loop_body,
                         mode="symbolic",
@@ -3440,14 +4012,15 @@ def _image_scalar_values(
     return shaped if shaped.flags.c_contiguous else np.ascontiguousarray(shaped)
 
 
-
 def _volume_opacity_reference_distance(image: vtk.vtkImageData) -> float:
     """Physical distance for which transfer-function opacity is defined.
 
     Keep this independent of the user-controlled ray-march step so changing
     sample_distance changes integration accuracy, not material extinction.
     """
-    spacing = [abs(float(value)) for value in image.GetSpacing() if abs(float(value)) > 0]
+    spacing = [
+        abs(float(value)) for value in image.GetSpacing() if abs(float(value)) > 0
+    ]
     if spacing:
         return min(spacing)
     return 1.0
@@ -3469,16 +4042,20 @@ def _make_vpt_bounds_integrator(mi, dr, bounds_list):
     The next milestone replaces face coloring with scalar-field transport.
     """
     colors = (
-        mi.Color3f(1.0, .25, .25), mi.Color3f(.25, 1.0, 1.0),
-        mi.Color3f(.25, 1.0, .25), mi.Color3f(1.0, .25, 1.0),
-        mi.Color3f(.25, .45, 1.0), mi.Color3f(1.0, .85, .25),
+        mi.Color3f(1.0, 0.25, 0.25),
+        mi.Color3f(0.25, 1.0, 1.0),
+        mi.Color3f(0.25, 1.0, 0.25),
+        mi.Color3f(1.0, 0.25, 1.0),
+        mi.Color3f(0.25, 0.45, 1.0),
+        mi.Color3f(1.0, 0.85, 0.25),
     )
 
     class VPTBoundsIntegrator(mi.SamplingIntegrator):
         def __init__(self):
             super().__init__(mi.Properties())
-            self.surface = mi.load_dict({"type": "path", "max_depth": 4,
-                                         "hide_emitters": False})
+            self.surface = mi.load_dict(
+                {"type": "path", "max_depth": 4, "hide_emitters": False}
+            )
 
         def sample(self, scene, sampler, ray, medium=None, active=True):
             ray = mi.Ray3f(ray)
@@ -3501,8 +4078,7 @@ def _make_vpt_bounds_integrator(mi, dr, bounds_list):
                 near_face = mi.UInt32(0)
                 far_face = mi.UInt32(0)
                 for axis, (origin, direction) in enumerate(
-                    ((ray.o.x, ray.d.x), (ray.o.y, ray.d.y),
-                     (ray.o.z, ray.d.z))
+                    ((ray.o.x, ray.d.x), (ray.o.y, ray.d.y), (ray.o.z, ray.d.z))
                 ):
                     parallel = dr.abs(direction) < 1e-12
                     safe_dir = dr.select(parallel, mi.Float(1.0), direction)
@@ -3513,8 +4089,7 @@ def _make_vpt_bounds_integrator(mi, dr, bounds_list):
                     lo = dr.select(parallel, mi.Float(-float("inf")), lo)
                     hi = dr.select(parallel, mi.Float(float("inf")), hi)
                     inside_slab = (origin >= lower[axis]) & (origin <= upper[axis])
-                    hi = dr.select(parallel & ~inside_slab,
-                                   mi.Float(-float("inf")), hi)
+                    hi = dr.select(parallel & ~inside_slab, mi.Float(-float("inf")), hi)
                     neg = direction > 0
                     entering_face = mi.UInt32(2 * axis) + dr.select(neg, 0, 1)
                     exiting_face = mi.UInt32(2 * axis) + dr.select(neg, 1, 0)
@@ -3525,7 +4100,12 @@ def _make_vpt_bounds_integrator(mi, dr, bounds_list):
                 inside = near < 0
                 distance = dr.select(inside, far, near)
                 face = dr.select(inside, far_face, near_face)
-                visible = active & (far >= dr.maximum(near, 0)) & (distance >= 0) & (distance < closest)
+                visible = (
+                    active
+                    & (far >= dr.maximum(near, 0))
+                    & (distance >= 0)
+                    & (distance < closest)
+                )
                 selected = mi.Color3f(0.0)
                 for i, color in enumerate(colors):
                     selected = dr.select(face == i, color, selected)
@@ -3545,41 +4125,67 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
     if len(volumes) != 1 and any(v.scattering_albedo > 0 for v in volumes):
         raise NotImplementedError(
             "VPT single scattering currently supports exactly one volume; "
-            "cross-volume shadow transmittance is not yet implemented")
+            "cross-volume shadow transmittance is not yet implemented"
+        )
     compiled = []
     for volume in volumes:
         mapping = volume.opacity_mapping
         size = max(2, int(volume.preintegration_size))
         tau_lut, _ = _build_gpu_preintegration_tables(
-            mi, dr, mapping, 1.0, size=size,
-            integration_samples=PREINTEGRATION_SAMPLES, with_centroid=False,
+            mi,
+            dr,
+            mapping,
+            1.0,
+            size=size,
+            integration_samples=PREINTEGRATION_SAMPLES,
+            with_centroid=False,
         )
         tensor = mi.TensorXf(tau_lut, shape=(size, size, 1))
         preintegration = mi.Texture2f(tensor, use_accel=False)
-        compiled.append((volume.bounds, volume.resources.scalar.texture,
-                         float(mapping["range"][0]),
-                         max(float(mapping["range"][1]) - float(mapping["range"][0]), 1e-20),
-                         preintegration, size,
-                         max(float(volume.opacity_reference_distance), 1e-12),
-                         max(float(volume.sample_distance), 1e-8)))
+        compiled.append(
+            (
+                volume.bounds,
+                volume.resources.scalar.texture,
+                float(mapping["range"][0]),
+                max(float(mapping["range"][1]) - float(mapping["range"][0]), 1e-20),
+                preintegration,
+                size,
+                max(float(volume.opacity_reference_distance), 1e-12),
+                max(float(volume.sample_distance), 1e-8),
+            )
+        )
 
     class VPTExtinctionIntegrator(mi.SamplingIntegrator):
         def __init__(self):
             super().__init__(mi.Properties())
-            self.surface = mi.load_dict({"type": "path", "max_depth": 4,
-                                         "hide_emitters": False})
+            self.surface = mi.load_dict(
+                {"type": "path", "max_depth": 4, "hide_emitters": False}
+            )
 
         def sample(self, scene, sampler, ray, medium=None, active=True):
             ray = mi.Ray3f(ray)
             active = mi.Bool(active)
-            background, valid, aovs = self.surface.sample(scene, sampler, ray, medium, active)
+            background, valid, aovs = self.surface.sample(
+                scene, sampler, ray, medium, active
+            )
             si = scene.ray_intersect(ray, active=active)
+            if not getattr(self, "show_hdri", True):
+                background = dr.select(si.is_valid(), background, self.background_color)
             surface_t = dr.select(si.is_valid(), si.t, mi.Float(float("inf")))
             result = background
             total_tau = mi.Float(0)
             hit_any = mi.Bool(False)
             scattered_light = mi.Color3f(0.0)
-            for bounds, texture, minimum, width, preintegration, table_size, reference, step in compiled:
+            for (
+                bounds,
+                texture,
+                minimum,
+                width,
+                preintegration,
+                table_size,
+                reference,
+                step,
+            ) in compiled:
                 xmin, xmax, ymin, ymax, zmin, zmax = bounds
                 if not (xmin < xmax and ymin < ymax and zmin < zmax):
                     continue
@@ -3592,12 +4198,16 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
                 ):
                     parallel = dr.abs(direction) < 1e-12
                     safe = dr.select(parallel, mi.Float(1), direction)
-                    ta, tb = (low-origin)/safe, (high-origin)/safe
+                    ta, tb = (low - origin) / safe, (high - origin) / safe
                     lo, hi = dr.minimum(ta, tb), dr.maximum(ta, tb)
                     inside = (origin >= low) & (origin <= high)
                     near = dr.maximum(near, dr.select(parallel, -float("inf"), lo))
-                    far = dr.minimum(far, dr.select(parallel,
-                        dr.select(inside, float("inf"), -float("inf")), hi))
+                    far = dr.minimum(
+                        far,
+                        dr.select(
+                            parallel, dr.select(inside, float("inf"), -float("inf")), hi
+                        ),
+                    )
                 start = dr.maximum(near, mi.Float(0))
                 end = dr.minimum(far, surface_t)
                 active_volume = active & (end > start)
@@ -3608,14 +4218,18 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
                 count = mi.UInt32(dr.ceil(segment / step))
                 tau = mi.Float(0)
                 index = mi.UInt32(0)
+
                 def sample_scalar(t, mask):
                     pos = ray.o + ray.d * t
-                    uvw = mi.Point3f((pos.x-xmin)/(xmax-xmin),
-                                     (pos.y-ymin)/(ymax-ymin),
-                                     (pos.z-zmin)/(zmax-zmin))
-                    return dr.clip((texture.eval(uvw, mask)[0]-minimum)/width, 0, 1)
+                    uvw = mi.Point3f(
+                        (pos.x - xmin) / (xmax - xmin),
+                        (pos.y - ymin) / (ymax - ymin),
+                        (pos.z - zmin) / (zmax - zmin),
+                    )
+                    return dr.clip((texture.eval(uvw, mask)[0] - minimum) / width, 0, 1)
 
                 scalar0 = sample_scalar(start, active_volume)
+
                 def cond(index, tau, scalar0):
                     return (index < count) & active_volume & (tau < 16.0)
 
@@ -3631,7 +4245,9 @@ def _make_vpt_extinction_integrator(mi, dr, volumes):
                     return index + 1, tau, scalar1
 
                 index, tau, scalar0 = dr.while_loop(
-                    state=(index, tau, scalar0), cond=cond, body=body,
+                    state=(index, tau, scalar0),
+                    cond=cond,
+                    body=body,
                     label="vpt_preintegrated_absorption",
                 )
                 total_tau += dr.select(active_volume, tau, 0)
@@ -3654,8 +4270,13 @@ _VPT_MAJORANT_CACHE_LIMIT = 1
 def _vpt_get_majorants(volume, mi, dr):
     """Reuse GPU-resident conservative majorants, keyed by VTK scalar resource."""
     brick = max(4, min(16, int(volume.vpt_majorant_brick_size)))
-    key = (volume.resources.scalar.key, tuple(np.asarray(volume.scalar_values).shape),
-           repr(volume.opacity_mapping), float(volume.opacity_reference_distance), brick)
+    key = (
+        volume.resources.scalar.key,
+        tuple(np.asarray(volume.scalar_values).shape),
+        repr(volume.opacity_mapping),
+        float(volume.opacity_reference_distance),
+        brick,
+    )
     cached = _VPT_MAJORANT_CACHE.get(key)
     if cached is not None:
         return cached, True
@@ -3681,67 +4302,69 @@ def _vpt_brick_majorants_gpu(volume, brick_size, mi, dr):
     scalar = mi.Float(np.ascontiguousarray(values).reshape(-1))
 
     # Stage X: (z, y, brick_x) -> min/max over the brick and halo.
-    lane = dr.arange(mi.UInt32, nz*ny*bx)
+    lane = dr.arange(mi.UInt32, nz * ny * bx)
     xx = lane % bx
     yy = (lane // bx) % ny
-    zz = lane // (bx*ny)
-    low_x = mi.Float(float('inf'))
-    high_x = mi.Float(-float('inf'))
-    for offset in range(-1, brick_size+2):
-        sx = dr.clip(mi.Int32(xx*brick_size) + offset, 0, nx-1)
-        v = dr.gather(mi.Float, scalar, (zz*ny+yy)*nx + mi.UInt32(sx))
+    zz = lane // (bx * ny)
+    low_x = mi.Float(float("inf"))
+    high_x = mi.Float(-float("inf"))
+    for offset in range(-1, brick_size + 2):
+        sx = dr.clip(mi.Int32(xx * brick_size) + offset, 0, nx - 1)
+        v = dr.gather(mi.Float, scalar, (zz * ny + yy) * nx + mi.UInt32(sx))
         low_x = dr.minimum(low_x, v)
         high_x = dr.maximum(high_x, v)
 
     # Stage Y: (z, brick_y, brick_x).
-    lane = dr.arange(mi.UInt32, nz*by*bx)
+    lane = dr.arange(mi.UInt32, nz * by * bx)
     xx = lane % bx
     yy = (lane // bx) % by
-    zz = lane // (bx*by)
-    low_y = mi.Float(float('inf'))
-    high_y = mi.Float(-float('inf'))
-    for offset in range(-1, brick_size+2):
-        sy = dr.clip(mi.Int32(yy*brick_size) + offset, 0, ny-1)
-        idx = (zz*ny + mi.UInt32(sy))*bx + xx
+    zz = lane // (bx * by)
+    low_y = mi.Float(float("inf"))
+    high_y = mi.Float(-float("inf"))
+    for offset in range(-1, brick_size + 2):
+        sy = dr.clip(mi.Int32(yy * brick_size) + offset, 0, ny - 1)
+        idx = (zz * ny + mi.UInt32(sy)) * bx + xx
         low_y = dr.minimum(low_y, dr.gather(mi.Float, low_x, idx))
         high_y = dr.maximum(high_y, dr.gather(mi.Float, high_x, idx))
 
     # Stage Z: one GPU lane per brick.
-    lane = dr.arange(mi.UInt32, bz*by*bx)
+    lane = dr.arange(mi.UInt32, bz * by * bx)
     xx = lane % bx
     yy = (lane // bx) % by
-    zz = lane // (bx*by)
-    vmin = mi.Float(float('inf'))
-    vmax = mi.Float(-float('inf'))
-    for offset in range(-1, brick_size+2):
-        sz = dr.clip(mi.Int32(zz*brick_size) + offset, 0, nz-1)
-        idx = (mi.UInt32(sz)*by + yy)*bx + xx
+    zz = lane // (bx * by)
+    vmin = mi.Float(float("inf"))
+    vmax = mi.Float(-float("inf"))
+    for offset in range(-1, brick_size + 2):
+        sz = dr.clip(mi.Int32(zz * brick_size) + offset, 0, nz - 1)
+        idx = (mi.UInt32(sz) * by + yy) * bx + xx
         vmin = dr.minimum(vmin, dr.gather(mi.Float, low_y, idx))
         vmax = dr.maximum(vmax, dr.gather(mi.Float, high_y, idx))
 
-    points = np.asarray(volume.opacity_mapping['control_points'], dtype=np.float64)
-    lo, hi = map(float, volume.opacity_mapping['range'])
-    width = max(hi-lo, 1e-20)
-    vmin = dr.clip((vmin-lo)/width, 0.0, 1.0)
-    vmax = dr.clip((vmax-lo)/width, 0.0, 1.0)
+    points = np.asarray(volume.opacity_mapping["control_points"], dtype=np.float64)
+    lo, hi = map(float, volume.opacity_mapping["range"])
+    width = max(hi - lo, 1e-20)
+    vmin = dr.clip((vmin - lo) / width, 0.0, 1.0)
+    vmax = dr.clip((vmax - lo) / width, 0.0, 1.0)
+
     # Evaluate piecewise-linear opacity at interval endpoints and all
     # interior control points, so non-monotone TFs remain conservative.
     def opacity_at(q):
         result = mi.Float(float(points[0, 1]))
-        for i in range(len(points)-1):
+        for i in range(len(points) - 1):
             x0, a0 = map(float, points[i])
-            x1, a1 = map(float, points[i+1])
-            t = dr.clip((q-x0)/max(x1-x0, 1e-20), 0.0, 1.0)
-            segment = a0 + t*(a1-a0)
+            x1, a1 = map(float, points[i + 1])
+            t = dr.clip((q - x0) / max(x1 - x0, 1e-20), 0.0, 1.0)
+            segment = a0 + t * (a1 - a0)
             result = dr.select(q >= x0, segment, result)
         return result
+
     alpha = dr.maximum(opacity_at(vmin), opacity_at(vmax))
     for point in points:
         x0, a0 = map(float, point)
         alpha = dr.maximum(alpha, dr.select((vmin <= x0) & (x0 <= vmax), a0, 0.0))
-    alpha = dr.clip(alpha, 0.0, 1.0-1e-6)
-    sigma = -dr.log(1.0-alpha) / max(float(volume.opacity_reference_distance), 1e-12)
-    majorants = dr.select(sigma > 0.0, sigma*(1.0+1e-5)+1e-7, 0.0)
+    alpha = dr.clip(alpha, 0.0, 1.0 - 1e-6)
+    sigma = -dr.log(1.0 - alpha) / max(float(volume.opacity_reference_distance), 1e-12)
+    majorants = dr.select(sigma > 0.0, sigma * (1.0 + 1e-5) + 1e-7, 0.0)
     # Force evaluation now so subsequent rendering doesn't pay the build
     # cost. The trace measures host submission, not GPU wall time.
     dr.eval(majorants)
@@ -3752,9 +4375,12 @@ def _vpt_brick_majorants_gpu(volume, brick_size, mi, dr):
 # normalized 3x3x3 neighbor offsets; six axes are a supported comparison mode.
 _VPT_TRANSMITTANCE_CACHE = {}
 _VPT_TRANSMITTANCE_CACHE_LIMIT = 1
-_VPT_CACHE_DIRECTIONS = tuple((x,y,z) for x,y,z in itertools.product((-1,0,1), repeat=3)
-                              if (x,y,z) != (0,0,0))
-_VPT_CACHE_AXES = ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1))
+_VPT_CACHE_DIRECTIONS = tuple(
+    (x, y, z)
+    for x, y, z in itertools.product((-1, 0, 1), repeat=3)
+    if (x, y, z) != (0, 0, 0)
+)
+_VPT_CACHE_AXES = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
 
 def _vpt_directional_transmittance(volume, mi, dr, progress=None):
@@ -3769,9 +4395,14 @@ def _vpt_directional_transmittance(volume, mi, dr, progress=None):
         raise ValueError("VPT transmittance directions must be 6 or 26")
     values = np.asarray(volume.scalar_values)
     nz, ny, nx = values.shape
-    key = (volume.resources.scalar.key, values.shape,
-           repr(volume.opacity_mapping), float(volume.opacity_reference_distance),
-           tuple(volume.bounds), count)
+    key = (
+        volume.resources.scalar.key,
+        values.shape,
+        repr(volume.opacity_mapping),
+        float(volume.opacity_reference_distance),
+        tuple(volume.bounds),
+        count,
+    )
     cached = _VPT_TRANSMITTANCE_CACHE.get(key)
     if cached is not None:
         return cached, True
@@ -3781,10 +4412,18 @@ def _vpt_directional_transmittance(volume, mi, dr, progress=None):
     voxel_count = nx * ny * nz
     directions = _VPT_CACHE_AXES if count == 6 else _VPT_CACHE_DIRECTIONS
     xmin, xmax, ymin, ymax, zmin, zmax = volume.bounds
-    spacing = ((xmax-xmin)/max(nx, 1), (ymax-ymin)/max(ny, 1),
-               (zmax-zmin)/max(nz, 1))
-    vectors = np.asarray([(dx*spacing[0], dy*spacing[1], dz*spacing[2])
-                          for dx,dy,dz in directions], dtype=np.float32)
+    spacing = (
+        (xmax - xmin) / max(nx, 1),
+        (ymax - ymin) / max(ny, 1),
+        (zmax - zmin) / max(nz, 1),
+    )
+    vectors = np.asarray(
+        [
+            (dx * spacing[0], dy * spacing[1], dz * spacing[2])
+            for dx, dy, dz in directions
+        ],
+        dtype=np.float32,
+    )
     distances = np.linalg.norm(vectors, axis=1)
     vectors /= distances[:, None]
     if progress is not None:
@@ -3793,49 +4432,55 @@ def _vpt_directional_transmittance(volume, mi, dr, progress=None):
     mapping = volume.opacity_mapping
     points = np.asarray(mapping["control_points"], dtype=np.float32)
     lo, hi = map(float, mapping["range"])
-    normalized = dr.clip((scalar-lo)/max(hi-lo, 1e-20), 0.0, 1.0)
+    normalized = dr.clip((scalar - lo) / max(hi - lo, 1e-20), 0.0, 1.0)
     # Match np.interp's piecewise-linear transfer-function evaluation.
-    alpha = mi.Float(float(np.clip(points[0, 1], 0, 1-1e-6)))
-    for j in range(len(points)-1):
-        x0, a0 = map(float, points[j]); x1, a1 = map(float, points[j+1])
-        interpolated = a0 + (a1-a0)*dr.clip((normalized-x0)/max(x1-x0, 1e-20), 0, 1)
+    alpha = mi.Float(float(np.clip(points[0, 1], 0, 1 - 1e-6)))
+    for j in range(len(points) - 1):
+        x0, a0 = map(float, points[j])
+        x1, a1 = map(float, points[j + 1])
+        interpolated = a0 + (a1 - a0) * dr.clip(
+            (normalized - x0) / max(x1 - x0, 1e-20), 0, 1
+        )
         alpha = dr.select(normalized >= x0, interpolated, alpha)
-    alpha = dr.clip(alpha, 0.0, 1.0-1e-6)
-    sigma = -dr.log(1.0-alpha)/max(float(volume.opacity_reference_distance), 1e-12)
+    alpha = dr.clip(alpha, 0.0, 1.0 - 1e-6)
+    sigma = -dr.log(1.0 - alpha) / max(float(volume.opacity_reference_distance), 1e-12)
     dr.eval(sigma)
-    packed = dr.zeros(mi.Float, voxel_count*count)
+    packed = dr.zeros(mi.Float, voxel_count * count)
     indices = dr.arange(mi.UInt32, voxel_count)
     # Signed coordinates are required for negative scan directions.
     # Keep the scatter offsets unsigned, but calculate neighbor positions
     # in signed GPU integer arithmetic.
     x = mi.Int32(indices % nx)
     y = mi.Int32((indices // nx) % ny)
-    z = mi.Int32(indices // (nx*ny))
+    z = mi.Int32(indices // (nx * ny))
     max_dim = max(nx, ny, nz)
-    for direction_index, (dx,dy,dz) in enumerate(directions):
+    for direction_index, (dx, dy, dz) in enumerate(directions):
         distance = float(distances[direction_index])
         # Inclusive scan from each cell towards the volume exit. At each
         # doubling step, gather the accumulated sum 2**k cells ahead.
         running = sigma * distance
         jump = 1
         while jump < max_dim:
-            tx = x + mi.Int32(dx*jump)
-            ty = y + mi.Int32(dy*jump)
-            tz = z + mi.Int32(dz*jump)
-            valid = ((tx >= 0) & (tx < nx) & (ty >= 0) & (ty < ny)
-                     & (tz >= 0) & (tz < nz))
-            target = mi.UInt32(dr.select(valid, tz*(nx*ny)+ty*nx+tx, 0))
+            tx = x + mi.Int32(dx * jump)
+            ty = y + mi.Int32(dy * jump)
+            tz = z + mi.Int32(dz * jump)
+            valid = (
+                (tx >= 0) & (tx < nx) & (ty >= 0) & (ty < ny) & (tz >= 0) & (tz < nz)
+            )
+            target = mi.UInt32(dr.select(valid, tz * (nx * ny) + ty * nx + tx, 0))
             ahead = dr.gather(mi.Float, running, target, valid)
             running = running + dr.select(valid, ahead, 0.0)
             jump *= 2
         # CPU reference: half of current voxel + all voxels ahead.
-        tau = dr.clip(running - 0.5*sigma*distance, 0.0, 80.0)
-        dr.scatter(packed, tau, indices+direction_index*voxel_count)
+        tau = dr.clip(running - 0.5 * sigma * distance, 0.0, 80.0)
+        dr.scatter(packed, tau, indices + direction_index * voxel_count)
         dr.eval(packed)
         if progress is not None:
-            progress("Building VPT directional transmittance cache",
-                     (direction_index+1)/(count+1))
-    result = (packed, (nx,ny,nz), vectors)
+            progress(
+                "Building VPT directional transmittance cache",
+                (direction_index + 1) / (count + 1),
+            )
+    result = (packed, (nx, ny, nz), vectors)
     _VPT_TRANSMITTANCE_CACHE[key] = result
     if progress is not None:
         progress("Building VPT directional transmittance cache", 1.0)
@@ -3851,46 +4496,51 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
         mapping = volume.opacity_mapping
         points = np.asarray(mapping["control_points"], dtype=np.float32)
         x = np.linspace(0.0, 1.0, 1024, dtype=np.float32)
-        lut = np.interp(x, points[:,0], np.clip(points[:,1], 0, 1-1e-6))
+        lut = np.interp(x, points[:, 0], np.clip(points[:, 1], 0, 1 - 1e-6))
         # TF color tints scattered radiance, not scalar extinction. The color
         # mapping may have a different scalar range from the opacity mapping.
         color_mapping = volume.color_mapping
         color_points = np.asarray(color_mapping["control_points"], dtype=np.float32)
         color_x = np.linspace(0.0, 1.0, 1024, dtype=np.float32)
         color_luts = tuple(
-            mi.Float(np.ascontiguousarray(np.interp(
-                color_x, color_points[:, 0], color_points[:, channel])))
+            mi.Float(
+                np.ascontiguousarray(
+                    np.interp(color_x, color_points[:, 0], color_points[:, channel])
+                )
+            )
             for channel in (1, 2, 3)
         )
         color_min = float(color_mapping["range"][0])
         color_width = max(float(color_mapping["range"][1]) - color_min, 1e-20)
-        majorant_start = time.perf_counter()
         (grid, shape), majorant_hit = _vpt_get_majorants(volume, mi, dr)
-        if volume.vpt_performance_log:
-            print(f"[VPT PERF] majorants build_or_lookup_ms={(time.perf_counter()-majorant_start)*1000:.3f} "
-                  f"cache_hit={majorant_hit} brick={volume.vpt_majorant_brick_size} "
-                  f"bricks={shape[0]*shape[1]*shape[2]} nonzero=GPU_not_read_back", flush=True)
         if VPT_DEBUG:
             pass
         directional = None
         if volume.vpt_transmittance_cache:
-            cache_start = time.perf_counter()
             directional, directional_hit = _vpt_directional_transmittance(
-                volume, mi, dr, progress=progress)
-            if volume.vpt_performance_log:
-                nx, ny, nz = directional[1]
-                print(f"[VPT PERF] transmittance_cache_ms={(time.perf_counter()-cache_start)*1000:.3f} "
-                      f"cache_hit={directional_hit} bytes={nx*ny*nz*len(directional[2])*4}", flush=True)
-        compiled.append((volume.bounds, volume.resources.scalar.texture,
-                         float(mapping["range"][0]),
-                         max(float(mapping["range"][1])-float(mapping["range"][0]), 1e-20),
-                         mi.Float(np.ascontiguousarray(lut)), len(lut),
-                         grid, shape,
-                         max(float(volume.opacity_reference_distance), 1e-12),
-                         float(np.clip(volume.scattering_albedo, 0, 1)),
-                         color_min, color_width, color_luts,
-                         max(1, min(16, int(volume.vpt_max_depth))),
-                         float(np.clip(volume.vpt_anisotropy, -0.9, 0.9)), directional))
+                volume, mi, dr, progress=progress
+            )
+        compiled.append(
+            (
+                volume.bounds,
+                volume.resources.scalar.texture,
+                float(mapping["range"][0]),
+                max(float(mapping["range"][1]) - float(mapping["range"][0]), 1e-20),
+                mi.Float(np.ascontiguousarray(lut)),
+                len(lut),
+                grid,
+                shape,
+                max(float(volume.opacity_reference_distance), 1e-12),
+                float(np.clip(volume.scattering_albedo, 0, 1)),
+                color_min,
+                color_width,
+                color_luts,
+                max(1, min(16, int(volume.vpt_max_depth))),
+                float(np.clip(volume.vpt_anisotropy, -0.9, 0.9)),
+                directional,
+                volume.vpt_transmittance_cache_interpolation == "transmittance",
+            )
+        )
 
     def next_pcg32(state):
         """Advance a per-lane 32-bit PCG hash state explicitly."""
@@ -3902,8 +4552,20 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
         u = mi.Float(word >> 8) * (1.0 / 16777216.0)
         return state, u
 
-    def shadow_ratio_tracking(ray, active, rng_state, bounds, texture,
-                              minimum, width, lut, lut_size, grid, shape, reference):
+    def shadow_ratio_tracking(
+        ray,
+        active,
+        rng_state,
+        bounds,
+        texture,
+        minimum,
+        width,
+        lut,
+        lut_size,
+        grid,
+        shape,
+        reference,
+    ):
         """Unbiased null-collision transmittance estimate, using brick DDA.
 
         This shares the spatial-majorant representation with camera tracking.
@@ -3922,9 +4584,17 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
             safe = dr.select(parallel, mi.Float(1), direction)
             ta, tb = (low - origin) / safe, (high - origin) / safe
             inside = (origin >= low) & (origin <= high)
-            near = dr.maximum(near, dr.select(parallel, -float("inf"), dr.minimum(ta, tb)))
-            far = dr.minimum(far, dr.select(parallel,
-                dr.select(inside, float("inf"), -float("inf")), dr.maximum(ta, tb)))
+            near = dr.maximum(
+                near, dr.select(parallel, -float("inf"), dr.minimum(ta, tb))
+            )
+            far = dr.minimum(
+                far,
+                dr.select(
+                    parallel,
+                    dr.select(inside, float("inf"), -float("inf")),
+                    dr.maximum(ta, tb),
+                ),
+            )
         start = dr.maximum(near, mi.Float(0))
         end = far
         running = active & (end > start)
@@ -3952,11 +4622,13 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
 
             def plane_time(index, direction, origin, low, high, count):
                 positive, negative = direction > 0, direction < 0
-                plane = low + dr.select(positive, mi.Float(index + 1),
-                                        mi.Float(index)) * ((high - low) / count)
+                plane = low + dr.select(
+                    positive, mi.Float(index + 1), mi.Float(index)
+                ) * ((high - low) / count)
                 safe = dr.select(positive | negative, direction, 1.0)
-                return dr.select(positive | negative,
-                                 (plane - origin) / safe, float("inf"))
+                return dr.select(
+                    positive | negative, (plane - origin) / safe, float("inf")
+                )
 
             tx = plane_time(ix, ray.d.x, ray.o.x, xmin, xmax, nx)
             ty = plane_time(iy, ray.d.y, ray.o.y, ymin, ymax, ny)
@@ -3965,39 +4637,55 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
             boundary = dr.minimum(end, next_plane)
             rng_next, u = next_pcg32(rng_state)
             rng_state = dr.select(running, rng_next, rng_state)
-            flight = -dr.log(1 - dr.clip(u, 1e-7, 1 - 1e-7)) / dr.maximum(sigma_max, 1e-12)
+            flight = -dr.log(1 - dr.clip(u, 1e-7, 1 - 1e-7)) / dr.maximum(
+                sigma_max, 1e-12
+            )
             candidate_t = t + flight
-            candidate = running & (sigma_max > 0) & (candidate_t > t) & (candidate_t < boundary)
+            candidate = (
+                running & (sigma_max > 0) & (candidate_t > t) & (candidate_t < boundary)
+            )
             pos = ray.o + ray.d * candidate_t
-            uvw = mi.Point3f((pos.x - xmin) / (xmax - xmin),
-                             (pos.y - ymin) / (ymax - ymin),
-                             (pos.z - zmin) / (zmax - zmin))
+            uvw = mi.Point3f(
+                (pos.x - xmin) / (xmax - xmin),
+                (pos.y - ymin) / (ymax - ymin),
+                (pos.z - zmin) / (zmax - zmin),
+            )
             scalar = texture.eval(uvw, candidate)[0]
             scaled = dr.clip((scalar - minimum) / width, 0, 1) * (lut_size - 1)
             i0 = mi.UInt32(dr.floor(scaled))
             i1 = dr.minimum(i0 + 1, mi.UInt32(lut_size - 1))
-            opacity = dr.lerp(dr.gather(mi.Float, lut, i0, candidate),
-                              dr.gather(mi.Float, lut, i1, candidate),
-                              scaled - mi.Float(i0))
+            opacity = dr.lerp(
+                dr.gather(mi.Float, lut, i0, candidate),
+                dr.gather(mi.Float, lut, i1, candidate),
+                scaled - mi.Float(i0),
+            )
             sigma = -dr.log(dr.maximum(1 - opacity, 1e-6)) / reference
-            weight *= dr.select(candidate,
-                1 - dr.clip(sigma / dr.maximum(sigma_max, 1e-12), 0, 1), 1)
+            weight *= dr.select(
+                candidate, 1 - dr.clip(sigma / dr.maximum(sigma_max, 1e-12), 0, 1), 1
+            )
             crossing = running & ~candidate & (next_plane <= end)
-            ix += dr.select(crossing & (tx <= next_plane),
-                            dr.select(ray.d.x > 0, 1, -1), 0)
-            iy += dr.select(crossing & (ty <= next_plane),
-                            dr.select(ray.d.y > 0, 1, -1), 0)
-            iz += dr.select(crossing & (tz <= next_plane),
-                            dr.select(ray.d.z > 0, 1, -1), 0)
+            ix += dr.select(
+                crossing & (tx <= next_plane), dr.select(ray.d.x > 0, 1, -1), 0
+            )
+            iy += dr.select(
+                crossing & (ty <= next_plane), dr.select(ray.d.y > 0, 1, -1), 0
+            )
+            iz += dr.select(
+                crossing & (tz <= next_plane), dr.select(ray.d.z > 0, 1, -1), 0
+            )
             t = dr.maximum(dr.select(candidate, candidate_t, boundary), start)
-            in_grid = ((ix >= 0) & (ix < nx) & (iy >= 0) &
-                       (iy < ny) & (iz >= 0) & (iz < nz))
+            in_grid = (
+                (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny) & (iz >= 0) & (iz < nz)
+            )
             running = running & (t < end) & in_grid & (weight > 0)
             return t, ix, iy, iz, running, rng_state, weight, iterations + 1
 
         t, ix, iy, iz, running, rng_state, weight, iterations = dr.while_loop(
             state=(t, ix, iy, iz, running, rng_state, weight, iterations),
-            cond=cond, body=body, label="vpt_shadow_ratio_tracking")
+            cond=cond,
+            body=body,
+            label="vpt_shadow_ratio_tracking",
+        )
         if dr.any(running):
             raise RuntimeError("VPT shadow ratio tracking exceeded 100000 iterations")
         return weight, rng_state
@@ -4010,50 +4698,83 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
 
     def hg_phase(cos_theta, g):
         """Henyey-Greenstein phase density per steradian."""
-        denom = dr.maximum(1.0 + g*g - 2.0*g*cos_theta, 1e-8)
-        return (1.0 - g*g) / (4.0 * np.pi * denom * dr.sqrt(denom))
+        denom = dr.maximum(1.0 + g * g - 2.0 * g * cos_theta, 1e-8)
+        return (1.0 - g * g) / (4.0 * np.pi * denom * dr.sqrt(denom))
 
     def sample_hg_direction(incoming, u1, u2, g):
         """Sample HG about the incident propagation direction (not -incoming)."""
         if abs(g) < 1e-7:
-            cos_theta = 1.0 - 2.0*u1
+            cos_theta = 1.0 - 2.0 * u1
         else:
-            ratio = (1.0 - g*g) / (1.0 - g + 2.0*g*u1)
-            cos_theta = dr.clip((1.0 + g*g - ratio*ratio) / (2.0*g), -1.0, 1.0)
-        sin_theta = dr.sqrt(dr.maximum(0.0, 1.0 - cos_theta*cos_theta))
-        phi = 2.0*np.pi*u2
+            ratio = (1.0 - g * g) / (1.0 - g + 2.0 * g * u1)
+            cos_theta = dr.clip((1.0 + g * g - ratio * ratio) / (2.0 * g), -1.0, 1.0)
+        sin_theta = dr.sqrt(dr.maximum(0.0, 1.0 - cos_theta * cos_theta))
+        phi = 2.0 * np.pi * u2
         # Construct a stable orthonormal frame around incoming.
-        helper = dr.select(dr.abs(incoming.z) < 0.999,
-                           mi.Vector3f(0.0, 0.0, 1.0),
-                           mi.Vector3f(0.0, 1.0, 0.0))
+        helper = dr.select(
+            dr.abs(incoming.z) < 0.999,
+            mi.Vector3f(0.0, 0.0, 1.0),
+            mi.Vector3f(0.0, 1.0, 0.0),
+        )
         tangent = dr.normalize(dr.cross(helper, incoming))
         bitangent = dr.cross(incoming, tangent)
-        return mi.Vector3f(incoming*cos_theta +
-                           tangent*(sin_theta*dr.cos(phi)) +
-                           bitangent*(sin_theta*dr.sin(phi)))
+        return mi.Vector3f(
+            incoming * cos_theta
+            + tangent * (sin_theta * dr.cos(phi))
+            + bitangent * (sin_theta * dr.sin(phi))
+        )
 
     class VPTDeltaAbsorptionIntegrator(mi.SamplingIntegrator):
         def __init__(self):
             super().__init__(mi.Properties())
-            self.surface = mi.load_dict({"type":"path", "max_depth":4,
-                                         "hide_emitters":False})
+            self.surface = mi.load_dict(
+                {"type": "path", "max_depth": 4, "hide_emitters": False}
+            )
 
         def sample(self, scene, sampler, ray, medium=None, active=True):
             ray = mi.Ray3f(ray)
             active = mi.Bool(active)
-            background, valid, aovs = self.surface.sample(scene, sampler, ray, medium, active)
+            background, valid, aovs = self.surface.sample(
+                scene, sampler, ray, medium, active
+            )
             si = scene.ray_intersect(ray, active=active)
+            if not getattr(self, "show_hdri", True):
+                background = dr.select(si.is_valid(), background, self.background_color)
             primary_surface_t = dr.select(si.is_valid(), si.t, mi.Float(float("inf")))
             if len(compiled) != 1:
-                raise ValueError("VPT multiple scattering currently supports exactly one volume")
-            (bounds, texture, minimum, width, lut, lut_size, grid, shape,
-             reference, albedo, color_min, color_width, color_luts, max_depth, g, directional) = compiled[0]
+                raise ValueError(
+                    "VPT multiple scattering currently supports exactly one volume"
+                )
+            (
+                bounds,
+                texture,
+                minimum,
+                width,
+                lut,
+                lut_size,
+                grid,
+                shape,
+                reference,
+                albedo,
+                color_min,
+                color_width,
+                color_luts,
+                max_depth,
+                g,
+                directional,
+                interpolate_transmittance,
+            ) = compiled[0]
             xmin, xmax, ymin, ymax, zmin, zmax = bounds
             env = scene.environment()
             seed_u = sampler.next_1d(active)
-            rng_state = (mi.UInt32(seed_u * 16777216.0) ^
-                         (mi.UInt32(dr.arange(mi.UInt32, dr.width(ray.o.x))) * mi.UInt32(2246822519)) ^
-                         mi.UInt32(0x9e3779b9))
+            rng_state = (
+                mi.UInt32(seed_u * 16777216.0)
+                ^ (
+                    mi.UInt32(dr.arange(mi.UInt32, dr.width(ray.o.x)))
+                    * mi.UInt32(2246822519)
+                )
+                ^ mi.UInt32(0x9E3779B9)
+            )
             throughput = mi.Color3f(1.0)
             result = mi.Color3f(0.0)
             path_active = active
@@ -4061,6 +4782,7 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
             # Previous phase-sampling vertex for emitter-hit MIS.
             previous_scatter_pos = mi.Point3f(0.0)
             previous_phase_pdf = mi.Float(0.0)
+
             def mis_probe(stage, *values):
                 if not VPT_DEBUG:
                     return
@@ -4071,10 +4793,17 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     print(f"[VPT MIS TRACE] depth={depth} stage={stage} OK", flush=True)
                 except Exception as probe_exc:
                     import traceback
-                    print(f"[VPT MIS TRACE] depth={depth} stage={stage} FAILED: "
-                          f"{type(probe_exc).__name__}: {probe_exc}", flush=True)
+
+                    print(
+                        f"[VPT MIS TRACE] depth={depth} stage={stage} FAILED: "
+                        f"{type(probe_exc).__name__}: {probe_exc}",
+                        flush=True,
+                    )
                     traceback.print_exc()
-                    raise RuntimeError(f"VPT MIS failed at depth={depth}, stage={stage}") from probe_exc
+                    raise RuntimeError(
+                        f"VPT MIS failed at depth={depth}, stage={stage}"
+                    ) from probe_exc
+
             for depth in range(max_depth):
                 mis_probe("bounce-entry", ray.o.x, ray.d.x, throughput)
                 # Recompute the entry/exit interval for the current path ray.
@@ -4087,11 +4816,19 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                 ):
                     parallel = dr.abs(direction) < 1e-12
                     safe = dr.select(parallel, mi.Float(1), direction)
-                    ta, tb = (low-origin)/safe, (high-origin)/safe
+                    ta, tb = (low - origin) / safe, (high - origin) / safe
                     inside = (origin >= low) & (origin <= high)
-                    near = dr.maximum(near, dr.select(parallel, -float("inf"), dr.minimum(ta,tb)))
-                    far = dr.minimum(far, dr.select(parallel,
-                        dr.select(inside, float("inf"), -float("inf")), dr.maximum(ta,tb)))
+                    near = dr.maximum(
+                        near, dr.select(parallel, -float("inf"), dr.minimum(ta, tb))
+                    )
+                    far = dr.minimum(
+                        far,
+                        dr.select(
+                            parallel,
+                            dr.select(inside, float("inf"), -float("inf")),
+                            dr.maximum(ta, tb),
+                        ),
+                    )
                 start = dr.maximum(near, mi.Float(0))
                 # Only the camera ray uses the surface/background computed by
                 # Mitsuba. Secondary paths terminate at the first surface.
@@ -4099,8 +4836,9 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     end = dr.minimum(far, primary_surface_t)
                 else:
                     secondary_si = scene.ray_intersect(ray, active=path_active)
-                    secondary_t = dr.select(secondary_si.is_valid(), secondary_si.t,
-                                            mi.Float(float("inf")))
+                    secondary_t = dr.select(
+                        secondary_si.is_valid(), secondary_si.t, mi.Float(float("inf"))
+                    )
                     end = dr.minimum(far, secondary_t)
                 running = path_active & (end > start)
                 if depth == 0:
@@ -4114,12 +4852,15 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                 # No world-space epsilon is used to select the next brick.
                 nx, ny, nz = shape
                 p0 = ray.o + ray.d * start
+
                 def initial_index(coord, direction, low, high, count):
                     grid_coord = (coord - low) * (count / (high - low))
                     # At an exact boundary a negative ray enters the lower cell.
-                    index = dr.select(direction < 0, dr.ceil(grid_coord) - 1,
-                                      dr.floor(grid_coord))
+                    index = dr.select(
+                        direction < 0, dr.ceil(grid_coord) - 1, dr.floor(grid_coord)
+                    )
                     return mi.Int32(dr.clip(index, 0, count - 1))
+
                 ix = initial_index(p0.x, ray.d.x, xmin, xmax, nx)
                 iy = initial_index(p0.y, ray.d.y, ymin, ymax, ny)
                 iz = initial_index(p0.z, ray.d.z, zmin, zmax, nz)
@@ -4132,22 +4873,49 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                 iterations = mi.UInt32(0)
                 limit = 100000  # Fail loudly instead of returning a biased frame.
 
-                def cond(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event):
+                def cond(
+                    t,
+                    ix,
+                    iy,
+                    iz,
+                    running,
+                    rng_state,
+                    iterations,
+                    scatter_pos,
+                    scatter_scalar,
+                    scatter_mask,
+                    real_event,
+                ):
                     return running & (iterations < limit)
 
-                def body(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event):
+                def body(
+                    t,
+                    ix,
+                    iy,
+                    iz,
+                    running,
+                    rng_state,
+                    iterations,
+                    scatter_pos,
+                    scatter_scalar,
+                    scatter_mask,
+                    real_event,
+                ):
                     index = mi.UInt32(ix + nx * (iy + ny * iz))
                     sigma_max = dr.gather(mi.Float, grid, index, running)
 
                     def plane_time(index, direction, origin, low, high, count):
                         positive = direction > 0
                         negative = direction < 0
-                        plane = low + dr.select(positive, mi.Float(index + 1),
-                                                mi.Float(index)) * ((high - low) / count)
+                        plane = low + dr.select(
+                            positive, mi.Float(index + 1), mi.Float(index)
+                        ) * ((high - low) / count)
                         safe_direction = dr.select(positive | negative, direction, 1.0)
-                        return dr.select(positive | negative,
-                                         (plane - origin) / safe_direction,
-                                         float("inf"))
+                        return dr.select(
+                            positive | negative,
+                            (plane - origin) / safe_direction,
+                            float("inf"),
+                        )
 
                     tx = plane_time(ix, ray.d.x, ray.o.x, xmin, xmax, nx)
                     ty = plane_time(iy, ray.d.y, ray.o.y, ymin, ymax, ny)
@@ -4162,23 +4930,33 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     # A float32 free-flight increment can round back to t.
                     # Treat such an event as a boundary crossing, not a null collision.
                     progressed = candidate_t > t
-                    candidate = running & (sigma_max > 0) & progressed & (candidate_t < boundary)
+                    candidate = (
+                        running
+                        & (sigma_max > 0)
+                        & progressed
+                        & (candidate_t < boundary)
+                    )
                     sample_pos = ray.o + ray.d * candidate_t
-                    uvw = mi.Point3f((sample_pos.x-xmin)/(xmax-xmin),
-                                     (sample_pos.y-ymin)/(ymax-ymin),
-                                     (sample_pos.z-zmin)/(zmax-zmin))
+                    uvw = mi.Point3f(
+                        (sample_pos.x - xmin) / (xmax - xmin),
+                        (sample_pos.y - ymin) / (ymax - ymin),
+                        (sample_pos.z - zmin) / (zmax - zmin),
+                    )
                     scalar = texture.eval(uvw, candidate)[0]
-                    scaled = dr.clip((scalar-minimum)/width, 0, 1) * (lut_size-1)
+                    scaled = dr.clip((scalar - minimum) / width, 0, 1) * (lut_size - 1)
                     i0 = mi.UInt32(dr.floor(scaled))
-                    i1 = dr.minimum(i0+1, mi.UInt32(lut_size-1))
-                    opacity = dr.lerp(dr.gather(mi.Float,lut,i0,candidate),
-                                      dr.gather(mi.Float,lut,i1,candidate),
-                                      scaled-mi.Float(i0))
-                    sigma = -dr.log(dr.maximum(1-opacity,1e-6))/reference
+                    i1 = dr.minimum(i0 + 1, mi.UInt32(lut_size - 1))
+                    opacity = dr.lerp(
+                        dr.gather(mi.Float, lut, i0, candidate),
+                        dr.gather(mi.Float, lut, i1, candidate),
+                        scaled - mi.Float(i0),
+                    )
+                    sigma = -dr.log(dr.maximum(1 - opacity, 1e-6)) / reference
                     next_state, accept_u = next_pcg32(rng_state)
                     rng_state = dr.select(candidate, next_state, rng_state)
-                    accept = candidate & (accept_u <
-                                          dr.clip(sigma/dr.maximum(sigma_max,1e-12),0,1))
+                    accept = candidate & (
+                        accept_u < dr.clip(sigma / dr.maximum(sigma_max, 1e-12), 0, 1)
+                    )
                     # A real event is either absorption or scattering. Null
                     # collisions do not consume path depth.
                     next_state, scatter_u = next_pcg32(rng_state)
@@ -4190,33 +4968,90 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     scatter_mask |= scattered
                     crossing = running & ~candidate & (next_plane <= end)
                     # Update every tied axis, including edges and corners.
-                    ix += dr.select(crossing & (tx <= next_plane),
-                                    dr.select(ray.d.x > 0, 1, -1), 0)
-                    iy += dr.select(crossing & (ty <= next_plane),
-                                    dr.select(ray.d.y > 0, 1, -1), 0)
-                    iz += dr.select(crossing & (tz <= next_plane),
-                                    dr.select(ray.d.z > 0, 1, -1), 0)
+                    ix += dr.select(
+                        crossing & (tx <= next_plane), dr.select(ray.d.x > 0, 1, -1), 0
+                    )
+                    iy += dr.select(
+                        crossing & (ty <= next_plane), dr.select(ray.d.y > 0, 1, -1), 0
+                    )
+                    iz += dr.select(
+                        crossing & (tz <= next_plane), dr.select(ray.d.z > 0, 1, -1), 0
+                    )
                     t = dr.select(candidate, candidate_t, boundary)
                     # If a computed plane is behind t because of rounding,
                     # the integer DDA still advances the corresponding cell.
                     t = dr.maximum(t, start)
-                    in_grid = ((ix >= 0) & (ix < nx) & (iy >= 0) &
-                               (iy < ny) & (iz >= 0) & (iz < nz))
+                    in_grid = (
+                        (ix >= 0)
+                        & (ix < nx)
+                        & (iy >= 0)
+                        & (iy < ny)
+                        & (iz >= 0)
+                        & (iz < nz)
+                    )
                     running = running & ~accept & (t < end) & in_grid
-                    return (t, ix, iy, iz, running, rng_state, iterations + 1, scatter_pos, scatter_scalar, scatter_mask, real_event)
+                    return (
+                        t,
+                        ix,
+                        iy,
+                        iz,
+                        running,
+                        rng_state,
+                        iterations + 1,
+                        scatter_pos,
+                        scatter_scalar,
+                        scatter_mask,
+                        real_event,
+                    )
 
-                (t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event) = dr.while_loop(
-                    state=(t, ix, iy, iz, running, rng_state, iterations, scatter_pos, scatter_scalar, scatter_mask, real_event),
-                    cond=cond, body=body, label="vpt_spatial_delta_dda")
-                mis_probe("delta-tracking", iterations, real_event, scatter_mask, scatter_pos.x)
+                (
+                    t,
+                    ix,
+                    iy,
+                    iz,
+                    running,
+                    rng_state,
+                    iterations,
+                    scatter_pos,
+                    scatter_scalar,
+                    scatter_mask,
+                    real_event,
+                ) = dr.while_loop(
+                    state=(
+                        t,
+                        ix,
+                        iy,
+                        iz,
+                        running,
+                        rng_state,
+                        iterations,
+                        scatter_pos,
+                        scatter_scalar,
+                        scatter_mask,
+                        real_event,
+                    ),
+                    cond=cond,
+                    body=body,
+                    label="vpt_spatial_delta_dda",
+                )
+                mis_probe(
+                    "delta-tracking",
+                    iterations,
+                    real_event,
+                    scatter_mask,
+                    scatter_pos.x,
+                )
                 if dr.any(running):
                     raise RuntimeError(
                         "VPT spatial delta tracking exceeded 100000 iterations; "
-                        "enable VTKWEB_VPT_DEBUG=1 for majorant-grid diagnostics")
+                        "enable VTKWEB_VPT_DEBUG=1 for majorant-grid diagnostics"
+                    )
                 # A ray with no real collision reaches the surface/HDRI.
                 # For the primary ray, this reproduces absorption-only VPT.
                 if depth == 0:
-                    result += dr.select(path_active & ~real_event, background, mi.Color3f(0.0))
+                    result += dr.select(
+                        path_active & ~real_event, background, mi.Color3f(0.0)
+                    )
                     # Absorbed rays must not contribute the background.
                     # The tracking loop records all real collisions below.
                 elif env is not None:
@@ -4233,16 +5068,29 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     ref_escape.p = previous_scatter_pos
                     ds_escape = dr.zeros(mi.DirectionSample3f, wavefront_size)
                     ds_escape.d = ray.d
-                    mis_probe("escape-inputs", escaped, previous_scatter_pos.x, previous_phase_pdf)
-                    print("[VPT MIS TRACE] escape: env.pdf_direction", flush=True) if VPT_DEBUG else None
+                    mis_probe(
+                        "escape-inputs",
+                        escaped,
+                        previous_scatter_pos.x,
+                        previous_phase_pdf,
+                    )
+                    print(
+                        "[VPT MIS TRACE] escape: env.pdf_direction", flush=True
+                    ) if VPT_DEBUG else None
                     env_pdf = env.pdf_direction(ref_escape, ds_escape, escaped)
                     mis_probe("escape-pdf", env_pdf)
-                    print("[VPT MIS TRACE] escape: env.eval_direction", flush=True) if VPT_DEBUG else None
+                    print(
+                        "[VPT MIS TRACE] escape: env.eval_direction", flush=True
+                    ) if VPT_DEBUG else None
                     env_value = env.eval_direction(ref_escape, ds_escape, escaped)
                     mis_probe("escape-radiance", env_value)
-                    result += dr.select(escaped,
-                        throughput * env_value * mis_weight(previous_phase_pdf, env_pdf),
-                        mi.Color3f(0.0))
+                    result += dr.select(
+                        escaped,
+                        throughput
+                        * env_value
+                        * mis_weight(previous_phase_pdf, env_pdf),
+                        mi.Color3f(0.0),
+                    )
                     mis_probe("escape-contribution", result)
                 if albedo > 0 and env is not None:
                     rng_state, u1 = next_pcg32(rng_state)
@@ -4251,67 +5099,149 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     ref.p = scatter_pos
                     mis_probe("nee-inputs", scatter_mask, scatter_pos.x)
                     ds, emitter_weight = env.sample_direction(
-                        ref, mi.Point2f(u1, u2), scatter_mask)
+                        ref, mi.Point2f(u1, u2), scatter_mask
+                    )
                     mis_probe("nee-sampled", ds.d.x, ds.pdf, emitter_weight)
                     shadow_ray = mi.Ray3f(scatter_pos, ds.d)
                     shadow_visible = ~scene.ray_test(shadow_ray, active=scatter_mask)
                     shadow_mask = scatter_mask & shadow_visible
                     if directional is None:
                         transmittance, rng_state = shadow_ratio_tracking(
-                            shadow_ray, shadow_mask, rng_state, bounds, texture,
-                            minimum, width, lut, lut_size, grid, shape, reference)
+                            shadow_ray,
+                            shadow_mask,
+                            rng_state,
+                            bounds,
+                            texture,
+                            minimum,
+                            width,
+                            lut,
+                            lut_size,
+                            grid,
+                            shape,
+                            reference,
+                        )
                     else:
                         # Trilinear optical-depth lookup and angular weighting
                         # over the nearest three physical-space directions.
                         field, (sx, sy, sz), vectors = directional
-                        fx = dr.clip((scatter_pos.x - xmin) / max(xmax-xmin, 1e-20) * sx - 0.5, 0, sx-1)
-                        fy = dr.clip((scatter_pos.y - ymin) / max(ymax-ymin, 1e-20) * sy - 0.5, 0, sy-1)
-                        fz = dr.clip((scatter_pos.z - zmin) / max(zmax-zmin, 1e-20) * sz - 0.5, 0, sz-1)
-                        ix0 = mi.UInt32(dr.floor(fx)); iy0 = mi.UInt32(dr.floor(fy)); iz0 = mi.UInt32(dr.floor(fz))
-                        ix1 = dr.minimum(ix0+1, mi.UInt32(sx-1))
-                        iy1 = dr.minimum(iy0+1, mi.UInt32(sy-1))
-                        iz1 = dr.minimum(iz0+1, mi.UInt32(sz-1))
-                        tx = fx-mi.Float(ix0); ty = fy-mi.Float(iy0); tz = fz-mi.Float(iz0)
+                        fx = dr.clip(
+                            (scatter_pos.x - xmin) / max(xmax - xmin, 1e-20) * sx - 0.5,
+                            0,
+                            sx - 1,
+                        )
+                        fy = dr.clip(
+                            (scatter_pos.y - ymin) / max(ymax - ymin, 1e-20) * sy - 0.5,
+                            0,
+                            sy - 1,
+                        )
+                        fz = dr.clip(
+                            (scatter_pos.z - zmin) / max(zmax - zmin, 1e-20) * sz - 0.5,
+                            0,
+                            sz - 1,
+                        )
+                        ix0 = mi.UInt32(dr.floor(fx))
+                        iy0 = mi.UInt32(dr.floor(fy))
+                        iz0 = mi.UInt32(dr.floor(fz))
+                        ix1 = dr.minimum(ix0 + 1, mi.UInt32(sx - 1))
+                        iy1 = dr.minimum(iy0 + 1, mi.UInt32(sy - 1))
+                        iz1 = dr.minimum(iz0 + 1, mi.UInt32(sz - 1))
+                        tx = fx - mi.Float(ix0)
+                        ty = fy - mi.Float(iy0)
+                        tz = fz - mi.Float(iz0)
+
                         def lookup_tau(direction_index):
-                            offset = direction_index * mi.UInt32(sx*sy*sz)
+                            offset = direction_index * mi.UInt32(sx * sy * sz)
                             layers = []
-                            for zz in (iz0,iz1):
+                            for zz in (iz0, iz1):
                                 rows = []
-                                for yy in (iy0,iy1):
-                                    v0 = dr.gather(mi.Float, field, offset+(zz*sy+yy)*sx+ix0, shadow_mask)
-                                    v1 = dr.gather(mi.Float, field, offset+(zz*sy+yy)*sx+ix1, shadow_mask)
-                                    rows.append(dr.lerp(v0,v1,tx))
-                                layers.append(dr.lerp(rows[0],rows[1],ty))
-                            return dr.lerp(layers[0],layers[1],tz)
+                                for yy in (iy0, iy1):
+                                    v0 = dr.gather(
+                                        mi.Float,
+                                        field,
+                                        offset + (zz * sy + yy) * sx + ix0,
+                                        shadow_mask,
+                                    )
+                                    v1 = dr.gather(
+                                        mi.Float,
+                                        field,
+                                        offset + (zz * sy + yy) * sx + ix1,
+                                        shadow_mask,
+                                    )
+                                    rows.append(dr.lerp(v0, v1, tx))
+                                layers.append(dr.lerp(rows[0], rows[1], ty))
+                            return dr.lerp(layers[0], layers[1], tz)
+
                         # Select the three closest directions by cosine. Use
                         # nonnegative angular weights; no sign-dependent axes.
-                        best_dot = [mi.Float(-2.0),mi.Float(-2.0),mi.Float(-2.0)]
-                        best_id = [mi.UInt32(0),mi.UInt32(0),mi.UInt32(0)]
-                        for index, (vx,vy,vz) in enumerate(vectors):
-                            candidate_dot = ds.d.x*float(vx)+ds.d.y*float(vy)+ds.d.z*float(vz)
+                        best_dot = [mi.Float(-2.0), mi.Float(-2.0), mi.Float(-2.0)]
+                        best_id = [mi.UInt32(0), mi.UInt32(0), mi.UInt32(0)]
+                        for index, (vx, vy, vz) in enumerate(vectors):
+                            candidate_dot = (
+                                ds.d.x * float(vx)
+                                + ds.d.y * float(vy)
+                                + ds.d.z * float(vz)
+                            )
                             candidate_id = mi.UInt32(index)
                             for rank in range(3):
                                 replace = candidate_dot > best_dot[rank]
                                 displaced_dot = best_dot[rank]
                                 displaced_id = best_id[rank]
-                                best_dot[rank] = dr.select(replace,candidate_dot,displaced_dot)
-                                best_id[rank] = dr.select(replace,candidate_id,displaced_id)
-                                candidate_dot = dr.select(replace,displaced_dot,candidate_dot)
-                                candidate_id = dr.select(replace,displaced_id,candidate_id)
+                                best_dot[rank] = dr.select(
+                                    replace, candidate_dot, displaced_dot
+                                )
+                                best_id[rank] = dr.select(
+                                    replace, candidate_id, displaced_id
+                                )
+                                candidate_dot = dr.select(
+                                    replace, displaced_dot, candidate_dot
+                                )
+                                candidate_id = dr.select(
+                                    replace, displaced_id, candidate_id
+                                )
                         # Stable angular blending: prefer closest direction,
                         # with remaining two used only if positively aligned.
-                        weights = [dr.maximum(best_dot[i],mi.Float(0.0))**8 for i in range(3)]
-                        total_weight = weights[0]+weights[1]+weights[2]+mi.Float(1e-12)
-                        tau = sum(lookup_tau(best_id[i])*weights[i] for i in range(3))/total_weight
-                        transmittance = dr.exp(-dr.clip(tau,0,80))
-                    color_scaled = dr.clip(
-                        (scatter_scalar - color_min) / color_width, 0, 1) * 1023
+                        weights = [
+                            dr.maximum(best_dot[i], mi.Float(0.0)) ** 8
+                            for i in range(3)
+                        ]
+                        total_weight = (
+                            weights[0] + weights[1] + weights[2] + mi.Float(1e-12)
+                        )
+                        if interpolate_transmittance:
+                            # Experimental: interpolate transmittance rather than
+                            # optical depth. Keep the same cache and angular weights.
+                            transmittance = (
+                                sum(
+                                    dr.exp(-dr.clip(lookup_tau(best_id[i]), 0, 80))
+                                    * weights[i]
+                                    for i in range(3)
+                                )
+                                / total_weight
+                            )
+                        else:
+                            # Original behavior, retained for A/B comparisons.
+                            tau = (
+                                sum(
+                                    lookup_tau(best_id[i]) * weights[i]
+                                    for i in range(3)
+                                )
+                                / total_weight
+                            )
+                            transmittance = dr.exp(-dr.clip(tau, 0, 80))
+                    color_scaled = (
+                        dr.clip((scatter_scalar - color_min) / color_width, 0, 1) * 1023
+                    )
                     ci0 = mi.UInt32(dr.floor(color_scaled))
                     ci1 = dr.minimum(ci0 + 1, mi.UInt32(1023))
                     cf = color_scaled - mi.Float(ci0)
-                    rgb = [dr.lerp(dr.gather(mi.Float, channel, ci0, scatter_mask),
-                                   dr.gather(mi.Float, channel, ci1, scatter_mask), cf)
-                           for channel in color_luts]
+                    rgb = [
+                        dr.lerp(
+                            dr.gather(mi.Float, channel, ci0, scatter_mask),
+                            dr.gather(mi.Float, channel, ci1, scatter_mask),
+                            cf,
+                        )
+                        for channel in color_luts
+                    ]
                     tint = mi.Color3f(*rgb)
                     throughput = dr.select(scatter_mask, throughput * tint, throughput)
                     mis_probe("nee-transmittance-tint", transmittance, tint)
@@ -4319,16 +5249,30 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     # not to this vertex's direct-light sample. Include its
                     # survival probability in the competing MIS density.
                     if depth >= 2 and depth + 1 < max_depth:
-                        rr_probability = dr.clip(dr.maximum(throughput.x,
-                            dr.maximum(throughput.y, throughput.z)), 0.05, 0.95)
+                        rr_probability = dr.clip(
+                            dr.maximum(
+                                throughput.x, dr.maximum(throughput.y, throughput.z)
+                            ),
+                            0.05,
+                            0.95,
+                        )
                     else:
                         rr_probability = mi.Float(1.0)
                     phase_pdf = hg_phase(dr.dot(ray.d, ds.d), g)
                     mis_probe("nee-phase-pdf", phase_pdf, ds.pdf)
-                    result += dr.select(shadow_mask,
-                        throughput * emitter_weight * phase_pdf *
-                        (mis_weight(ds.pdf, phase_pdf * rr_probability) if depth + 1 < max_depth else mi.Float(1.0)) * transmittance,
-                        mi.Color3f(0.0))
+                    result += dr.select(
+                        shadow_mask,
+                        throughput
+                        * emitter_weight
+                        * phase_pdf
+                        * (
+                            mis_weight(ds.pdf, phase_pdf * rr_probability)
+                            if depth + 1 < max_depth
+                            else mi.Float(1.0)
+                        )
+                        * transmittance,
+                        mi.Color3f(0.0),
+                    )
                 mis_probe("bounce-result", result, throughput)
                 if depth + 1 < max_depth:
                     # Sample the HG phase density around the incoming
@@ -4336,7 +5280,9 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                     rng_state, u1 = next_pcg32(rng_state)
                     rng_state, u2 = next_pcg32(rng_state)
                     direction = sample_hg_direction(ray.d, u1, u2, g)
-                    previous_phase_pdf = hg_phase(dr.dot(ray.d, direction), g) * rr_probability
+                    previous_phase_pdf = (
+                        hg_phase(dr.dot(ray.d, direction), g) * rr_probability
+                    )
                     mis_probe("phase-sampled", direction.x, previous_phase_pdf)
                     previous_scatter_pos = scatter_pos
                     ray = mi.Ray3f(scatter_pos, direction)
@@ -4347,10 +5293,12 @@ def _make_vpt_delta_integrator(mi, dr, volumes, progress=None):
                         rng_state, rr_u = next_pcg32(rng_state)
                         survived = rr_u < rr_probability
                         path_active = scatter_mask & survived
-                        throughput = dr.select(path_active,
-                            throughput / rr_probability, throughput)
+                        throughput = dr.select(
+                            path_active, throughput / rr_probability, throughput
+                        )
                     else:
                         path_active = scatter_mask
             mis_probe("final-result", result)
             return result, valid | hit_any, aovs
+
     return VPTDeltaAbsorptionIntegrator()

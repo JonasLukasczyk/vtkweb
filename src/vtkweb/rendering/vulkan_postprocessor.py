@@ -20,12 +20,16 @@ class VulkanPostprocessor:
         try:
             import vulkan as vk
         except ImportError as exc:
-            raise RuntimeError("optional Python package 'vulkan' is not installed") from exc
+            raise RuntimeError(
+                "optional Python package 'vulkan' is not installed"
+            ) from exc
         self.vk = vk
         shader_dir = Path(__file__).with_name("shaders")
         required = [shader_dir / "postprocess.comp.spv"]
         if not all(path.is_file() for path in required):
-            raise RuntimeError("compiled Vulkan shader is missing (run scripts/compile_vulkan_shaders.sh)")
+            raise RuntimeError(
+                "compiled Vulkan shader is missing (run scripts/compile_vulkan_shaders.sh)"
+            )
         # Importing and validating SPIR-V here makes fallback deterministic. The
         # resource/pipeline implementation is isolated so no Vulkan object leaks
         # into the rest of vtkweb.
@@ -37,7 +41,16 @@ class VulkanPostprocessor:
             "was bundled by this source-only baseline; CPU fallback remains active"
         )
 
-    def resize(self, width: int, height: int) -> None: raise NotImplementedError
-    def upload_tile(self, rgb: np.ndarray, depth: np.ndarray | None, *, x: int, y: int) -> None: raise NotImplementedError
-    def process(self, rgb, depth, settings): raise NotImplementedError
-    def close(self) -> None: pass
+    def resize(self, width: int, height: int) -> None:
+        raise NotImplementedError
+
+    def upload_tile(
+        self, rgb: np.ndarray, depth: np.ndarray | None, *, x: int, y: int
+    ) -> None:
+        raise NotImplementedError
+
+    def process(self, rgb, depth, settings):
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass

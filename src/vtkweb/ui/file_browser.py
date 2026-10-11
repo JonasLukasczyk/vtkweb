@@ -234,10 +234,17 @@ def initialize_file_browser(
         if not property_state or property_state.get("kind") != "str":
             return
 
-        lower_name = name.casefold()
-        mode = "file" if "file" in lower_name else "directory"
-        current_value = str(property_state.get("value") or "").strip()
+        _open_property_path(
+            node_id,
+            name,
+            property_state.get("label", name),
+            str(property_state.get("value") or "").strip(),
+            mode="file" if "file" in name.casefold() else "directory",
+        )
 
+    def _open_property_path(
+        node_id, name, label, current_value, *, mode="file", purpose="property"
+    ):
         start_dir: Path | None = None
         selected_path = ""
 
@@ -261,10 +268,10 @@ def initialize_file_browser(
             start_dir = Path.cwd().resolve()
 
         with state:
-            state.file_browser_purpose = "property"
+            state.file_browser_purpose = purpose
             state.file_browser_node_id = node_id
             state.file_browser_property_name = name
-            state.file_browser_property_label = property_state.get("label", name)
+            state.file_browser_property_label = label
             state.file_browser_mode = mode
             state.file_browser_open = True
 
@@ -391,11 +398,24 @@ def initialize_file_browser(
 
         node_id = state.file_browser_node_id
         name = state.file_browser_property_name
-        if not node_id or not name or node_id not in pipeline.nodes:
+        if not node_id or not name:
             return
-        pipeline.set_property(node_id, name, str(selected_path))
+        if purpose == "view_property":
+            ctrl.set_view_property(node_id, name, str(selected_path))
+        elif node_id in pipeline.nodes:
+            pipeline.set_property(node_id, name, str(selected_path))
+        else:
+            return
         state.file_browser_open = False
 
+    def open_view_file_browser(view_id: str, name: str) -> None:
+        if name != "hdri" or not view_id:
+            return
+        view = state.views.get(view_id, {})
+        current = str(view.get("properties", {}).get("hdri", "") or "")
+        _open_property_path(view_id, name, "HDRI", current, purpose="view_property")
+
+    ctrl.open_view_file_browser = open_view_file_browser
     ctrl.open_file_browser = open_file_browser
     ctrl.open_python_state = open_state_file_browser
     ctrl.save_python_state = save_state_file_browser

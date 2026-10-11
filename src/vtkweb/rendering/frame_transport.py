@@ -108,7 +108,9 @@ class H264WebSocketFrameTransport:
         try:
             import av
         except ImportError as exc:
-            raise RuntimeError("H.264 transport requires PyAV (pip install av).") from exc
+            raise RuntimeError(
+                "H.264 transport requires PyAV (pip install av)."
+            ) from exc
 
         try:
             codec = av.CodecContext.create("libx264", "w")
@@ -199,8 +201,9 @@ class H264WebSocketFrameTransport:
         stream.pending_clients = set(stream.clients)
         return True
 
-
-    def _record_stats(self, view_id: str, stream: _ViewStream, source_rank: int, byte_count: int) -> None:
+    def _record_stats(
+        self, view_id: str, stream: _ViewStream, source_rank: int, byte_count: int
+    ) -> None:
         rank = int(source_rank)
         stream.stats_known_ranks.add(rank)
         stream.stats_rank_frames[rank] = stream.stats_rank_frames.get(rank, 0) + 1
@@ -234,7 +237,6 @@ class H264WebSocketFrameTransport:
         stream.stats_encoded_frames = 0
         stream.stats_delivered_frames = 0
         stream.stats_bytes = 0
-
 
     def publish_message(self, view_id: str, message: dict) -> None:
         """Send render telemetry directly over the per-view video socket.
@@ -316,7 +318,12 @@ class H264WebSocketFrameTransport:
             if (region_width, region_height) != (tile_width, tile_height):
                 raise ValueError("Tile dimensions do not match its region")
 
-        if x < 0 or y < 0 or x + tile_width > full_width or y + tile_height > full_height:
+        if (
+            x < 0
+            or y < 0
+            or x + tile_width > full_width
+            or y + tile_height > full_height
+        ):
             raise ValueError("Tile region lies outside the full framebuffer")
 
         stream = self._stream(str(view_id))
@@ -338,7 +345,9 @@ class H264WebSocketFrameTransport:
             )
             stream.frame = frame
 
-        tile_rgb = np.frombuffer(rgb, dtype=np.uint8).reshape(tile_height, tile_width, 3)
+        tile_rgb = np.frombuffer(rgb, dtype=np.uint8).reshape(
+            tile_height, tile_width, 3
+        )
         frame.rgb[y : y + tile_height, x : x + tile_width] = tile_rgb
         stream.frame_revision += 1
         self._record_stats(view_id, stream, source_rank, len(rgb))

@@ -162,11 +162,19 @@ class CpuSceneGuideRenderer:
                 continue
             n0, n1 = c0[:3] / c0[3], c1[:3] / c1[3]
             # Simple reject; Vulkan performs proper clipping in the primary path.
-            if ((n0[0] < -1 and n1[0] < -1) or (n0[0] > 1 and n1[0] > 1)
-                    or (n0[1] < -1 and n1[1] < -1) or (n0[1] > 1 and n1[1] > 1)):
+            if (
+                (n0[0] < -1 and n1[0] < -1)
+                or (n0[0] > 1 and n1[0] > 1)
+                or (n0[1] < -1 and n1[1] < -1)
+                or (n0[1] > 1 and n1[1] > 1)
+            ):
                 continue
-            p0 = np.array([(n0[0] * 0.5 + 0.5) * (width - 1), (n0[1] * 0.5 + 0.5) * (height - 1)])
-            p1 = np.array([(n1[0] * 0.5 + 0.5) * (width - 1), (n1[1] * 0.5 + 0.5) * (height - 1)])
+            p0 = np.array(
+                [(n0[0] * 0.5 + 0.5) * (width - 1), (n0[1] * 0.5 + 0.5) * (height - 1)]
+            )
+            p1 = np.array(
+                [(n1[0] * 0.5 + 0.5) * (width - 1), (n1[1] * 0.5 + 0.5) * (height - 1)]
+            )
             delta = p1 - p0
             steps = max(1, min(4096, int(math.ceil(float(np.max(np.abs(delta)))))))
             color = vertices[index, 3:7]
@@ -184,7 +192,10 @@ def create_scene_guide_renderer():
     """Prefer the persistent Vulkan raster layer, retaining a CPU fallback."""
     try:
         from vtkweb.rendering.vulkan_scene_guides import VulkanSceneGuideRenderer
+
         return VulkanSceneGuideRenderer()
     except Exception as exc:
-        print(f"[scene-guides] Vulkan unavailable, using CPU renderer: {exc}", flush=True)
+        print(
+            f"[scene-guides] Vulkan unavailable, using CPU renderer: {exc}", flush=True
+        )
         return CpuSceneGuideRenderer()

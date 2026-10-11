@@ -103,7 +103,9 @@ class DistributedContext:
             method = getattr(target, method_name)
             registered[method_name] = method
 
-            def wrapper(*args, _target=target_name, _name=method_name, _method=method, **kwargs):
+            def wrapper(
+                *args, _target=target_name, _name=method_name, _method=method, **kwargs
+            ):
                 self.replicate_call(_target, _name, *args, **kwargs)
                 return _method(*args, **kwargs)
 
@@ -113,7 +115,9 @@ class DistributedContext:
 
         return exposed
 
-    def replicate_call(self, target_name: str, method_name: str, *args, **kwargs) -> None:
+    def replicate_call(
+        self, target_name: str, method_name: str, *args, **kwargs
+    ) -> None:
         """Replicate one exposed target method from root to all workers."""
         if not self.enabled or not self.is_root:
             return
@@ -196,9 +200,7 @@ class DistributedContext:
         x1 = (width * (column + 1)) // columns
         y0 = (height * row) // rows
         y1 = (height * (row + 1)) // rows
-        return TileRegion(
-            x0, y0, max(1, x1 - x0), max(1, y1 - y0), width, height
-        )
+        return TileRegion(x0, y0, max(1, x1 - x0), max(1, y1 - y0), width, height)
 
     def execution_success(self, local_ok: bool, local_error: str | None = None):
         """Collectively synchronize one pipeline node and propagate failures."""
@@ -235,7 +237,6 @@ class DistributedContext:
                 return
             request = self.mpi_comm.isend(packet, dest=0, tag=FRAME_TAG)
             self._frame_pending.append((request, packet))
-
 
     def send_activity(self, event: dict[str, Any]) -> None:
         if not self.enabled or self.is_root:

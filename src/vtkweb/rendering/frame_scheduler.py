@@ -154,12 +154,22 @@ class FrameRenderManager:
                     raise
                 except Exception as exc:
                     import os
-                    if os.environ.get("VTKWEB_VPT_DEBUG", "0").lower() in ("1", "true", "yes"):
+
+                    if os.environ.get("VTKWEB_VPT_DEBUG", "0").lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
                         import traceback
-                        print(f"[VPT DEBUG] Frame render failed for {view_id}: {type(exc).__name__}: {exc}", flush=True)
+
+                        print(
+                            f"[VPT DEBUG] Frame render failed for {view_id}: {type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
                         traceback.print_exception(type(exc), exc, exc.__traceback__)
                     else:
                         import traceback
+
                         print(f"Frame render failed for {view_id}: {exc}", flush=True)
                         traceback.print_exception(type(exc), exc, exc.__traceback__)
                     await asyncio.sleep(0.1)

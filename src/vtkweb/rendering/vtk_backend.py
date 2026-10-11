@@ -10,7 +10,12 @@ from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from vtkweb.transfer_functions import mapping_scalar
 
-from vtkweb.rendering.base import RenderedFrame, RenderView, RenderingBackend, Representation
+from vtkweb.rendering.base import (
+    RenderedFrame,
+    RenderView,
+    RenderingBackend,
+    Representation,
+)
 
 
 @dataclass
@@ -212,9 +217,7 @@ class VTKRenderingBackend(RenderingBackend):
                     f"Unexpected VTK RGB buffer size: {pixels.size} for {width}x{height}"
                 )
             # VTK image rows are bottom-to-top; browser/video rows are top-to-bottom.
-            rgb = np.ascontiguousarray(
-                np.flipud(pixels.reshape(height, width, 3))
-            )
+            rgb = np.ascontiguousarray(np.flipud(pixels.reshape(height, width, 3)))
             return RenderedFrame(
                 rgb=rgb.tobytes(),
                 width=width,
@@ -401,10 +404,19 @@ class VTKRenderingBackend(RenderingBackend):
                 max(-1.0, min(1.0, float(properties.get("scattering_anisotropy", 0.0))))
             )
             mapper.SetGlobalIlluminationReach(
-                max(0.0, min(1.0, float(properties.get("global_illumination_reach", 0.0))))
+                max(
+                    0.0,
+                    min(1.0, float(properties.get("global_illumination_reach", 0.0))),
+                )
             )
             mapper.SetVolumetricScatteringBlending(
-                max(0.0, min(2.0, float(properties.get("volumetric_scattering_blending", 0.0))))
+                max(
+                    0.0,
+                    min(
+                        2.0,
+                        float(properties.get("volumetric_scattering_blending", 0.0)),
+                    ),
+                )
             )
 
             blend_mode = properties.get("blend_mode", "composite")

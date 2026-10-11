@@ -6,6 +6,11 @@ from trame.widgets import html
 from trame.widgets import vuetify3 as v3
 
 from vtkweb.pipeline import PipelineGraph
+from vtkweb.ui.property_controls import (
+    boolean_control,
+    file_picker_button,
+    vector_control,
+)
 
 
 def initialize_properties_tab(
@@ -135,22 +140,12 @@ def build_properties_tab(
                 key=("property.name",),
                 classes="vtkweb-prop-item",
             ):
-                with html.Label(
-                    v_if="property.kind === 'bool'",
-                    classes="vtkweb-bool-row",
-                ):
-                    html.Span(
-                        "{{ property.label }}",
-                        classes="vtkweb-control-label",
-                    )
-                    html.Input(
-                        type="checkbox",
-                        checked=("Boolean(property.value)",),
-                        change=(
-                            ctrl.set_node_property,
-                            ("[active_node_id,property.name,$event.target.checked]"),
-                        ),
-                    )
+                boolean_control(
+                    ctrl,
+                    value="property.value",
+                    context="active_node_id",
+                    update=ctrl.set_node_property,
+                )
 
                 with html.Label(
                     v_if=("property.kind === 'int' || property.kind === 'float'"),
@@ -198,52 +193,19 @@ def build_properties_tab(
                         ),
                     )
 
-                    with v3.VBtn(
-                        v_if=(
-                            "property.name.toLowerCase().includes('file') || "
-                            "property.name.toLowerCase().includes('path')"
-                        ),
-                        icon=True,
-                        size="x-small",
-                        variant="text",
-                        classes="vtkweb-file-picker-button",
-                        title="Browse server filesystem",
-                        click=(
-                            ctrl.open_file_browser,
-                            "[active_node_id,property.name]",
-                        ),
-                    ):
-                        v3.VIcon(
-                            "mdi-folder-open-outline",
-                            size="small",
-                        )
-
-                with html.Div(
-                    v_if="property.kind === 'vector'",
-                    classes="vtkweb-vector-box",
-                ):
-                    html.Span(
-                        "{{ property.label }}",
-                        classes="vtkweb-control-label",
+                    file_picker_button(
+                        ctrl,
+                        condition="property.file_picker === true || property.name.toLowerCase().includes('file') || property.name.toLowerCase().includes('path')",
+                        context="active_node_id",
+                        open_dialog=ctrl.open_file_browser,
                     )
-                    with html.Div(
-                        classes="vtkweb-vector-fields",
-                    ):
-                        html.Input(
-                            v_for=("(component,index) in property.value"),
-                            key=("index",),
-                            type="number",
-                            step="any",
-                            value=("component",),
-                            change=(
-                                ctrl.set_node_property,
-                                (
-                                    "[active_node_id,property.name,"
-                                    "property.value.map((v,i) => i === index ? "
-                                    "($event.target.value === '' ? v : Number($event.target.value)) : v)]"
-                                ),
-                            ),
-                        )
+
+                vector_control(
+                    ctrl,
+                    value="property.value",
+                    context="active_node_id",
+                    update=ctrl.set_node_property,
+                )
 
                 with html.Div(
                     v_if=("property.kind === 'scalar_list'"),

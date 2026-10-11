@@ -175,7 +175,7 @@ INSPECTOR_STYLE = """
 .vtkweb-vector-fields {
     flex: 1 1 auto;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr)); /* fallback; vector control sets actual component count */
     min-width: 0;
     height: 100%;
 }
@@ -785,5 +785,19 @@ INSPECTOR_STYLE = """
 .vtkweb-tf-color-svg { display: block; width: calc(100% - 18px); height: 30px; margin: 2px 9px 12px; overflow: visible; touch-action: none; cursor: crosshair; }
 .vtkweb-tf-color-svg-handle { stroke: white; stroke-width: 2px; cursor: grab; pointer-events: all; vector-effect: non-scaling-stroke; }
 .vtkweb-tf-color-svg-handle:active { cursor: grabbing; }
+
+/* Align selected values (not the popup menu entries) with numeric controls. */
+.vtkweb-compact-select .v-field__input,
+.vtkweb-compact-select .v-select__selection,
+.vtkweb-compact-select .v-select__selection-text {
+    text-align: right;
+    justify-content: flex-end;
+}
+.vtkweb-input-box select {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: right;
+    text-align-last: right;
+}
 
 """

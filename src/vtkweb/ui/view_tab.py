@@ -4,6 +4,11 @@ from trame.widgets import html
 from trame.widgets import vuetify3 as v3
 
 from vtkweb.rendering.base import VIEW_PROPERTY_GROUPS
+from vtkweb.ui.property_controls import (
+    boolean_control,
+    file_picker_button,
+    vector_control,
+)
 
 
 def build_view_tab(
@@ -41,7 +46,9 @@ def build_view_tab(
                         )
                         html.Input(
                             type="color",
-                            value=("views[active_view_id]?.properties?.[property.name]",),
+                            value=(
+                                "views[active_view_id]?.properties?.[property.name]",
+                            ),
                             input=(
                                 ctrl.set_view_property,
                                 "[active_view_id,property.name,$event.target.value]",
@@ -49,9 +56,7 @@ def build_view_tab(
                         )
 
                     with html.Label(
-                        v_if=(
-                            "property.kind === 'int' || property.kind === 'float'"
-                        ),
+                        v_if=("property.kind === 'int' || property.kind === 'float'"),
                         classes="vtkweb-input-box",
                     ):
                         html.Span(
@@ -62,30 +67,24 @@ def build_view_tab(
                             type="number",
                             min=("property.min ?? null",),
                             max=("property.max ?? null",),
-                            step=("property.step ?? (property.kind === 'int' ? 1 : 'any')",),
-                            value=("views[active_view_id]?.properties?.[property.name]",),
+                            step=(
+                                "property.step ?? (property.kind === 'int' ? 1 : 'any')",
+                            ),
+                            value=(
+                                "views[active_view_id]?.properties?.[property.name]",
+                            ),
                             change=(
                                 ctrl.set_view_property,
                                 "[active_view_id,property.name,Number($event.target.value)]",
                             ),
                         )
 
-                    with html.Label(
-                        v_if="property.kind === 'bool'",
-                        classes="vtkweb-bool-row",
-                    ):
-                        html.Span(
-                            "{{ property.label }}",
-                            classes="vtkweb-control-label",
-                        )
-                        html.Input(
-                            type="checkbox",
-                            checked=("Boolean(views[active_view_id]?.properties?.[property.name])",),
-                            change=(
-                                ctrl.set_view_property,
-                                "[active_view_id,property.name,$event.target.checked]",
-                            ),
-                        )
+                    boolean_control(
+                        ctrl,
+                        value="views[active_view_id]?.properties?.[property.name]",
+                        context="active_view_id",
+                        update=ctrl.set_view_property,
+                    )
 
                     with html.Label(
                         v_if="property.kind === 'choice'",
@@ -96,7 +95,9 @@ def build_view_tab(
                             classes="vtkweb-control-label",
                         )
                         with html.Select(
-                            value=("views[active_view_id]?.properties?.[property.name]",),
+                            value=(
+                                "views[active_view_id]?.properties?.[property.name]",
+                            ),
                             change=(
                                 ctrl.set_view_property,
                                 "[active_view_id,property.name,$event.target.value]",
@@ -109,6 +110,16 @@ def build_view_tab(
                                 value=("option.value",),
                             )
 
+                    vector_control(
+                        ctrl,
+                        value="views[active_view_id]?.properties?.[property.name]",
+                        fallback="[0,0,0]",
+                        context="active_view_id",
+                        update=ctrl.set_view_property,
+                        step="property.step ?? 1",
+                        titles="(property.name === 'hdri_rotation' ? ['Yaw', 'Pitch', 'Roll'][index] : null)",
+                    )
+
                     with html.Label(
                         v_if="property.kind === 'str'",
                         classes="vtkweb-input-box",
@@ -119,9 +130,17 @@ def build_view_tab(
                         )
                         html.Input(
                             type="text",
-                            value=("views[active_view_id]?.properties?.[property.name] ?? ''",),
+                            value=(
+                                "views[active_view_id]?.properties?.[property.name] ?? ''",
+                            ),
                             change=(
                                 ctrl.set_view_property,
                                 "[active_view_id,property.name,$event.target.value]",
                             ),
+                        )
+                        file_picker_button(
+                            ctrl,
+                            condition="property.file_picker === true || property.name === 'hdri'",
+                            context="active_view_id",
+                            open_dialog=ctrl.open_view_file_browser,
                         )

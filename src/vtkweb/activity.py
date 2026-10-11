@@ -82,7 +82,9 @@ class DistributedActivityReporter:
             }
         )
 
-    def done(self, key: str, started_at: float, *, details: dict[str, Any] | None = None) -> None:
+    def done(
+        self, key: str, started_at: float, *, details: dict[str, Any] | None = None
+    ) -> None:
         self._emit(
             {
                 "kind": "done",
@@ -100,7 +102,6 @@ class DistributedActivityReporter:
                 self._local.append(event)
         else:
             context.send_activity(event)
-
 
     def ensure_receiver(self) -> None:
         """Start an independent low-rate activity drain on rank 0."""
@@ -193,8 +194,7 @@ class DistributedActivityReporter:
             rank_state.done = True
             rank_state.details.update(event.get("details") or {})
             if all(
-                activity.ranks.get(index) is not None
-                and activity.ranks[index].done
+                activity.ranks.get(index) is not None and activity.ranks[index].done
                 for index in range(context.size)
             ):
                 activity.completed_at = time.monotonic()
@@ -202,7 +202,10 @@ class DistributedActivityReporter:
     @staticmethod
     def _compact_value(value: Any) -> str:
         if isinstance(value, (tuple, list)):
-            values = [int(v) if isinstance(v, (int, float)) and float(v).is_integer() else v for v in value]
+            values = [
+                int(v) if isinstance(v, (int, float)) and float(v).is_integer() else v
+                for v in value
+            ]
             if len(values) == 3 and values[0] == values[1] == values[2]:
                 return f"{values[0]}³"
             return "×".join(str(v) for v in values)
@@ -251,16 +254,22 @@ class DistributedActivityReporter:
             rank_states = [activity.ranks.get(rank) for rank in range(context.size)]
             complete = all(state is not None and state.done for state in rank_states)
             progresses = [
-                0.0 if state is None or state.progress is None else float(state.progress)
+                0.0
+                if state is None or state.progress is None
+                else float(state.progress)
                 for state in rank_states
             ]
             progress = sum(progresses) / float(max(1, context.size))
             progress_values = [
-                "—" if state is None or state.progress is None else f"{100.0 * state.progress:.0f}%"
+                "—"
+                if state is None or state.progress is None
+                else f"{100.0 * state.progress:.0f}%"
                 for state in rank_states
             ]
             durations = [
-                "—" if state is None or state.duration is None else f"{state.duration:.2f}s"
+                "—"
+                if state is None or state.duration is None
+                else f"{state.duration:.2f}s"
                 for state in rank_states
             ]
             cards.append(

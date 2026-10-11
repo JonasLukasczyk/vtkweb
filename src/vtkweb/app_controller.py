@@ -521,9 +521,15 @@ def initialize_app_controller(
     ctrl.trigger("interact_view_camera")(rendering_methods["interact_view_camera"])
     ctrl.trigger("set_render_size")(rendering_methods["set_render_size"])
     ctrl.trigger("set_split_ratio")(set_split_ratio)
-    ctrl.trigger("set_tf_opacity_control_point")(tf_methods["set_tf_opacity_control_point"])
-    ctrl.trigger("add_tf_opacity_control_point")(tf_methods["add_tf_opacity_control_point"])
-    ctrl.trigger("remove_tf_opacity_control_point")(tf_methods["remove_tf_opacity_control_point"])
+    ctrl.trigger("set_tf_opacity_control_point")(
+        tf_methods["set_tf_opacity_control_point"]
+    )
+    ctrl.trigger("add_tf_opacity_control_point")(
+        tf_methods["add_tf_opacity_control_point"]
+    )
+    ctrl.trigger("remove_tf_opacity_control_point")(
+        tf_methods["remove_tf_opacity_control_point"]
+    )
 
     distributed.register("create_node", create_node)
     distributed.register("connect_nodes", connect_nodes)

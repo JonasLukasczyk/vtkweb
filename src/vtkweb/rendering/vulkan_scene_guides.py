@@ -33,7 +33,9 @@ class VulkanSceneGuideRenderer:
         try:
             import vulkan as vk
         except ImportError as exc:
-            raise RuntimeError("optional Python package 'vulkan' is not installed") from exc
+            raise RuntimeError(
+                "optional Python package 'vulkan' is not installed"
+            ) from exc
         self.vk = vk
         self.width = 0
         self.height = 0
@@ -48,7 +50,8 @@ class VulkanSceneGuideRenderer:
         self._uniform_buffer, self._uniform_memory = self._create_buffer(
             64,
             vk.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-            vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         )
         self._vertex_buffer = None
         self._vertex_memory = None
@@ -109,7 +112,9 @@ class VulkanSceneGuideRenderer:
             None,
         )
         self.queue = vk.vkGetDeviceQueue(self.device, self.queue_family, 0)
-        self.memory_properties = vk.vkGetPhysicalDeviceMemoryProperties(self.physical_device)
+        self.memory_properties = vk.vkGetPhysicalDeviceMemoryProperties(
+            self.physical_device
+        )
 
     def _load_shaders(self) -> None:
         shader_dir = Path(__file__).with_name("shaders")
@@ -196,7 +201,9 @@ class VulkanSceneGuideRenderer:
             vk.VkMemoryAllocateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                 allocationSize=requirements.size,
-                memoryTypeIndex=self._memory_type(requirements.memoryTypeBits, memory_flags),
+                memoryTypeIndex=self._memory_type(
+                    requirements.memoryTypeBits, memory_flags
+                ),
             ),
             None,
         )
@@ -229,7 +236,8 @@ class VulkanSceneGuideRenderer:
         self._readback_buffer, self._readback_memory = self._create_buffer(
             width * height * 4,
             self.vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            self.vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | self.vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            self.vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | self.vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         )
 
     def _create_image(self) -> None:
@@ -243,7 +251,8 @@ class VulkanSceneGuideRenderer:
             arrayLayers=1,
             samples=vk.VK_SAMPLE_COUNT_1_BIT,
             tiling=vk.VK_IMAGE_TILING_OPTIMAL,
-            usage=vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            usage=vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+            | vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
             initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
         )
@@ -254,7 +263,9 @@ class VulkanSceneGuideRenderer:
             vk.VkMemoryAllocateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                 allocationSize=req.size,
-                memoryTypeIndex=self._memory_type(req.memoryTypeBits, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+                memoryTypeIndex=self._memory_type(
+                    req.memoryTypeBits, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                ),
             ),
             None,
         )
@@ -267,12 +278,17 @@ class VulkanSceneGuideRenderer:
                 viewType=vk.VK_IMAGE_VIEW_TYPE_2D,
                 format=vk.VK_FORMAT_R8G8B8A8_UNORM,
                 components=vk.VkComponentMapping(
-                    r=vk.VK_COMPONENT_SWIZZLE_IDENTITY, g=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
-                    b=vk.VK_COMPONENT_SWIZZLE_IDENTITY, a=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    r=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    g=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    b=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    a=vk.VK_COMPONENT_SWIZZLE_IDENTITY,
                 ),
                 subresourceRange=vk.VkImageSubresourceRange(
                     aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1,
+                    baseMipLevel=0,
+                    levelCount=1,
+                    baseArrayLayer=0,
+                    layerCount=1,
                 ),
             ),
             None,
@@ -290,7 +306,9 @@ class VulkanSceneGuideRenderer:
             initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
             finalLayout=vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         )
-        reference = vk.VkAttachmentReference(attachment=0, layout=vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+        reference = vk.VkAttachmentReference(
+            attachment=0, layout=vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        )
         subpass = vk.VkSubpassDescription(
             pipelineBindPoint=vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
             colorAttachmentCount=1,
@@ -308,9 +326,12 @@ class VulkanSceneGuideRenderer:
             self.device,
             vk.VkRenderPassCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-                attachmentCount=1, pAttachments=[attachment],
-                subpassCount=1, pSubpasses=[subpass],
-                dependencyCount=1, pDependencies=[dependency],
+                attachmentCount=1,
+                pAttachments=[attachment],
+                subpassCount=1,
+                pSubpasses=[subpass],
+                dependencyCount=1,
+                pDependencies=[dependency],
             ),
             None,
         )
@@ -335,37 +356,73 @@ class VulkanSceneGuideRenderer:
             stages = [
                 vk.VkPipelineShaderStageCreateInfo(
                     sType=vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    stage=vk.VK_SHADER_STAGE_VERTEX_BIT, module=vert, pName="main"),
+                    stage=vk.VK_SHADER_STAGE_VERTEX_BIT,
+                    module=vert,
+                    pName="main",
+                ),
                 vk.VkPipelineShaderStageCreateInfo(
                     sType=vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    stage=vk.VK_SHADER_STAGE_FRAGMENT_BIT, module=frag, pName="main"),
+                    stage=vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+                    module=frag,
+                    pName="main",
+                ),
             ]
-            binding = vk.VkVertexInputBindingDescription(binding=0, stride=28, inputRate=vk.VK_VERTEX_INPUT_RATE_VERTEX)
+            binding = vk.VkVertexInputBindingDescription(
+                binding=0, stride=28, inputRate=vk.VK_VERTEX_INPUT_RATE_VERTEX
+            )
             attrs = [
-                vk.VkVertexInputAttributeDescription(location=0, binding=0, format=vk.VK_FORMAT_R32G32B32_SFLOAT, offset=0),
-                vk.VkVertexInputAttributeDescription(location=1, binding=0, format=vk.VK_FORMAT_R32G32B32A32_SFLOAT, offset=12),
+                vk.VkVertexInputAttributeDescription(
+                    location=0,
+                    binding=0,
+                    format=vk.VK_FORMAT_R32G32B32_SFLOAT,
+                    offset=0,
+                ),
+                vk.VkVertexInputAttributeDescription(
+                    location=1,
+                    binding=0,
+                    format=vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+                    offset=12,
+                ),
             ]
             vertex_input = vk.VkPipelineVertexInputStateCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                vertexBindingDescriptionCount=1, pVertexBindingDescriptions=[binding],
-                vertexAttributeDescriptionCount=2, pVertexAttributeDescriptions=attrs,
+                vertexBindingDescriptionCount=1,
+                pVertexBindingDescriptions=[binding],
+                vertexAttributeDescriptionCount=2,
+                pVertexAttributeDescriptions=attrs,
             )
             assembly = vk.VkPipelineInputAssemblyStateCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                 topology=vk.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
                 primitiveRestartEnable=vk.VK_FALSE,
             )
-            viewport = vk.VkViewport(x=0.0, y=0.0, width=float(self.width), height=float(self.height), minDepth=0.0, maxDepth=1.0)
-            scissor = vk.VkRect2D(offset=vk.VkOffset2D(x=0, y=0), extent=vk.VkExtent2D(width=self.width, height=self.height))
+            viewport = vk.VkViewport(
+                x=0.0,
+                y=0.0,
+                width=float(self.width),
+                height=float(self.height),
+                minDepth=0.0,
+                maxDepth=1.0,
+            )
+            scissor = vk.VkRect2D(
+                offset=vk.VkOffset2D(x=0, y=0),
+                extent=vk.VkExtent2D(width=self.width, height=self.height),
+            )
             viewport_state = vk.VkPipelineViewportStateCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-                viewportCount=1, pViewports=[viewport], scissorCount=1, pScissors=[scissor],
+                viewportCount=1,
+                pViewports=[viewport],
+                scissorCount=1,
+                pScissors=[scissor],
             )
             raster = vk.VkPipelineRasterizationStateCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                depthClampEnable=vk.VK_FALSE, rasterizerDiscardEnable=vk.VK_FALSE,
-                polygonMode=vk.VK_POLYGON_MODE_FILL, cullMode=vk.VK_CULL_MODE_NONE,
-                frontFace=vk.VK_FRONT_FACE_COUNTER_CLOCKWISE, depthBiasEnable=vk.VK_FALSE,
+                depthClampEnable=vk.VK_FALSE,
+                rasterizerDiscardEnable=vk.VK_FALSE,
+                polygonMode=vk.VK_POLYGON_MODE_FILL,
+                cullMode=vk.VK_CULL_MODE_NONE,
+                frontFace=vk.VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                depthBiasEnable=vk.VK_FALSE,
                 lineWidth=1.0,
             )
             multisample = vk.VkPipelineMultisampleStateCreateInfo(
@@ -374,23 +431,38 @@ class VulkanSceneGuideRenderer:
             )
             blend_attachment = vk.VkPipelineColorBlendAttachmentState(
                 blendEnable=vk.VK_FALSE,
-                colorWriteMask=(vk.VK_COLOR_COMPONENT_R_BIT | vk.VK_COLOR_COMPONENT_G_BIT |
-                                vk.VK_COLOR_COMPONENT_B_BIT | vk.VK_COLOR_COMPONENT_A_BIT),
+                colorWriteMask=(
+                    vk.VK_COLOR_COMPONENT_R_BIT
+                    | vk.VK_COLOR_COMPONENT_G_BIT
+                    | vk.VK_COLOR_COMPONENT_B_BIT
+                    | vk.VK_COLOR_COMPONENT_A_BIT
+                ),
             )
             blend = vk.VkPipelineColorBlendStateCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-                attachmentCount=1, pAttachments=[blend_attachment],
+                attachmentCount=1,
+                pAttachments=[blend_attachment],
             )
             result = vk.vkCreateGraphicsPipelines(
-                self.device, vk.VK_NULL_HANDLE, 1,
-                [vk.VkGraphicsPipelineCreateInfo(
-                    sType=vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                    stageCount=2, pStages=stages,
-                    pVertexInputState=vertex_input, pInputAssemblyState=assembly,
-                    pViewportState=viewport_state, pRasterizationState=raster,
-                    pMultisampleState=multisample, pColorBlendState=blend,
-                    layout=self.pipeline_layout, renderPass=self._render_pass, subpass=0,
-                )],
+                self.device,
+                vk.VK_NULL_HANDLE,
+                1,
+                [
+                    vk.VkGraphicsPipelineCreateInfo(
+                        sType=vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                        stageCount=2,
+                        pStages=stages,
+                        pVertexInputState=vertex_input,
+                        pInputAssemblyState=assembly,
+                        pViewportState=viewport_state,
+                        pRasterizationState=raster,
+                        pMultisampleState=multisample,
+                        pColorBlendState=blend,
+                        layout=self.pipeline_layout,
+                        renderPass=self._render_pass,
+                        subpass=0,
+                    )
+                ],
                 None,
             )
             self._pipeline = result[0] if isinstance(result, (list, tuple)) else result
@@ -405,8 +477,11 @@ class VulkanSceneGuideRenderer:
             vk.VkFramebufferCreateInfo(
                 sType=vk.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
                 renderPass=self._render_pass,
-                attachmentCount=1, pAttachments=[self._image_view],
-                width=self.width, height=self.height, layers=1,
+                attachmentCount=1,
+                pAttachments=[self._image_view],
+                width=self.width,
+                height=self.height,
+                layers=1,
             ),
             None,
         )
@@ -419,7 +494,11 @@ class VulkanSceneGuideRenderer:
                 sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                 maxSets=1,
                 poolSizeCount=1,
-                pPoolSizes=[vk.VkDescriptorPoolSize(type=vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, descriptorCount=1)],
+                pPoolSizes=[
+                    vk.VkDescriptorPoolSize(
+                        type=vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, descriptorCount=1
+                    )
+                ],
             ),
             None,
         )
@@ -433,11 +512,16 @@ class VulkanSceneGuideRenderer:
             ),
         )
         self._descriptor_set = allocated[0]
-        buffer_info = vk.VkDescriptorBufferInfo(buffer=self._uniform_buffer, offset=0, range=64)
+        buffer_info = vk.VkDescriptorBufferInfo(
+            buffer=self._uniform_buffer, offset=0, range=64
+        )
         write = vk.VkWriteDescriptorSet(
             sType=vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            dstSet=self._descriptor_set, dstBinding=0, descriptorCount=1,
-            descriptorType=vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, pBufferInfo=[buffer_info],
+            dstSet=self._descriptor_set,
+            dstBinding=0,
+            descriptorCount=1,
+            descriptorType=vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            pBufferInfo=[buffer_info],
         )
         vk.vkUpdateDescriptorSets(self.device, 1, [write], 0, None)
 
@@ -467,7 +551,8 @@ class VulkanSceneGuideRenderer:
         self._vertex_buffer, self._vertex_memory = self._create_buffer(
             max(1, len(data)),
             self.vk.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            self.vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | self.vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            self.vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | self.vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         )
         if data:
             self._write_memory(self._vertex_memory, data)
@@ -478,37 +563,79 @@ class VulkanSceneGuideRenderer:
         vk = self.vk
         cmd = self._command_buffer
         vk.vkResetCommandBuffer(cmd, 0)
-        vk.vkBeginCommandBuffer(cmd, vk.VkCommandBufferBeginInfo(sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO))
-        clear = vk.VkClearValue(color=vk.VkClearColorValue(float32=[0.0, 0.0, 0.0, 0.0]))
+        vk.vkBeginCommandBuffer(
+            cmd,
+            vk.VkCommandBufferBeginInfo(
+                sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+            ),
+        )
+        clear = vk.VkClearValue(
+            color=vk.VkClearColorValue(float32=[0.0, 0.0, 0.0, 0.0])
+        )
         vk.vkCmdBeginRenderPass(
             cmd,
             vk.VkRenderPassBeginInfo(
                 sType=vk.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                 renderPass=self._render_pass,
                 framebuffer=self._framebuffer,
-                renderArea=vk.VkRect2D(offset=vk.VkOffset2D(x=0, y=0), extent=vk.VkExtent2D(width=self.width, height=self.height)),
-                clearValueCount=1, pClearValues=[clear],
+                renderArea=vk.VkRect2D(
+                    offset=vk.VkOffset2D(x=0, y=0),
+                    extent=vk.VkExtent2D(width=self.width, height=self.height),
+                ),
+                clearValueCount=1,
+                pClearValues=[clear],
             ),
             vk.VK_SUBPASS_CONTENTS_INLINE,
         )
         if self._vertex_count:
-            vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self._pipeline)
-            vk.vkCmdBindDescriptorSets(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout, 0, 1, [self._descriptor_set], 0, None)
+            vk.vkCmdBindPipeline(
+                cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self._pipeline
+            )
+            vk.vkCmdBindDescriptorSets(
+                cmd,
+                vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                self.pipeline_layout,
+                0,
+                1,
+                [self._descriptor_set],
+                0,
+                None,
+            )
             vk.vkCmdBindVertexBuffers(cmd, 0, 1, [self._vertex_buffer], [0])
             vk.vkCmdDraw(cmd, self._vertex_count, 1, 0, 0)
         vk.vkCmdEndRenderPass(cmd)
         region = vk.VkBufferImageCopy(
-            bufferOffset=0, bufferRowLength=0, bufferImageHeight=0,
+            bufferOffset=0,
+            bufferRowLength=0,
+            bufferImageHeight=0,
             imageSubresource=vk.VkImageSubresourceLayers(
-                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT, mipLevel=0, baseArrayLayer=0, layerCount=1),
+                aspectMask=vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                mipLevel=0,
+                baseArrayLayer=0,
+                layerCount=1,
+            ),
             imageOffset=vk.VkOffset3D(x=0, y=0, z=0),
             imageExtent=vk.VkExtent3D(width=self.width, height=self.height, depth=1),
         )
-        vk.vkCmdCopyImageToBuffer(cmd, self._image, vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, self._readback_buffer, 1, [region])
+        vk.vkCmdCopyImageToBuffer(
+            cmd,
+            self._image,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            self._readback_buffer,
+            1,
+            [region],
+        )
         vk.vkEndCommandBuffer(cmd)
         vk.vkQueueSubmit(
-            self.queue, 1,
-            [vk.VkSubmitInfo(sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO, commandBufferCount=1, pCommandBuffers=[cmd])],
+            self.queue,
+            1,
+            [
+                vk.VkSubmitInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    commandBufferCount=1,
+                    pCommandBuffers=[cmd],
+                )
+            ],
             vk.VK_NULL_HANDLE,
         )
         vk.vkQueueWaitIdle(self.queue)
@@ -522,9 +649,15 @@ class VulkanSceneGuideRenderer:
         else:
             raw = ctypes.string_at(int(pointer), size)
         vk.vkUnmapMemory(self.device, self._readback_memory)
-        return np.frombuffer(raw, dtype=np.uint8).reshape(self.height, self.width, 4).copy()
+        return (
+            np.frombuffer(raw, dtype=np.uint8)
+            .reshape(self.height, self.width, 4)
+            .copy()
+        )
 
-    def render(self, rgb: np.ndarray, camera: SceneCamera, settings: SceneGuideSettings) -> np.ndarray:
+    def render(
+        self, rgb: np.ndarray, camera: SceneCamera, settings: SceneGuideSettings
+    ) -> np.ndarray:
         if not settings.enabled:
             return rgb
         height, width = rgb.shape[:2]
@@ -537,31 +670,47 @@ class VulkanSceneGuideRenderer:
         self._record_and_submit()
         overlay = self._read_rgba().astype(np.float32)
         alpha = overlay[..., 3:4] / 255.0
-        return np.clip(rgb.astype(np.float32) * (1.0 - alpha) + overlay[..., :3] * alpha, 0.0, 255.0).astype(np.uint8)
+        return np.clip(
+            rgb.astype(np.float32) * (1.0 - alpha) + overlay[..., :3] * alpha,
+            0.0,
+            255.0,
+        ).astype(np.uint8)
 
     # ---------------------------------------------------------------- cleanup
     def _destroy_frame_resources(self) -> None:
         vk = self.vk
         if self._command_buffer is not None:
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, [self._command_buffer]); self._command_buffer = None
+            vk.vkFreeCommandBuffers(
+                self.device, self.command_pool, 1, [self._command_buffer]
+            )
+            self._command_buffer = None
         if self._descriptor_pool is not None:
-            vk.vkDestroyDescriptorPool(self.device, self._descriptor_pool, None); self._descriptor_pool = None
+            vk.vkDestroyDescriptorPool(self.device, self._descriptor_pool, None)
+            self._descriptor_pool = None
         if self._framebuffer is not None:
-            vk.vkDestroyFramebuffer(self.device, self._framebuffer, None); self._framebuffer = None
+            vk.vkDestroyFramebuffer(self.device, self._framebuffer, None)
+            self._framebuffer = None
         if self._pipeline is not None:
-            vk.vkDestroyPipeline(self.device, self._pipeline, None); self._pipeline = None
+            vk.vkDestroyPipeline(self.device, self._pipeline, None)
+            self._pipeline = None
         if self._render_pass is not None:
-            vk.vkDestroyRenderPass(self.device, self._render_pass, None); self._render_pass = None
+            vk.vkDestroyRenderPass(self.device, self._render_pass, None)
+            self._render_pass = None
         if self._image_view is not None:
-            vk.vkDestroyImageView(self.device, self._image_view, None); self._image_view = None
+            vk.vkDestroyImageView(self.device, self._image_view, None)
+            self._image_view = None
         if self._image is not None:
-            vk.vkDestroyImage(self.device, self._image, None); self._image = None
+            vk.vkDestroyImage(self.device, self._image, None)
+            self._image = None
         if self._image_memory is not None:
-            vk.vkFreeMemory(self.device, self._image_memory, None); self._image_memory = None
+            vk.vkFreeMemory(self.device, self._image_memory, None)
+            self._image_memory = None
         if self._readback_buffer is not None:
-            vk.vkDestroyBuffer(self.device, self._readback_buffer, None); self._readback_buffer = None
+            vk.vkDestroyBuffer(self.device, self._readback_buffer, None)
+            self._readback_buffer = None
         if self._readback_memory is not None:
-            vk.vkFreeMemory(self.device, self._readback_memory, None); self._readback_memory = None
+            vk.vkFreeMemory(self.device, self._readback_memory, None)
+            self._readback_memory = None
 
     def close(self) -> None:
         if self._closed:

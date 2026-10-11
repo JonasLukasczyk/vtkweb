@@ -10,14 +10,12 @@ from vtkweb.rendering.base import (
     REPRESENTATION_PROPERTY_SPECS,
 )
 
+
 def _kind_condition(spec) -> str:
     kinds = spec.get("kinds")
     if not kinds:
         return "true"
-    return " || ".join(
-        f"representation.kind === '{kind}'"
-        for kind in sorted(kinds)
-    )
+    return " || ".join(f"representation.kind === '{kind}'" for kind in sorted(kinds))
 
 
 def _group_condition(group_name: str) -> str:
@@ -32,10 +30,10 @@ def _group_condition(group_name: str) -> str:
         kinds.update(spec["kinds"])
     if unrestricted:
         return "true"
-    return " || ".join(
-        f"representation.kind === '{kind}'"
-        for kind in sorted(kinds)
-    ) or "false"
+    return (
+        " || ".join(f"representation.kind === '{kind}'" for kind in sorted(kinds))
+        or "false"
+    )
 
 
 def _render_representation_property(ctrl, key: str) -> None:
@@ -89,8 +87,7 @@ def _render_representation_property(ctrl, key: str) -> None:
 
     if kind == "choice":
         items = [
-            {"title": title, "value": value}
-            for title, value in spec.get("options", ())
+            {"title": title, "value": value} for title, value in spec.get("options", ())
         ]
         with html.Div(v_if=(condition,), classes="vtkweb-select-box"):
             html.Span(spec["label"], classes="vtkweb-control-label")

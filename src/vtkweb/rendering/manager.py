@@ -29,7 +29,6 @@ from vtkweb.rendering.vtk_backend import (
 from vtkweb.transfer_functions import TransferFunctionManager
 
 
-
 DEFAULT_VIEW_CAMERAS = {
     "vtk": {
         "position": [0.0, 0.0, 1.0],
@@ -692,6 +691,12 @@ class RenderManager:
 
         if name == "hdri":
             value = str(value or "").strip()
+        elif name == "hdri_rotation":
+            value = tuple(float(component) for component in value)
+            if len(value) != 3:
+                raise ValueError("HDRI Rotation requires yaw, pitch and roll")
+        elif name in {"hdri_follow_camera", "hdri_show"}:
+            value = bool(value)
         elif name == "camera":
             camera = dict(self.get_view_property(view_id, "camera") or {})
             camera.update(dict(value or {}))
@@ -730,9 +735,7 @@ class RenderManager:
             properties["camera"] = _normalize_camera(camera_state)
         elif name == "camera" and value.get("fov") is not None:
             half = 0.5 * math.radians(max(float(value["fov"]), 1.0e-6))
-            properties["camera_focal_length_mm"] = 12.0 / max(
-                math.tan(half), 1.0e-12
-            )
+            properties["camera_focal_length_mm"] = 12.0 / max(math.tan(half), 1.0e-12)
 
         view["properties"] = properties
         self.state.views = {**self.state.views, view_id: view}
@@ -773,7 +776,6 @@ class RenderManager:
                 view = deepcopy(self.state.views[view_id])
                 view["properties"] = {**view.get("properties", {}), name: value}
                 self.state.views = {**self.state.views, view_id: view}
-
 
         if self._is_view_materialized(view_id):
             self.frames.ensure(view_id)

@@ -14,19 +14,33 @@ class _SvgTag(HtmlElement):
             ["classes", "class"],
             ["key", ":key"],
             ["v_for", "v-for"],
-            "x", "y", "x1", "y1", "x2", "y2",
-            "width", "height", "points", "cx", "cy", "r",
+            "x",
+            "y",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "width",
+            "height",
+            "points",
+            "cx",
+            "cy",
+            "r",
         ]
 
 
 class _NativeVueTag(HtmlElement):
     """Native HTML with explicit Vue bindings for the custom preset menu."""
+
     def __init__(self, tag, children=None, **kwargs):
         super().__init__(tag, children, **kwargs)
         self._attr_names += [
-            ["classes", "class"], ["v_for", "v-for"],
-            ["v_if", "v-if"], ["key", ":key"],
-            ["vue_style", ":style"], ["vue_click", "@click"],
+            ["classes", "class"],
+            ["v_for", "v-for"],
+            ["v_if", "v-if"],
+            ["key", ":key"],
+            ["vue_style", ":style"],
+            ["vue_click", "@click"],
         ]
 
 
@@ -66,14 +80,25 @@ def _mapping_range_row(ctrl, mapping_name: str) -> None:
         html.Span(mapping_name.capitalize(), classes="vtkweb-tf-range-label")
         for bound, other in ((0, 1), (1, 0)):
             html.Input(
-                type="number", step="any",
-                value=(f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[{bound}] ?? {bound}",),
+                type="number",
+                step="any",
+                value=(
+                    f"transfer_functions[active_transfer_function]?.{mapping_name}?.range?.[{bound}] ?? {bound}",
+                ),
                 classes="vtkweb-range-input",
                 change=(
                     ctrl.set_tf_mapping_range,
                     f"[active_transfer_function,'{mapping_name}',"
-                    + ("Number($event.target.value)," if bound == 0 else f"transfer_functions[active_transfer_function].{mapping_name}.range[0],")
-                    + (f"transfer_functions[active_transfer_function].{mapping_name}.range[1]]" if bound == 0 else "Number($event.target.value)]"),
+                    + (
+                        "Number($event.target.value),"
+                        if bound == 0
+                        else f"transfer_functions[active_transfer_function].{mapping_name}.range[0],"
+                    )
+                    + (
+                        f"transfer_functions[active_transfer_function].{mapping_name}.range[1]]"
+                        if bound == 0
+                        else "Number($event.target.value)]"
+                    ),
                 ),
             )
 
@@ -252,12 +277,20 @@ def build_transfer_tab(ctrl) -> None:
 
         # Compact toolbar: four icon-only actions, with native title tooltips.
         with html.Div(classes="vtkweb-tf-toolbar"):
-            with _NativeVueTag("details", classes="vtkweb-tf-tool-menu vtkweb-tf-preset-menu"):
-                with _NativeVueTag("summary", classes="vtkweb-tf-tool-button", title="Choose preset color map"):
+            with _NativeVueTag(
+                "details", classes="vtkweb-tf-tool-menu vtkweb-tf-preset-menu"
+            ):
+                with _NativeVueTag(
+                    "summary",
+                    classes="vtkweb-tf-tool-button",
+                    title="Choose preset color map",
+                ):
                     v3.VIcon("mdi-palette", size="small")
                 with html.Div(classes="vtkweb-colormap-dropdown-menu"):
                     with _NativeVueTag(
-                        "button", v_for="item in tf_preset_items", key="item.value",
+                        "button",
+                        v_for="item in tf_preset_items",
+                        key="item.value",
                         classes="vtkweb-colormap-dropdown-option",
                         vue_style="{ backgroundImage: 'url(' + item.preview + ')' }",
                         vue_click=(
@@ -267,24 +300,31 @@ def build_transfer_tab(ctrl) -> None:
                         ),
                         type="button",
                     ):
-                        html.Span("{{ item.title }}", classes="vtkweb-colormap-dropdown-option-label")
+                        html.Span(
+                            "{{ item.title }}",
+                            classes="vtkweb-colormap-dropdown-option-label",
+                        )
 
             with html.Button(
-                classes="vtkweb-tf-tool-button", title="Invert color map",
+                classes="vtkweb-tf-tool-button",
+                title="Invert color map",
                 click=(ctrl.invert_tf_color_map, "[active_transfer_function]"),
                 type="button",
             ):
                 v3.VIcon("mdi-swap-horizontal", size="small")
 
             with html.Button(
-                classes="vtkweb-tf-tool-button", title="Automatically adjust color and opacity ranges to data",
+                classes="vtkweb-tf-tool-button",
+                title="Automatically adjust color and opacity ranges to data",
                 click=(ctrl.rescale_tf_both_mappings, "[active_transfer_function]"),
                 type="button",
             ):
                 v3.VIcon("mdi-auto-fix", size="small")
 
             with _NativeVueTag("details", classes="vtkweb-tf-tool-menu"):
-                with _NativeVueTag("summary", classes="vtkweb-tf-tool-button", title="Set data range"):
+                with _NativeVueTag(
+                    "summary", classes="vtkweb-tf-tool-button", title="Set data range"
+                ):
                     v3.VIcon("mdi-arrow-expand-horizontal", size="small")
                 with html.Div(classes="vtkweb-tf-tool-panel"):
                     _mapping_range_row(ctrl, "color")
@@ -298,9 +338,30 @@ def build_transfer_tab(ctrl) -> None:
                 '@click="window.__vtkwebAddOpacityPoint(active_transfer_function, $event)"',
             ],
         ):
-            _SvgTag("rect", x="0", y="0", width="300", height="140", classes="vtkweb-opacity-bg")
-            _SvgTag("line", x1="0", y1="70", x2="300", y2="70", classes="vtkweb-opacity-grid")
-            _SvgTag("line", x1="150", y1="0", x2="150", y2="140", classes="vtkweb-opacity-grid")
+            _SvgTag(
+                "rect",
+                x="0",
+                y="0",
+                width="300",
+                height="140",
+                classes="vtkweb-opacity-bg",
+            )
+            _SvgTag(
+                "line",
+                x1="0",
+                y1="70",
+                x2="300",
+                y2="70",
+                classes="vtkweb-opacity-grid",
+            )
+            _SvgTag(
+                "line",
+                x1="150",
+                y1="0",
+                x2="150",
+                y2="140",
+                classes="vtkweb-opacity-grid",
+            )
             _SvgTag(
                 "polyline",
                 points=(
@@ -321,8 +382,8 @@ def build_transfer_tab(ctrl) -> None:
                 classes="vtkweb-opacity-point",
                 raw_attrs=[
                     '@pointerdown="window.__vtkwebStartOpacityDrag(active_transfer_function, index, $event)"',
-                    '@click.stop',
-                    '@dblclick.stop="trigger(\'remove_tf_opacity_control_point\', [active_transfer_function,index])"',
+                    "@click.stop",
+                    "@dblclick.stop=\"trigger('remove_tf_opacity_control_point', [active_transfer_function,index])\"",
                 ],
             )
 
@@ -339,10 +400,16 @@ def build_transfer_tab(ctrl) -> None:
             ],
         ):
             with _SvgTag("defs"):
-                with _SvgTag("linearGradient", raw_attrs=[
-                    'id="vtkweb-tf-color-gradient"',
-                    'x1="0%"', 'y1="0%"', 'x2="100%"', 'y2="0%"',
-                ]):
+                with _SvgTag(
+                    "linearGradient",
+                    raw_attrs=[
+                        'id="vtkweb-tf-color-gradient"',
+                        'x1="0%"',
+                        'y1="0%"',
+                        'x2="100%"',
+                        'y2="0%"',
+                    ],
+                ):
                     _SvgTag(
                         "stop",
                         v_for="(point,index) in (transfer_functions[active_transfer_function]?.color?.control_points || [])",
@@ -352,14 +419,22 @@ def build_transfer_tab(ctrl) -> None:
                             ":stop-color=\"'rgb(' + point.slice(1,4).map(v => Math.round(v * 255)).join(',') + ')'\"",
                         ],
                     )
-            _SvgTag("rect", x="0", y="0", width="300", height="30",
-                    classes="vtkweb-tf-color-fill",
-                    raw_attrs=['fill="url(#vtkweb-tf-color-gradient)"'])
+            _SvgTag(
+                "rect",
+                x="0",
+                y="0",
+                width="300",
+                height="30",
+                classes="vtkweb-tf-color-fill",
+                raw_attrs=['fill="url(#vtkweb-tf-color-gradient)"'],
+            )
             _SvgTag(
                 "circle",
                 v_for="(point,index) in (transfer_functions[active_transfer_function]?.color?.control_points || [])",
                 key="index",
-                cx=("point[0] * 300",), cy="15", r="7",
+                cx=("point[0] * 300",),
+                cy="15",
+                r="7",
                 classes="vtkweb-tf-color-svg-handle",
                 raw_attrs=[
                     ":fill=\"'rgb(' + point.slice(1,4).map(v => Math.round(v * 255)).join(',') + ')'\"",

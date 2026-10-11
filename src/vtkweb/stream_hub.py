@@ -164,7 +164,9 @@ class StreamHub:
         changed = False
         while True:
             with self._activity_lock:
-                event = self._activity_events.popleft() if self._activity_events else None
+                event = (
+                    self._activity_events.popleft() if self._activity_events else None
+                )
             if event is None:
                 break
             self._apply_activity(event)
@@ -215,8 +217,7 @@ class StreamHub:
             rank_state.done = True
             rank_state.details.update(event.get("details") or {})
             if all(
-                activity.ranks.get(index) is not None
-                and activity.ranks[index].done
+                activity.ranks.get(index) is not None and activity.ranks[index].done
                 for index in range(context.size)
             ):
                 activity.completed_at = time.monotonic()
@@ -274,7 +275,9 @@ class StreamHub:
             rank_states = [activity.ranks.get(rank) for rank in range(context.size)]
             complete = all(state is not None and state.done for state in rank_states)
             progresses = [
-                0.0 if state is None or state.progress is None else float(state.progress)
+                0.0
+                if state is None or state.progress is None
+                else float(state.progress)
                 for state in rank_states
             ]
             card = {
@@ -282,13 +285,19 @@ class StreamHub:
                 "view_id": activity.view_id,
                 "label": activity.label,
                 "determinate": activity.determinate,
-                "progress": 1.0 if complete else sum(progresses) / float(max(1, context.size)),
+                "progress": 1.0
+                if complete
+                else sum(progresses) / float(max(1, context.size)),
                 "progress_values": [
-                    "—" if state is None or state.progress is None else f"{100.0 * state.progress:.0f}%"
+                    "—"
+                    if state is None or state.progress is None
+                    else f"{100.0 * state.progress:.0f}%"
                     for state in rank_states
                 ],
                 "duration_values": [
-                    "—" if state is None or state.duration is None else f"{state.duration:.2f}s"
+                    "—"
+                    if state is None or state.duration is None
+                    else f"{state.duration:.2f}s"
                     for state in rank_states
                 ],
                 "elapsed": max(0.0, now - activity.first_started_at),
@@ -299,7 +308,9 @@ class StreamHub:
 
         if view_id is not None:
             target = str(view_id)
-            self._publish_message(target, {"type": "activities", "activities": by_view.get(target, [])})
+            self._publish_message(
+                target, {"type": "activities", "activities": by_view.get(target, [])}
+            )
             return
         for target, cards in by_view.items():
             self._publish_message(target, {"type": "activities", "activities": cards})
@@ -316,7 +327,9 @@ class StreamHub:
         try:
             import av
         except ImportError as exc:
-            raise RuntimeError("H.264 transport requires PyAV (pip install av).") from exc
+            raise RuntimeError(
+                "H.264 transport requires PyAV (pip install av)."
+            ) from exc
 
         try:
             codec = av.CodecContext.create("libx264", "w")
@@ -407,8 +420,9 @@ class StreamHub:
         stream.pending_clients = set(stream.clients)
         return True
 
-
-    def _record_stats(self, view_id: str, stream: _ViewStream, source_rank: int, byte_count: int) -> None:
+    def _record_stats(
+        self, view_id: str, stream: _ViewStream, source_rank: int, byte_count: int
+    ) -> None:
         rank = int(source_rank)
         stream.stats_known_ranks.add(rank)
         stream.stats_rank_frames[rank] = stream.stats_rank_frames.get(rank, 0) + 1
@@ -442,7 +456,6 @@ class StreamHub:
         stream.stats_encoded_frames = 0
         stream.stats_delivered_frames = 0
         stream.stats_bytes = 0
-
 
     def _publish_message(self, view_id: str, message: dict) -> None:
         """Send render telemetry directly over the per-view video socket.
@@ -524,7 +537,12 @@ class StreamHub:
             if (region_width, region_height) != (tile_width, tile_height):
                 raise ValueError("Tile dimensions do not match its region")
 
-        if x < 0 or y < 0 or x + tile_width > full_width or y + tile_height > full_height:
+        if (
+            x < 0
+            or y < 0
+            or x + tile_width > full_width
+            or y + tile_height > full_height
+        ):
             raise ValueError("Tile region lies outside the full framebuffer")
 
         stream = self._stream(str(view_id))
@@ -546,7 +564,9 @@ class StreamHub:
             )
             stream.frame = frame
 
-        tile_rgb = np.frombuffer(rgb, dtype=np.uint8).reshape(tile_height, tile_width, 3)
+        tile_rgb = np.frombuffer(rgb, dtype=np.uint8).reshape(
+            tile_height, tile_width, 3
+        )
         frame.rgb[y : y + tile_height, x : x + tile_width] = tile_rgb
         stream.frame_revision += 1
         self._record_stats(view_id, stream, source_rank, len(rgb))
@@ -762,28 +782,32 @@ class StreamSink:
         key = str(key)
         generation = self._generations.get(key, 0) + 1
         self._generations[key] = generation
-        self._activity_event({
-            "kind": "start",
-            "key": key,
-            "generation": generation,
-            "view_id": str(view_id),
-            "label": str(label),
-            "determinate": bool(determinate),
-            "details": dict(details or {}),
-            "started_at": started_at,
-            "rank": context.rank,
-        })
+        self._activity_event(
+            {
+                "kind": "start",
+                "key": key,
+                "generation": generation,
+                "view_id": str(view_id),
+                "label": str(label),
+                "determinate": bool(determinate),
+                "details": dict(details or {}),
+                "started_at": started_at,
+                "rank": context.rank,
+            }
+        )
         return started_at
 
     def progress(self, key: str, progress: float) -> None:
         key = str(key)
-        self._activity_event({
-            "kind": "progress",
-            "key": key,
-            "generation": self._generations.get(key, 0),
-            "progress": max(0.0, min(1.0, float(progress))),
-            "rank": context.rank,
-        })
+        self._activity_event(
+            {
+                "kind": "progress",
+                "key": key,
+                "generation": self._generations.get(key, 0),
+                "progress": max(0.0, min(1.0, float(progress))),
+                "rank": context.rank,
+            }
+        )
 
     def done(
         self,
@@ -793,14 +817,16 @@ class StreamSink:
         details: dict[str, Any] | None = None,
     ) -> None:
         key = str(key)
-        self._activity_event({
-            "kind": "done",
-            "key": key,
-            "generation": self._generations.get(key, 0),
-            "duration": max(0.0, time.monotonic() - float(started_at)),
-            "details": dict(details or {}),
-            "rank": context.rank,
-        })
+        self._activity_event(
+            {
+                "kind": "done",
+                "key": key,
+                "generation": self._generations.get(key, 0),
+                "duration": max(0.0, time.monotonic() - float(started_at)),
+                "details": dict(details or {}),
+                "rank": context.rank,
+            }
+        )
 
     def _activity_event(self, event: dict[str, Any]) -> None:
         if context.is_root:
